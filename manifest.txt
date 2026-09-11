@@ -1,12 +1,10 @@
-exported: 2026-09-11T03:30:14+02:00 on fedora-1.home by seba
+exported: 2026-09-11T03:34:11+02:00 on fedora-1.home by seba
 claude: 2.1.268 (Claude Code)
 codex:  codex-cli 0.154.0
 files:
-  ./claude/agents/claude-reviewer.md
   ./claude/agents/codex-runner.md
   ./claude/agents/implementer-hard.md
   ./claude/agents/implementer.md
-  ./claude/agents/sonnet-worker.md
   ./claude/bin/review-checkpoint
   ./claude/bin/verify
   ./claude/CLAUDE.md
@@ -18,7 +16,6 @@ files:
   ./claude/prompts/codex-review.md
   ./claude/prompts/haiku-task.md
   ./claude/settings.json
-  ./claude/skills/orchestrate/SKILL.md
   ./claude/statusline-command.sh
   ./codex/AGENTS.md
   ./codex/config.fragment.toml
@@ -47,6 +44,7 @@ files:
   ./.git/logs/refs/heads/main
   ./.git/logs/refs/remotes/origin/main
   ./.git/objects/07/f99876d9ad9774a45699002aa439e7b665df8d
+  ./.git/objects/08/af7db06e647d820be3f7acaf3107f22f72081e
   ./.git/objects/1b/cb58afc3a6b776337df1bf6205164a742cc906
   ./.git/objects/1c/3c980e7653dcde083ada9be0c10663565c0515
   ./.git/objects/1e/30dfff1c887dd8378ec5bf8b39ba09e8e22187
@@ -57,12 +55,15 @@ files:
   ./.git/objects/43/e21788cb337b7fd421515a18addaa6a006bb8e
   ./.git/objects/45/bef66c1a2f9461c7671d2488b57b2ca78a9a2d
   ./.git/objects/47/e13413587e0d6524543a5a4c25700d07c47e08
+  ./.git/objects/48/3026e1800a46f7f3c250eb370927d09ba91792
   ./.git/objects/49/0dd47ce3d7b8f3c18c4f74a671db11dac681b7
   ./.git/objects/50/73019fb6274beab9a3bcd0dd92ad4e9497e2ba
   ./.git/objects/52/e5bd0ee819533f95b6047f52c3f70d1f8c6938
   ./.git/objects/55/b41e5e23148b6b63260edfa1abb2e1c61213b1
+  ./.git/objects/5c/01473a52913378837e48f585e3835fb2fc4c55
   ./.git/objects/5d/2c1d258a9b22fcf01cfb86f03874c7855aaf8b
   ./.git/objects/5e/5eba46312a78dc63118421edfc6c357bfbe053
+  ./.git/objects/6f/728643def2184e6baa2f2bf4d87af322ed7f81
   ./.git/objects/87/74bde8b379e9ff7638ae797010eb3ba5b07880
   ./.git/objects/88/763de06b9bd808923b0862534570437d14b02e
   ./.git/objects/89/9d95d73ada56c3189e5a7844fe90d2b059cee9
