@@ -11,16 +11,18 @@ Two scripts keep the setup identical on every machine.
 
 Preferred: keep the exported directory in a private git repository.
 
+The repository already exists: `git@github.com:shrektu/claude-config-bundle.git` (private). To publish
+changes made on this machine:
+
 ```bash
 ~/.claude/bundle/export.sh
-cd ~/claude-config-bundle && git init -q && git add -A && git commit -qm "config $(date +%F)"
-git remote add origin <private-repo-url> && git push -u origin HEAD
+cd ~/claude-config-bundle && git add -A && git commit -s -m "Update config $(date +%F)" && git push
 ```
 
 On the other machine:
 
 ```bash
-git clone <private-repo-url> ~/claude-config-bundle   # or git pull when it exists
+git clone git@github.com:shrektu/claude-config-bundle.git ~/claude-config-bundle   # or git pull when it exists
 ~/claude-config-bundle/install.sh
 ```
 

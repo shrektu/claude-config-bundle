@@ -1,4 +1,4 @@
-exported: 2026-09-11T03:29:21+02:00 on fedora-1.home by seba
+exported: 2026-09-11T03:30:14+02:00 on fedora-1.home by seba
 claude: 2.1.268 (Claude Code)
 codex:  codex-cli 0.154.0
 files:
@@ -23,6 +23,67 @@ files:
   ./codex/AGENTS.md
   ./codex/config.fragment.toml
   ./export.sh
+  ./.git/COMMIT_EDITMSG
+  ./.git/config
+  ./.git/description
+  ./.git/HEAD
+  ./.git/hooks/applypatch-msg.sample
+  ./.git/hooks/commit-msg.sample
+  ./.git/hooks/fsmonitor-watchman.sample
+  ./.git/hooks/post-update.sample
+  ./.git/hooks/pre-applypatch.sample
+  ./.git/hooks/pre-commit.sample
+  ./.git/hooks/pre-merge-commit.sample
+  ./.git/hooks/prepare-commit-msg.sample
+  ./.git/hooks/pre-push.sample
+  ./.git/hooks/pre-rebase.sample
+  ./.git/hooks/pre-receive.sample
+  ./.git/hooks/push-to-checkout.sample
+  ./.git/hooks/sendemail-validate.sample
+  ./.git/hooks/update.sample
+  ./.git/index
+  ./.git/info/exclude
+  ./.git/logs/HEAD
+  ./.git/logs/refs/heads/main
+  ./.git/logs/refs/remotes/origin/main
+  ./.git/objects/07/f99876d9ad9774a45699002aa439e7b665df8d
+  ./.git/objects/1b/cb58afc3a6b776337df1bf6205164a742cc906
+  ./.git/objects/1c/3c980e7653dcde083ada9be0c10663565c0515
+  ./.git/objects/1e/30dfff1c887dd8378ec5bf8b39ba09e8e22187
+  ./.git/objects/1f/1bc3161cf9eea5e6ff87f398f6deff6439b12b
+  ./.git/objects/2a/2a1a8b414465c8edd86e2cae8f6744d45d008a
+  ./.git/objects/2f/c8306d9524c90b32837d6ca568169f0a92fc53
+  ./.git/objects/3f/6fb1cd2db4977f1cb3df889cdedbe90209f5a6
+  ./.git/objects/43/e21788cb337b7fd421515a18addaa6a006bb8e
+  ./.git/objects/45/bef66c1a2f9461c7671d2488b57b2ca78a9a2d
+  ./.git/objects/47/e13413587e0d6524543a5a4c25700d07c47e08
+  ./.git/objects/49/0dd47ce3d7b8f3c18c4f74a671db11dac681b7
+  ./.git/objects/50/73019fb6274beab9a3bcd0dd92ad4e9497e2ba
+  ./.git/objects/52/e5bd0ee819533f95b6047f52c3f70d1f8c6938
+  ./.git/objects/55/b41e5e23148b6b63260edfa1abb2e1c61213b1
+  ./.git/objects/5d/2c1d258a9b22fcf01cfb86f03874c7855aaf8b
+  ./.git/objects/5e/5eba46312a78dc63118421edfc6c357bfbe053
+  ./.git/objects/87/74bde8b379e9ff7638ae797010eb3ba5b07880
+  ./.git/objects/88/763de06b9bd808923b0862534570437d14b02e
+  ./.git/objects/89/9d95d73ada56c3189e5a7844fe90d2b059cee9
+  ./.git/objects/96/d19b1ba42a1a82af79756861dd9a22891b4647
+  ./.git/objects/9b/4ab59dd4635c68bb58e1fc69a95aba46c386ca
+  ./.git/objects/ab/cfea326b2f5148fcb50e0718a1c98475c9774f
+  ./.git/objects/ac/e5474a838b720d38b4b480f6046629a84884be
+  ./.git/objects/af/4aadfdc558d5e1b148468a76cd09d4437b4552
+  ./.git/objects/b7/fb037acc5901b27fee5d3cce98c05a326a6f8a
+  ./.git/objects/ca/ca0362f2c7c30bf9e3185a7a1342634b5d8324
+  ./.git/objects/d6/63859e02d032adfe92d2c4fc7a7191754be4d5
+  ./.git/objects/d9/deae671c79e3e42564f020943b9c42221c10e2
+  ./.git/objects/db/5c5ced2d8a770e8f226e8775480d50b836efdc
+  ./.git/objects/e5/dd0ce637c91726ffbcf81750c3aa78953ad066
+  ./.git/objects/ed/54850765782662c46e0ec65106df4c0f091403
+  ./.git/objects/ee/fb7f8e160a9706b9643a49cc4f94bdcca65e1f
+  ./.git/objects/f0/6f97e351008e2095b914a3897f53f0f4ad5b59
+  ./.git/objects/f3/9d8186edc4737387345e9da5789e22795e2971
+  ./.git/objects/fb/89ec99fc512c6a6a6207ae61152979a68b36d7
+  ./.git/refs/heads/main
+  ./.git/refs/remotes/origin/main
   ./install.sh
   ./manifest.txt
   ./README.md
