@@ -1,0 +1,8 @@
+
+[mcp_servers.codex-worker]
+command = "env"
+args = [
+    "CODEX_BIN=__CODEX_BIN__",
+    "__HOME__/.claude/mcp/codex-worker/.venv/bin/python",
+    "__HOME__/.claude/mcp/codex-worker/codex_worker.py",
+]

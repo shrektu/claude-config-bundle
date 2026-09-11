@@ -1,0 +1,28 @@
+exported: 2026-09-11T03:29:21+02:00 on fedora-1.home by seba
+claude: 2.1.268 (Claude Code)
+codex:  codex-cli 0.154.0
+files:
+  ./claude/agents/claude-reviewer.md
+  ./claude/agents/codex-runner.md
+  ./claude/agents/implementer-hard.md
+  ./claude/agents/implementer.md
+  ./claude/agents/sonnet-worker.md
+  ./claude/bin/review-checkpoint
+  ./claude/bin/verify
+  ./claude/CLAUDE.md
+  ./claude/hooks/git-guard.py
+  ./claude/hooks/git-guard-test.py
+  ./claude/mcp/codex-worker/codex_worker.py
+  ./claude/mcp/codex-worker/requirements.txt
+  ./claude/mcp-servers.json
+  ./claude/prompts/codex-review.md
+  ./claude/prompts/haiku-task.md
+  ./claude/settings.json
+  ./claude/skills/orchestrate/SKILL.md
+  ./claude/statusline-command.sh
+  ./codex/AGENTS.md
+  ./codex/config.fragment.toml
+  ./export.sh
+  ./install.sh
+  ./manifest.txt
+  ./README.md

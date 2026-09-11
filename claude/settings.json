@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "MAX_MCP_OUTPUT_TOKENS": "1000000"
+  },
+  "permissions": {
+    "allow": [
+      "mcp__codex__*",
+      "Agent(haiku-worker)",
+      "Agent(claude-reviewer)",
+      "Bash(git diff*)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Agent(implementer)",
+      "Agent(implementer-hard)",
+      "Agent(codex-runner)",
+      "mcp__codex-worker__*"
+    ],
+    "deny": [
+      "Bash(codex *)"
+    ],
+    "defaultMode": "auto"
+  },
+  "model": "claude-fable-5-1",
+  "effortLevel": "xhigh",
+  "statusLine": {
+    "type": "command",
+    "command": "bash __HOME__/.claude/statusline-command.sh"
+  },
+  "modelSettings": {
+    "claude-fable-5": {
+      "effortLevel": "xhigh"
+    },
+    "claude-fable-5-1": {
+      "effortLevel": "xhigh"
+    }
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "skipWorkflowUsageWarning": true,
+  "theme": "auto",
+  "editorMode": "normal",
+  "tui": "fullscreen",
+  "remoteControlAtStartup": true,
+  "inputNeededNotifEnabled": true,
+  "skipAutoPermissionPrompt": true,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/git-guard.py",
+            "timeout": 10,
+            "statusMessage": "git-guard"
+          }
+        ]
+      }
+    ]
+  },
+  "bashOutputMaxChars": 16000,
+  "taskOutputMaxChars": 8000
+}

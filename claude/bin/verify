@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+usage() {
+  cat <<'USAGE'
+usage: verify [-t LINES] [-n NAME] -- <command> [args...]
+Runs the command, keeps the full output in $CLAUDE_VERIFY_LOG_DIR (default ~/.cache/claude-verify)
+and prints only PASS/FAIL, exit code, timing and the error section. Exits with the command's code.
+One argument is run through `bash -c`; several arguments are executed directly.
+USAGE
+}
+set -uo pipefail
+TAIL=40
+NAME=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--tail) TAIL=$2; shift 2 ;;
+    -n|--name) NAME=$2; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+[ $# -gt 0 ] || { usage >&2; exit 64; }
+case $TAIL in ''|*[!0-9]*) TAIL=40 ;; esac
+[ "$TAIL" -ge 2 ] || TAIL=2
+
+LOG_DIR=${CLAUDE_VERIFY_LOG_DIR:-$HOME/.cache/claude-verify}
+mkdir -p "$LOG_DIR"
+find "$LOG_DIR" -name '*.log' -mtime +7 -delete 2>/dev/null
+if [ $# -eq 1 ]; then CMD_STR=$1; else CMD_STR=$(printf '%q ' "$@"); CMD_STR=${CMD_STR% }; fi
+SLUG=$(printf '%s' "${NAME:-$CMD_STR}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40)
+LOG=$LOG_DIR/$(date +%Y%m%d-%H%M%S)-$SLUG-$$.log
+START=$(date +%s)
+if [ $# -eq 1 ]; then bash -c "$1" >"$LOG" 2>&1; else "$@" >"$LOG" 2>&1; fi
+RC=$?
+ELAPSED=$(( $(date +%s) - START ))
+LINES=$(wc -l <"$LOG")
+STATUS=PASS; [ "$RC" -eq 0 ] || STATUS=FAIL
+echo "VERIFY $STATUS exit=$RC time=${ELAPSED}s lines=$LINES cmd: $CMD_STR"
+echo "log: $LOG"
+python3 - "$LOG" "$TAIL" "$RC" <<'PY'
+import re, sys
+log, tail, rc = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+lines = open(log, errors="replace").read().splitlines()
+SUMMARY = re.compile(r"^=+ .*(passed|failed|error|skipped|no tests ran).* =+$|^Tests:\s|^Test Suites:|^test result:|^(ok|FAIL)\s+\S+\s+[\d.]+s|^\d+ (passing|failing)|^Ran \d+ tests?|^(OK|FAILED)( \(.*\))?$|^Build succeeded|^BUILD (SUCCESSFUL|FAILED)")
+ERROR = re.compile(r"(^|[\s:\[])(error|Error|ERROR)(\[|:|\s)|Traceback \(most recent|^FAILED |^ERROR |panicked at|AssertionError|Exception:|^E\s{2,}|fatal:|^\s*npm ERR!")
+
+def emit(title, chunk):
+    if chunk:
+        print(f"--- {title}")
+        print("\n".join(chunk))
+
+def section(header_re, limit):
+    for i, line in enumerate(lines):
+        if re.match(header_re, line):
+            return lines[i:i + limit]
+    return []
+
+summary = [l for l in lines if SUMMARY.search(l)]
+if rc == 0:
+    emit("summary", summary[-3:])
+    sys.exit(0)
+budget = 2 * tail
+short = section(r"^=+ short test summary info =+$", tail)
+emit("short test summary", short)
+first_fail = section(r"^=+ (FAILURES|ERRORS) =+$", max(0, budget - len(short)))
+emit("first failure block", first_fail)
+if not short and not first_fail:
+    errs = [f"{i + 1}: {l}" for i, l in enumerate(lines) if ERROR.search(l)]
+    if len(errs) > tail:
+        half = max(1, tail // 2)
+        errs = errs[:half] + [f"... {len(errs) - 2 * half} more error lines in the log ..."] + errs[-half:]
+    emit("error lines (log line: text)", errs)
+    last = lines[-max(1, min(tail, 25)):]
+    emit(f"last {len(last)} lines", last)
+emit("summary", summary[-3:])
+PY
+exit "$RC"

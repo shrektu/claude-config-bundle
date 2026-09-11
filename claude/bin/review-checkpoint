@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+usage() {
+  cat <<'USAGE'
+usage: review-checkpoint save          -> prints a SHA snapshotting the tracked working tree (HEAD when clean)
+       review-checkpoint stat <SHA>    -> files changed since that snapshot + untracked files
+       review-checkpoint diff <SHA>    -> the same plus the patch
+       review-checkpoint size          -> change size vs HEAD (staged + unstaged + untracked) for the review gate
+Snapshots come from `git stash create`: worktree, index content and refs stay as they are (git may refresh
+index stat data). The snapshot is an unreachable commit, kept until `git gc` prunes it (2 weeks by default).
+USAGE
+}
+set -euo pipefail
+cmd=${1:-}
+case "$cmd" in
+  save)
+    git rev-parse --is-inside-work-tree >/dev/null
+    sha=$(git stash create)
+    [ -n "$sha" ] || sha=$(git rev-parse HEAD)
+    echo "$sha" ;;
+  stat|diff)
+    sha=${2:-}
+    [ -n "$sha" ] || { usage >&2; exit 64; }
+    git cat-file -e "$sha^{commit}" 2>/dev/null || { echo "review-checkpoint: unknown checkpoint $sha" >&2; exit 2; }
+    echo "## changed since checkpoint ${sha:0:12}"
+    git --no-pager diff --stat "$sha"
+    untracked=$(git -c core.quotePath=false ls-files --others --exclude-standard)
+    if [ -n "$untracked" ]; then
+      echo "## untracked files (not in the patch, read them explicitly)"
+      echo "$untracked"
+    fi
+    if [ "$cmd" = diff ]; then
+      echo "## patch"
+      git --no-pager diff "$sha"
+    fi ;;
+  size)
+    git rev-parse --is-inside-work-tree >/dev/null
+    base=$(git rev-parse --verify -q HEAD || git hash-object -t tree /dev/null)
+    numstat=$(mktemp)
+    others=$(mktemp)
+    trap 'rm -f "$numstat" "$others"' EXIT
+    git --no-pager diff --numstat "$base" > "$numstat"
+    git ls-files --others --exclude-standard -z > "$others"
+    python3 - "$numstat" "$others" <<'PY'
+import sys
+added = deleted = files = 0
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 3:
+        continue
+    files += 1
+    if parts[0] != "-":
+        added += int(parts[0]); deleted += int(parts[1])
+untracked = [p for p in open(sys.argv[2], "rb").read().split(b"\0") if p]
+for path in untracked:
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        continue
+    if b"\0" not in data:
+        added += data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+print(f"files={files + len(untracked)} lines={added + deleted} added={added} deleted={deleted} untracked_files={len(untracked)}")
+PY
+    ;;
+  *) usage >&2; exit 64 ;;
+esac

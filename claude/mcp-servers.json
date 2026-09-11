@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "codex-worker": {
+      "type": "stdio",
+      "command": "env",
+      "args": [
+        "CODEX_BIN=__CODEX_BIN__",
+        "__HOME__/.claude/mcp/codex-worker/.venv/bin/python",
+        "__HOME__/.claude/mcp/codex-worker/codex_worker.py"
+      ],
+      "env": {},
+      "timeout": 5400000
+    }
+  }
+}
