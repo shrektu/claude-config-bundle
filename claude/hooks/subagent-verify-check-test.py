@@ -199,6 +199,14 @@ with tempfile.TemporaryDirectory() as base:
         rc, out, err = run(payload_for(base, dirty, agent_id=f"other-{other}", agent_type=other))
         check(f"other agent_type[{other}]", rc == 0 and not out and not err, f"rc={rc} err={err[:120]!r}")
 
+    rc, out, err = run(payload_for(base, dirty, agent_id="commander-dirty", agent_type="commander-opus"))
+    check("commander-opus edit without verify blocks", rc == 2 and REASON_MARK in err and out == "",
+          f"rc={rc} out={out[:80]!r} err={err[:160]!r}")
+    rc, out, err = run(payload_for(base, allow_cases["edit then verify"], agent_id="commander-verified",
+                                    agent_type="commander-opus"))
+    check("commander-opus edit then verify allows", rc == 0 and not out and not err,
+          f"rc={rc} out={out[:80]!r} err={err[:160]!r}")
+
     rc, out, err = run(payload_for(base, dirty, agent_id="fallback-agent", scratchpad_dir="/nonexistent-dir-xyz"))
     check("missing scratchpad_dir still blocks once", rc == 2 and REASON_MARK in err, f"rc={rc} err={err[:120]!r}")
     try:
@@ -226,7 +234,7 @@ with tempfile.TemporaryDirectory() as base:
         check("garbage", done.returncode == 0 and not done.stdout and not done.stderr,
               f"{raw[:50]!r} -> rc={done.returncode} out={done.stdout[:60]!r} err={done.stderr[-120:]!r}")
 
-total = len(block_cases) + len(allow_cases) + len(garbage) + 9
+total = len(block_cases) + len(allow_cases) + len(garbage) + 11
 print(f"hook: {hook}\nblock cases: {len(block_cases)}, allow cases: {len(allow_cases)}, "
       f"garbage: {len(garbage)}, slowest run: {slowest * 1000:.0f} ms, FAILURES: {bad}")
 print("FAIL" if bad else f"PASS {total}/{total}")

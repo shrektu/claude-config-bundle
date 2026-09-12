@@ -13,7 +13,7 @@ exact toolchain versions pinned in the repo.
   was 469k because Fable compacts at ~967k by default. Every change must reduce orchestrator context or
   turns, or raise quality at ~zero token cost.
 - Bundle repo (`~/claude-config-bundle`) is the source of truth; files under `claude/` mirror `~/.claude`
-  with `__HOME__` / `__CODEX_BIN__` placeholders rendered by `install.sh`. No hardcoded `/home/seba`.
+  with `__HOME__` / `__CODEX_BIN__` placeholders rendered by `install.sh`. No hardcoded home path.
 - Branch rule, commit rules and git-guard stay as they are (only enforced more, not changed).
 
 ## 1. Task classes and routing (replaces Tiny/Normal/Hard + S/M/L/XL)
@@ -154,7 +154,7 @@ lines: tokens main vs subagent (read/create/output, input-equivalent share), med
 turns > 200k, tool-result tokens by tool, raw vs verify test runs, Read calls without limit > 3k tok,
 Agent spawns by type, codex review calls. Baseline now, re-run after 10 tasks.
 
-## Files (repo `/home/seba/claude-config-bundle`, branch `feature/superworkflow`)
+## Files (repo `__HOME__/claude-config-bundle`, branch `feature/superworkflow`)
 claude/hooks/{git-policy,delegation-guard,repo-facts,subagent-verify-check}.py + `*-test.py`;
 claude/hooks/verify-guard.py (remove hardcoded home; the suggested rewrite drops ONLY a trailing pure
 display filter — a final segment whose command is `tail` or `head` — so the verify log keeps the full
@@ -170,7 +170,7 @@ claude/templates/rules-standards.md; claude/bin/usage-report; retire.json; insta
    without force) — the one existing exception is git-guard's unconditional force-push denial
    (`push -f/--force`, also with `-n`), which is unchanged by design.
 1. Every hook matrix passes via `~/.claude/bin/verify`; each hook < 100 ms on a typical input; garbage input silent.
-2. `grep -rn "/home/seba" claude/ codex/ install.sh export.sh` → empty.
+2. `grep -rn "/home/<user>" claude/ codex/ install.sh export.sh` → empty.
 3. `HOME=$(mktemp -d) ./install.sh` on a fresh temp home installs every file, renders paths, writes a valid
    settings.json with all hook events; re-running is a no-op; on a home that has the old settings it
    removes the retired entries and does not duplicate the Bash hook group.
@@ -227,3 +227,16 @@ crates.io sources; other registries by host prefix, else `unverified`).
 Codex's own verdict: "both blockers are in the implementation details of parsing, not architecture".
 Plan stage closed after 4 rounds (16 findings, all accepted); remaining parsing detail is covered by the
 hook test matrices and by the code review rounds, where Codex reviews the real parser.
+
+## v2.1 — command handoff (2026-09-12)
+Class S/M is now handed over end to end to a new `commander-opus` agent (Opus, xhigh) after the
+orchestrator writes the plan: it implements S itself, delegates M to `implementer`, verifies, reviews,
+runs the Codex gate via `codex-runner`, commits on the work branch and reports. The orchestrator only
+relays that report — no second review — because commander-opus's own verify/review pass plus the
+git-policy and subagent-verify-check hooks are already the evidence. L/XL are unaffected: the
+orchestrator stays in command as before.
+A session-model switch (`set_session_model` to Opus for the S/M portion, back to Fable after) was
+rejected: the app refuses `set_session_model` for the session's own current turn, so Fable cannot hand
+its own turn to Opus mid-task and reclaim it later. A subagent avoids that restriction — Claude Code
+allows three layers of subagent spawning, so `commander-opus` → `implementer` → `Explore` stays in
+bounds, and `delegation-guard`/`subagent-verify-check` already gate implementer-shaped agents generically.

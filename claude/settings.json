@@ -9,6 +9,7 @@
       "Agent(implementer)",
       "Agent(implementer-hard)",
       "Agent(implementer-opus)",
+      "Agent(commander-opus)",
       "Agent(codex-runner)",
       "mcp__codex-worker__*"
     ],

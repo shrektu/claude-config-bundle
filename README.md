@@ -36,12 +36,17 @@ After changing anything in `~/.claude` on either machine, run `export.sh` there,
 `CLAUDE.md` is the orchestrator core: it classifies the task, delegates, supervises and reviews. Rules
 that can be checked mechanically live in hooks; situational knowledge lives in skills that load on demand.
 
-| Class | Definition | Implementer | Codex |
-|---|---|---|---|
-| S | ≤ ~30 lines, ≤ 2 files, no new module, no risk area | the orchestrator itself | no |
-| M | not S, not L, not XL | `implementer` (Sonnet high) | code review at ≥ 200 lines, > 3 files, or on request |
-| L | architecture understanding, several modules, hard bug, perf, > ~300 lines | `implementer-hard` (Sonnet xhigh) or `implementer-opus` | code review every round; plan review if an architectural question is open |
-| XL | any risk area: migration, concurrency, protocol/firmware, data shape or public API, multi-repo, auth/secrets/PII/payments, data deletion | `implementer-hard` / `implementer-opus` | plan review (`mode=plan`, xhigh), code review every round, final audit |
+| Class | Definition | Implementer | Command | Codex |
+|---|---|---|---|---|
+| S | ≤ ~30 lines, ≤ 2 files, no new module, no risk area | the orchestrator itself | `commander-opus` | no |
+| M | not S, not L, not XL | `implementer` (Sonnet high) | `commander-opus` | code review at ≥ 200 lines, > 3 files, or on request |
+| L | architecture understanding, several modules, hard bug, perf, > ~300 lines | `implementer-hard` (Sonnet xhigh) or `implementer-opus` | the orchestrator | code review every round; plan review if an architectural question is open |
+| XL | any risk area: migration, concurrency, protocol/firmware, data shape or public API, multi-repo, auth/secrets/PII/payments, data deletion | `implementer-hard` / `implementer-opus` | the orchestrator | plan review (`mode=plan`, xhigh), code review every round, final audit |
+
+Class S/M is handed over end to end to `commander-opus` (Opus xhigh) after the orchestrator's plan: it
+implements S itself, delegates M to `implementer`, verifies, reviews, runs the Codex gate, commits on the
+work branch and reports. The orchestrator relays that report without a second review. L/XL stay under the
+orchestrator's own command as before.
 
 Hooks (`claude/hooks/`, registered in `settings.json`): `git-guard.py` (destructive git),
 `git-policy.py` (branch rule + commit message format), `verify-guard.py` (bare test/lint/build),

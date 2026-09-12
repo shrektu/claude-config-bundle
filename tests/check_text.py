@@ -41,6 +41,10 @@ HOOK_NAMES = (
 )
 SKILL_NAMES = ("delegate", "review", "commit", "pr-description", "repo-standards")
 IMPLEMENTER_SKILL = "repo-standards"
+COMMANDER_AGENT = "commander-opus"
+COMMANDER_MODEL = "opus"
+COMMANDER_EFFORT = "xhigh"
+COMMANDER_SKILLS = ("delegate", "review", "repo-standards", "commit")
 REVERT_SENTENCE = (
     "Never revert or discard changes you did not make (checkout/restore/stash/reset/clean are blocked "
     "by a hook); if you think a revert is needed, stop and report."
@@ -81,6 +85,7 @@ def check_claude_md() -> None:
         check(hook in text, f"CLAUDE.md does not mention the hook {hook}")
     for skill in SKILL_NAMES:
         check(skill in text, f"CLAUDE.md does not mention the skill {skill}")
+    check(COMMANDER_AGENT in text, "CLAUDE.md does not mention commander-opus")
 
 
 def check_skills() -> None:
@@ -116,7 +121,7 @@ def check_agents() -> None:
     agents = sorted(AGENTS_DIR.glob("*.md"))
     check(bool(agents), "agents/ is empty")
     names = {p.stem for p in agents}
-    for expected in ("implementer", "implementer-hard", "implementer-opus", "codex-runner"):
+    for expected in ("implementer", "implementer-hard", "implementer-opus", "codex-runner", COMMANDER_AGENT):
         check(expected in names, f"agents/{expected}.md missing")
     for path in agents:
         fields = frontmatter_of(path)
@@ -128,6 +133,14 @@ def check_agents() -> None:
                 IMPLEMENTER_SKILL in skills,
                 f"{path.name}: skills: does not preload {IMPLEMENTER_SKILL} (got {skills!r})",
             )
+    commander_path = AGENTS_DIR / f"{COMMANDER_AGENT}.md"
+    if commander_path.is_file():
+        fields = frontmatter_of(commander_path)
+        check(fields.get("model") == COMMANDER_MODEL, f"{COMMANDER_AGENT}: model is {fields.get('model')!r}")
+        check(fields.get("effort") == COMMANDER_EFFORT, f"{COMMANDER_AGENT}: effort is {fields.get('effort')!r}")
+        skills = fields.get("skills", "")
+        for skill in COMMANDER_SKILLS:
+            check(skill in skills, f"{COMMANDER_AGENT}: skills: does not include {skill} (got {skills!r})")
 
 
 def check_codex_worker() -> None:

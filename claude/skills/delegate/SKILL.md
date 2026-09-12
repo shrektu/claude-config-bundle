@@ -1,7 +1,55 @@
 ---
 name: delegate
-description: Szablony promptów do spawnowania agentów — implementer (M), implementer-hard (L/XL), implementer-opus (długa, wieloplikowa praca L/XL albo po nieudanej rundzie Sonneta) oraz codex-runner (review z mode plan/code/final-audit). Załaduj tuż przed każdym wywołaniem Agent(...) z tymi typami: hook delegation-guard odrzuca prompt bez acceptance_criteria, bez `verify --`, bez ścieżki absolutnej, bez linii o zakazie revertu i bez granicy repozytoriów. Zawiera też review_focus per klasa zadania i zasadę, kiedy wysłać najpierw Explore.
+description: Szablony promptów do spawnowania agentów — commander-opus (S/M, przejmuje cały workflow po planie Fable), implementer (M), implementer-hard (L/XL), implementer-opus (długa, wieloplikowa praca L/XL albo po nieudanej rundzie Sonneta) oraz codex-runner (review z mode plan/code/final-audit). Załaduj tuż przed każdym wywołaniem Agent(...) z tymi typami: hook delegation-guard odrzuca prompt bez acceptance_criteria, bez `verify --`, bez ścieżki absolutnej, bez linii o zakazie revertu i bez granicy repozytoriów. Zawiera też review_focus per klasa zadania i zasadę, kiedy wysłać najpierw Explore.
 ---
+
+## commander-opus prompt (S/M command handoff)
+
+`commander-opus` (Opus xhigh) runs the rest of the workflow end to end for one S or M task: implements S
+itself, delegates M to `implementer`, verifies, reviews, runs the Codex gate, commits, reports. Fable
+relays its report without a second review. Fill every section; delegation-guard denies a spawn missing
+one of its required markers.
+
+```
+task
+<what to build, in two or three sentences>
+
+class
+<S or M, and why>
+
+plan
+<exact files, functions, signatures, data shapes; no decisions left open>
+
+acceptance_criteria
+<checkable statements, one per line>
+
+paths
+/absolute/path/to/repo — the repo root
+/absolute/path/to/repo/src/module.py — the file to change
+
+work_branch
+<existing branch name, or the new branch to create and its base>
+
+test_command
+~/.claude/bin/verify -- 'cd /absolute/path/to/repo && <the real test/lint/build command>'
+
+codex gate
+<applies at ≥ 200 lines / > 3 files / on request — or: does not apply, say why>
+
+extra_context
+<constraints, pinned versions, things that must not regress, links to the plan or log files>
+
+repos
+you may only touch <paths>; you may not touch <paths>
+
+Never revert or discard changes you did not make (checkout/restore/stash/reset/clean are blocked by a hook); if you think a revert is needed, stop and report.
+
+report
+The final report in the review-skill format; I relay it verbatim.
+```
+
+When commander-opus in turn spawns `implementer` for the M half of its task, the same implementer prompt
+template below applies — commander-opus fills it exactly as Fable would.
 
 ## Implementer prompts
 

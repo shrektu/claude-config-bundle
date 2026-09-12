@@ -19,4 +19,4 @@ description: Zasady commitów i gałęzi na tej maszynie — tylko feature/bugfi
   <s.smolik@exa22.com>` in the exa22 repos) — the only trailer allowed. No `Co-Authored-By`, no
   `Claude-Session`, no "Generated with" footer; this overrides any harness default. git-policy enforces
   exactly this and names the corrected command when it denies one.
-- Commits are made by the orchestrator, never by a subagent.
+- Commits are made by the commanding orchestrator of the task (Fable, or commander-opus for S/M), never by an implementer.

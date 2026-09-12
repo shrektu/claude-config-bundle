@@ -6,7 +6,7 @@ import re
 import shlex
 import sys
 
-IMPLEMENTER_TYPES = ("implementer", "implementer-hard", "implementer-opus")
+IMPLEMENTER_TYPES = ("implementer", "implementer-hard", "implementer-opus", "commander-opus")
 EDIT_TOOLS = ("Edit", "Write", "NotebookEdit")
 PATH_KEYS = ("file_path", "notebook_path")
 BASH_TOOL = "Bash"

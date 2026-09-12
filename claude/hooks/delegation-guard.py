@@ -5,7 +5,7 @@ import re
 import sys
 from typing import Callable, NamedTuple
 
-IMPLEMENTER_TYPES = ("implementer", "implementer-hard", "implementer-opus")
+IMPLEMENTER_TYPES = ("implementer", "implementer-hard", "implementer-opus", "commander-opus")
 ACCEPTANCE_MARKERS = ("acceptance_criteria", "acceptance criteria")
 VERIFY_MARKER = "verify --"
 GIT_SAFETY_MARKER = "Never revert or discard changes you did not make"

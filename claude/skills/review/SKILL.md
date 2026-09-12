@@ -53,6 +53,12 @@ to the user — never silently change the design. Findings about style preferenc
 4. 3 rounds without progress on the same finding → STOP. Report **Zablokowane** with the blocker, the
    evidence gathered and the decision needed. Never declare the task done just to end the loop.
 
+## Command handoff (S/M)
+
+When a task was handed to `commander-opus`, it runs this whole skill itself — its own checklist, the
+Codex gate, adjudication, round mechanics, the commit, the final report. Fable relays that report to the
+user verbatim and does not add a second review on top of it.
+
 ## Final report
 
 One status, then the details:

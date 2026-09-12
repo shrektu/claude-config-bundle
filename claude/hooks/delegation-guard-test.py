@@ -34,6 +34,8 @@ deny = [
     {"subagent_type": "implementer-hard", "prompt": without("acceptance_criteria", "goals")
                                                     .replace(GIT_SAFETY, "do not revert things")},
     {"subagent_type": "implementer-opus", "prompt": ""},
+    {"subagent_type": "commander-opus", "prompt": "just fix the bug please"},
+    {"subagent_type": "commander-opus", "prompt": without("acceptance_criteria: the matrix passes.\n")},
     {"subagent_type": "implementer", "prompt": "acceptance criteria: done. verify -- pytest. /abs/path ok."},
     {"subagent_type": "implementer", "prompt": FULL.replace("acceptance", "accept")
                                                    .replace("verify --", "verify")},
@@ -45,6 +47,7 @@ allow = [
     {"subagent_type": "implementer", "prompt": FULL},
     {"subagent_type": "implementer-hard", "prompt": FULL},
     {"subagent_type": "implementer-opus", "prompt": FULL},
+    {"subagent_type": "commander-opus", "prompt": FULL},
     {"subagent_type": "implementer", "prompt": FULL.replace("acceptance_criteria", "Acceptance Criteria")},
     {"subagent_type": "implementer", "prompt": FULL.replace("you may only touch", "you must not touch")},
     {"subagent_type": "implementer", "prompt": FULL.replace("you may only touch", "do not modify anything "
