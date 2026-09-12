@@ -3,8 +3,9 @@ usage() {
   cat <<'USAGE'
 usage: export.sh [OUT_DIR]      (default: ~/claude-config-bundle; also writes OUT_DIR.tar.gz)
 Packs the portable Claude Code + Codex setup of this machine: CLAUDE.md, settings.json (without autoMode),
-agents, skills, prompts, bin, hooks, the codex-worker MCP server, statusline, Codex AGENTS.md and the
-codex-worker entries for ~/.claude.json and ~/.codex/config.toml. Paths are replaced by __HOME__ and
+agents, skills, prompts, templates, bin, hooks, the codex-worker MCP server, statusline, Codex AGENTS.md and the
+codex-worker entries for ~/.claude.json and ~/.codex/config.toml, plus retire.json so the retirement
+list travels with the bundle. Paths are replaced by __HOME__ and
 __CODEX_BIN__ so install.sh can render them on any machine. Credentials, sessions, memory and caches stay out.
 USAGE
 }
@@ -16,7 +17,7 @@ CODEX_BIN=$(command -v codex || true)
 mkdir -p "$OUT"
 find "$OUT" -mindepth 1 -maxdepth 1 ! -name .git ! -name .gitignore -exec rm -rf {} +
 mkdir -p "$OUT/claude/mcp/codex-worker" "$OUT/codex"
-for d in agents skills prompts bin hooks; do
+for d in agents skills prompts templates bin hooks; do
   [ -d "$HOME/.claude/$d" ] && cp -a "$HOME/.claude/$d" "$OUT/claude/"
 done
 cp "$HOME/.claude/CLAUDE.md" "$HOME/.claude/statusline-command.sh" "$OUT/claude/"
@@ -60,11 +61,12 @@ find "$OUT" -type f \( -name '*.md' -o -name '*.json' -o -name '*.sh' -o -name '
   | xargs -0 sed -i -e "s#${CODEX_BIN:-/nonexistent}#__CODEX_BIN__#g" -e "s#$HOME#__HOME__#g"
 find "$OUT" -name '__pycache__' -type d -prune -exec rm -rf {} +
 cp "$HERE/install.sh" "$HERE/export.sh" "$HERE/README.md" "$OUT/"
+if [ -f "$HERE/retire.json" ]; then cp "$HERE/retire.json" "$OUT/"; fi
 {
   echo "exported: $(date -Is) on $(hostname) by $USER"
   echo "claude: $(claude --version 2>/dev/null || echo unknown)"
   echo "codex:  $(codex --version 2>/dev/null || echo unknown)"
-  echo "files:"; (cd "$OUT" && find . -type f | sort | sed 's/^/  /')
+  echo "files:"; (cd "$OUT" && find . -path ./.git -prune -o -type f -print | sort | sed 's/^/  /')
 } > "$OUT/manifest.txt"
 if grep -rIl "$HOME" "$OUT" >/dev/null 2>&1; then echo "WARNING: unrendered home paths remain:"; grep -rIl "$HOME" "$OUT"; fi
 tar --exclude=.git -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"

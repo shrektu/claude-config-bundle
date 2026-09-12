@@ -1,18 +1,15 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "env": {
-    "MAX_MCP_OUTPUT_TOKENS": "1000000"
-  },
+  "env": {},
   "permissions": {
     "allow": [
-      "mcp__codex__*",
-      "Agent(haiku-worker)",
-      "Agent(claude-reviewer)",
       "Bash(git diff*)",
       "Bash(git status*)",
       "Bash(git log*)",
       "Agent(implementer)",
       "Agent(implementer-hard)",
+      "Agent(implementer-opus)",
+      "Agent(commander-opus)",
       "Agent(codex-runner)",
       "mcp__codex-worker__*"
     ],
@@ -22,17 +19,17 @@
     "defaultMode": "auto"
   },
   "model": "claude-fable-5-1",
-  "effortLevel": "xhigh",
+  "effortLevel": "high",
   "statusLine": {
     "type": "command",
     "command": "bash __HOME__/.claude/statusline-command.sh"
   },
   "modelSettings": {
     "claude-fable-5": {
-      "effortLevel": "xhigh"
+      "effortLevel": "high"
     },
     "claude-fable-5-1": {
-      "effortLevel": "xhigh"
+      "effortLevel": "high"
     }
   },
   "skipDangerousModePermissionPrompt": true,
@@ -53,11 +50,71 @@
             "command": "python3 __HOME__/.claude/hooks/git-guard.py",
             "timeout": 10,
             "statusMessage": "git-guard"
+          },
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/verify-guard.py",
+            "timeout": 10,
+            "statusMessage": "verify-guard"
+          },
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/git-policy.py",
+            "timeout": 10,
+            "statusMessage": "git-policy"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/read-guard.py",
+            "timeout": 10,
+            "statusMessage": "read-guard"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/delegation-guard.py",
+            "timeout": 10,
+            "statusMessage": "delegation-guard"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/bin/repo-facts",
+            "timeout": 10,
+            "statusMessage": "repo-facts"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/subagent-verify-check.py",
+            "timeout": 10,
+            "statusMessage": "subagent-verify-check"
           }
         ]
       }
     ]
   },
-  "bashOutputMaxChars": 16000,
+  "autoCompactWindow": "300k",
+  "bashOutputMaxChars": 12000,
   "taskOutputMaxChars": 8000
 }

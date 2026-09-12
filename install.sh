@@ -3,8 +3,11 @@ usage() {
   cat <<'USAGE'
 usage: ./install.sh
 Applies this bundle to the current machine. Idempotent: unchanged files are skipped, changed files are backed
-up to ~/.claude/backups/bundle-<stamp>/ before being replaced. settings.json is MERGED (bundle wins for
-workflow keys, this machine keeps env and autoMode, allow/deny lists and hooks are unioned). ~/.claude.json
+up to ~/.claude/backups/bundle-<stamp>/ before being replaced. The bundle's own install.sh, export.sh,
+README.md and retire.json are copied to ~/.claude/bundle/ verbatim, so their __HOME__ placeholders survive. retire.json is processed first (retired files
+and settings entries are backed up and removed). settings.json is MERGED (bundle wins for workflow keys, this
+machine keeps env and autoMode, allow/deny lists are unioned, hooks are replaced per event+matcher so a hook
+is never registered twice; local-only matchers stay). ~/.claude.json
 gets the codex-worker MCP server, ~/.codex/config.toml gets the codex-worker block appended if missing.
 Run it from a normal terminal, not from inside a Claude Code session.
 USAGE
@@ -38,10 +41,21 @@ install_file() {
   CHANGED=$((CHANGED + 1))
 }
 
+install_raw() {
+  local src=$1 dst=$2 mode=${3:-644}
+  if [ -e "$dst" ] && cmp -s "$src" "$dst"; then return 0; fi
+  backup "$dst"
+  mkdir -p "$(dirname "$dst")"
+  cp "$src" "$dst"
+  chmod "$mode" "$dst"
+  echo "updated: $dst"
+  CHANGED=$((CHANGED + 1))
+}
+
 mkdir -p "$HOME/.claude/backups" "$HOME/.codex"
 install_file "$HERE/claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
 install_file "$HERE/claude/statusline-command.sh" "$HOME/.claude/statusline-command.sh" 755
-for d in agents skills prompts; do
+for d in agents skills prompts templates; do
   [ -d "$HERE/claude/$d" ] || continue
   while IFS= read -r -d '' f; do install_file "$f" "$HOME/.claude/$d/${f#"$HERE"/claude/$d/}"; done < <(find "$HERE/claude/$d" -type f -print0)
 done
@@ -53,9 +67,72 @@ install_file "$HERE/claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/
 install_file "$HERE/claude/mcp/codex-worker/requirements.txt" "$HOME/.claude/mcp/codex-worker/requirements.txt"
 printf 'CODEX_BIN=%s\n' "$CODEX_BIN" > "$HOME/.claude/mcp/codex-worker/.env"
 install_file "$HERE/codex/AGENTS.md" "$HOME/.codex/AGENTS.md"
-for f in export.sh install.sh README.md; do
-  [ -f "$HERE/$f" ] && install_file "$HERE/$f" "$HOME/.claude/bundle/$f" "$([ "${f##*.}" = sh ] && echo 755 || echo 644)"
+for f in export.sh install.sh README.md retire.json; do
+  [ -f "$HERE/$f" ] || continue
+  install_raw "$HERE/$f" "$HOME/.claude/bundle/$f" "$([ "${f##*.}" = sh ] && echo 755 || echo 644)"
 done
+
+RETIRE=$HERE/retire.json
+if [ -f "$RETIRE" ]; then
+  python3 - "$RETIRE" "$HOME/.claude" "$BACKUP" "$HOME/.claude/settings.json" <<'PY'
+import json, os, shutil, sys
+
+spec = json.load(open(sys.argv[1]))
+claude_dir, backup, settings_path = sys.argv[2], sys.argv[3], sys.argv[4]
+home = os.path.dirname(claude_dir)
+
+
+def keep_path(path):
+    dest = os.path.join(backup, os.path.relpath(path, home))
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    return dest
+
+
+def keep_copy(path):
+    dest = keep_path(path)
+    if os.path.isdir(path):
+        shutil.copytree(path, dest, dirs_exist_ok=True)
+    else:
+        shutil.copy2(path, dest)
+
+
+for relative in spec.get("files", []):
+    path = os.path.join(claude_dir, relative)
+    if not os.path.exists(path):
+        continue
+    keep_copy(path)
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    else:
+        os.remove(path)
+    print(f"retired: {path}")
+
+if not os.path.exists(settings_path):
+    raise SystemExit(0)
+settings = json.load(open(settings_path))
+dropped = []
+for dotted, names in spec.get("settings", {}).items():
+    node = settings
+    for part in dotted.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+        if node is None:
+            break
+    if isinstance(node, dict):
+        for name in names:
+            if node.pop(name, None) is not None:
+                dropped.append(f"{dotted}.{name}")
+    elif isinstance(node, list):
+        for name in names:
+            while name in node:
+                node.remove(name)
+                dropped.append(f"{dotted}[{name}]")
+if dropped:
+    shutil.copy2(settings_path, keep_path(settings_path) + ".pre-retire")
+    json.dump(settings, open(settings_path, "w"), indent=2, ensure_ascii=False)
+    open(settings_path, "a").write("\n")
+    print("retired settings entries: " + ", ".join(dropped))
+PY
+fi
 
 VENV=$HOME/.claude/mcp/codex-worker/.venv
 REQ=$HOME/.claude/mcp/codex-worker/requirements.txt
@@ -92,8 +169,10 @@ for key, value in bundle.items():
     elif key == "hooks":
         hooks = {k: list(v) for k, v in local.get("hooks", {}).items()}
         for event, entries in value.items():
-            seen = {json.dumps(e, sort_keys=True) for e in hooks.get(event, [])}
-            hooks.setdefault(event, []).extend(e for e in entries if json.dumps(e, sort_keys=True) not in seen)
+            taken = {e.get("matcher") for e in entries if isinstance(e, dict)}
+            local_only = [e for e in hooks.get(event, [])
+                          if not isinstance(e, dict) or e.get("matcher") not in taken]
+            hooks[event] = list(entries) + local_only
         merged["hooks"] = hooks
     elif key == "autoMode":
         merged.setdefault("autoMode", value)
@@ -149,5 +228,7 @@ echo "done. files changed: $CHANGED$( [ -d "$BACKUP" ] && echo "; backups in $BA
 echo "next:"
 echo "  - restart Claude Code (agents, hooks and MCP servers load at session start)"
 echo "  - claude mcp list            -> codex-worker must show Connected"
-echo "  - python3 ~/.claude/hooks/git-guard-test.py"
+echo '  - for t in git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
+echo "  - bash ~/.claude/bin/verify-test.sh"
+echo "  - ~/.claude/bin/repo-facts            -> toolchain facts of the current repo (also the SessionStart hook)"
 echo "  - claude login / codex login if this machine is fresh; set autoMode.environment for this machine's repos"
