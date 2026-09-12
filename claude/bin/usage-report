@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Token/context baseline from the local Claude Code transcripts."""
+import argparse
+import collections
+import glob
+import json
+import os
+import re
+import time
+from dataclasses import dataclass, field
+
+PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+SUBAGENT_MARKER = "/subagents/"
+MEMORY_MARKER = "/memory/"
+CHARS_PER_TOKEN = 4
+SECONDS_PER_DAY = 86400
+
+WEIGHT_INPUT = 1.0
+WEIGHT_CACHE_CREATION = 1.25
+WEIGHT_CACHE_READ = 0.1
+WEIGHT_OUTPUT = 5.0
+
+BIG_CONTEXT_TOKENS = 200_000
+BIG_READ_CHARS = 3_000 * CHARS_PER_TOKEN
+TOP_TOOLS = 8
+CODEX_TOOL = "mcp__codex-worker__codex_review_changes"
+RECORD_KEY_PREFIX = "record-"
+VERIFY_MARKER = "verify"
+
+TEST_COMMAND = re.compile(
+    r"\b(pytest|vitest|npm (run )?(test|lint|build|e2e)|make (test|lint|build|check|benchmark)"
+    r"|ruff|eslint|tsc\b|playwright|cargo (test|build|clippy)|go test|uv run pytest|alembic"
+    r"|pio (run|test)|ctest|cmake --build|docker (compose )?build)"
+)
+
+
+@dataclass
+class Usage:
+    turns: int = 0
+    input: int = 0
+    creation: int = 0
+    read: int = 0
+    output: int = 0
+
+    def add(self, usage: dict) -> None:
+        self.turns += 1
+        self.input += usage.get("input_tokens") or 0
+        self.creation += usage.get("cache_creation_input_tokens") or 0
+        self.read += usage.get("cache_read_input_tokens") or 0
+        self.output += usage.get("output_tokens") or 0
+
+    @property
+    def input_equivalent(self) -> float:
+        return (
+            self.input * WEIGHT_INPUT
+            + self.creation * WEIGHT_CACHE_CREATION
+            + self.read * WEIGHT_CACHE_READ
+            + self.output * WEIGHT_OUTPUT
+        )
+
+
+@dataclass
+class MessageUsage:
+    is_sub: bool
+    usage: dict
+
+
+@dataclass
+class Stats:
+    messages: dict = field(default_factory=dict)
+    main: Usage = field(default_factory=Usage)
+    sub: Usage = field(default_factory=Usage)
+    contexts: list = field(default_factory=list)
+    result_tokens: collections.Counter = field(default_factory=collections.Counter)
+    result_calls: collections.Counter = field(default_factory=collections.Counter)
+    result_max: collections.Counter = field(default_factory=collections.Counter)
+    agents: collections.Counter = field(default_factory=collections.Counter)
+    tests_verify: int = 0
+    tests_raw: int = 0
+    codex_calls: int = 0
+    reads: int = 0
+    reads_unbounded: int = 0
+    reads_unbounded_big: int = 0
+    reads_unbounded_big_tokens: float = 0.0
+    files: int = 0
+    bytes: int = 0
+
+
+def select_files(days: int, project: str) -> list:
+    paths = [
+        p
+        for p in glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True)
+        if MEMORY_MARKER not in p
+    ]
+    if days:
+        cutoff = time.time() - days * SECONDS_PER_DAY
+        paths = [p for p in paths if os.path.getmtime(p) >= cutoff]
+    if project:
+        slug = re.sub(r"[^A-Za-z0-9]+", "-", os.path.abspath(os.path.expanduser(project)))
+        paths = [p for p in paths if slug in p or project in p]
+    return sorted(paths)
+
+
+def result_text(content) -> str:
+    if isinstance(content, list):
+        return "".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return content if isinstance(content, str) else str(content or "")
+
+
+def scan(path: str, stats: Stats) -> None:
+    is_sub = SUBAGENT_MARKER in path
+    tool_names = {}
+    unbounded_reads = set()
+    with open(path, errors="replace") as handle:
+        for number, line in enumerate(handle):
+            if '"usage"' not in line and '"tool_result"' not in line and '"tool_use"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            message = entry.get("message") or {}
+            kind = entry.get("type")
+            if kind == "assistant":
+                usage = message.get("usage") or {}
+                if usage:
+                    key = message.get("id") or f"{RECORD_KEY_PREFIX}{path}#{number}"
+                    known = stats.messages.get(key)
+                    if known is None:
+                        stats.messages[key] = MessageUsage(is_sub, usage)
+                    else:
+                        known.usage = usage
+                for block in message.get("content") or []:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name") or "?"
+                    params = block.get("input") or {}
+                    tool_names[block.get("id")] = name
+                    if name in ("Agent", "Task"):
+                        stats.agents[str(params.get("subagent_type") or "?")] += 1
+                    elif name == CODEX_TOOL:
+                        stats.codex_calls += 1
+                    elif name == "Read":
+                        stats.reads += 1
+                        if "limit" not in params and "offset" not in params:
+                            stats.reads_unbounded += 1
+                            unbounded_reads.add(block.get("id"))
+                    elif name == "Bash":
+                        command = str(params.get("command") or "")
+                        if TEST_COMMAND.search(command):
+                            if VERIFY_MARKER in command:
+                                stats.tests_verify += 1
+                            else:
+                                stats.tests_raw += 1
+            elif kind == "user" and isinstance(message.get("content"), list):
+                for block in message["content"]:
+                    if not isinstance(block, dict) or block.get("type") != "tool_result":
+                        continue
+                    name = tool_names.get(block.get("tool_use_id"), "?")
+                    size = len(result_text(block.get("content")))
+                    stats.result_tokens[name] += size / CHARS_PER_TOKEN
+                    stats.result_calls[name] += 1
+                    stats.result_max[name] = max(stats.result_max[name], size / CHARS_PER_TOKEN)
+                    if block.get("tool_use_id") in unbounded_reads and size > BIG_READ_CHARS:
+                        stats.reads_unbounded_big += 1
+                        stats.reads_unbounded_big_tokens += size / CHARS_PER_TOKEN
+
+def aggregate(stats: Stats) -> None:
+    for message in stats.messages.values():
+        (stats.sub if message.is_sub else stats.main).add(message.usage)
+        context = (
+            (message.usage.get("input_tokens") or 0)
+            + (message.usage.get("cache_read_input_tokens") or 0)
+            + (message.usage.get("cache_creation_input_tokens") or 0)
+        )
+        if context and not message.is_sub:
+            stats.contexts.append(context)
+
+
+def human(value: float) -> str:
+    if value >= 1e9:
+        return f"{value / 1e9:.1f}G"
+    if value >= 1e6:
+        return f"{value / 1e6:.1f}M"
+    if value >= 1e3:
+        return f"{value / 1e3:.0f}k"
+    return f"{value:.0f}"
+
+
+def percentile(values: list, fraction: float) -> int:
+    if not values:
+        return 0
+    index = min(len(values) - 1, int(len(values) * fraction))
+    return values[index]
+
+
+def report(stats: Stats, days: int, project: str) -> None:
+    window = f"{days} days" if days else "all time"
+    print(
+        f"usage-report — {stats.files} transcripts, {stats.bytes / 1e6:.0f} MB, "
+        f"window {window}, project {project or 'all'}"
+    )
+    total_equivalent = stats.main.input_equivalent + stats.sub.input_equivalent or 1.0
+    print(f"{'':9s}{'turns':>7s}{'input':>9s}{'create':>9s}{'read':>9s}{'output':>9s}{'input-eq':>10s}{'share':>7s}")
+    for label, usage in (("main", stats.main), ("subagent", stats.sub)):
+        print(
+            f"{label:9s}{usage.turns:7d}{human(usage.input):>9s}{human(usage.creation):>9s}"
+            f"{human(usage.read):>9s}{human(usage.output):>9s}{human(usage.input_equivalent):>10s}"
+            f"{usage.input_equivalent / total_equivalent * 100:6.0f}%"
+        )
+    contexts = sorted(stats.contexts)
+    big = sum(1 for c in contexts if c > BIG_CONTEXT_TOKENS)
+    share = big / len(contexts) * 100 if contexts else 0
+    print(
+        f"context per main turn: median {human(percentile(contexts, 0.5))} "
+        f"p90 {human(percentile(contexts, 0.9))} max {human(contexts[-1] if contexts else 0)} "
+        f"| turns > {BIG_CONTEXT_TOKENS // 1000}k: {big} ({share:.0f}%)"
+    )
+    print(f"tool-result tokens by tool (top {TOP_TOOLS}):")
+    for name, tokens in stats.result_tokens.most_common(TOP_TOOLS):
+        calls = stats.result_calls[name] or 1
+        print(
+            f"  {name[:28]:28s}{human(tokens):>8s}  calls {calls:5d}  "
+            f"avg {human(tokens / calls):>6s}  max {human(stats.result_max[name]):>6s}"
+        )
+    runs = stats.tests_verify + stats.tests_raw
+    raw_share = stats.tests_raw / runs * 100 if runs else 0
+    print(f"test/lint/build runs: via verify {stats.tests_verify}, raw {stats.tests_raw} ({raw_share:.0f}% raw)")
+    print(
+        f"Read calls: {stats.reads} total, {stats.reads_unbounded} without limit/offset, "
+        f"{stats.reads_unbounded_big} results > {BIG_READ_CHARS // CHARS_PER_TOKEN // 1000}k tok "
+        f"(~{human(stats.reads_unbounded_big_tokens)} tok)"
+    )
+    spawns = ", ".join(f"{name} {count}" for name, count in stats.agents.most_common()) or "none"
+    print(f"Agent spawns: {spawns}")
+    print(f"codex review calls: {stats.codex_calls}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--days", type=int, default=0, help="only transcripts modified in the last N days")
+    parser.add_argument("--project", default="", help="only the projects/ subdir matching this path")
+    args = parser.parse_args()
+
+    stats = Stats()
+    for path in select_files(args.days, args.project):
+        stats.files += 1
+        stats.bytes += os.path.getsize(path)
+        scan(path, stats)
+    aggregate(stats)
+    report(stats, args.days, args.project)
+
+
+if __name__ == "__main__":
+    main()

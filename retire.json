@@ -1,0 +1,20 @@
+{
+  "files": [
+    "prompts/haiku-task.md",
+    "prompts/codex-review.md",
+    "skills/orchestrate",
+    "agents/sonnet-worker.md",
+    "agents/claude-reviewer.md",
+    "agents/haiku-worker.md"
+  ],
+  "settings": {
+    "env": [
+      "MAX_MCP_OUTPUT_TOKENS"
+    ],
+    "permissions.allow": [
+      "mcp__codex__*",
+      "Agent(haiku-worker)",
+      "Agent(claude-reviewer)"
+    ]
+  }
+}
