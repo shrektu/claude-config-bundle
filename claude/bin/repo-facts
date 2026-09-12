@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+"""Prints the toolchain facts of a repo: pinned versions, what is really installed, task entry points."""
+import json
+import select
+import os
+import re
+import sys
+import tomllib
+from typing import NamedTuple
+
+MAX_LINES = 40
+MAX_CHARS = 1600
+WRAP_WIDTH = 104
+MAX_LIST_LINES = 3
+SESSION_START = "SessionStart"
+WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/", "test/")
+WORK_BRANCH_HINT = "feature/*, bugfix/*, hotfix/*, test/*"
+HEAD_REF_PREFIX = "ref: refs/heads/"
+GITDIR_PREFIX = "gitdir:"
+
+MONOREPO_DIRS = ("apps", "packages", "services")
+MANIFESTS = ("pyproject.toml", "package.json", "Cargo.toml", "go.mod", "platformio.ini", "CMakeLists.txt")
+MAX_SUBDIRS = 6
+
+PY_ALLOWLIST = ("fastapi", "sqlalchemy", "pydantic", "alembic", "django", "flask", "numpy", "pytest",
+                "ruff", "mypy", "httpx", "uvicorn")
+NODE_ALLOWLIST = ("react", "react-dom", "typescript", "vite", "next", "vue", "svelte", "blockly", "three",
+                  "eslint", "vitest", "jest", "playwright", "tailwindcss")
+VENV_DIRS = (".venv", "venv")
+PY_LOCK_FILES = ("uv.lock", "poetry.lock")
+REQUIREMENTS_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s;#\\]+)")
+DIST_INFO_SUFFIX = ".dist-info"
+SITE_PACKAGES = "site-packages"
+NODE_MODULES = "node_modules"
+NODE_LOCKS = ("package-lock.json", "pnpm-lock.yaml", "yarn.lock")
+PNPM_LOCK = "pnpm-lock.yaml"
+PNPM_IMPORTERS = "importers:"
+PNPM_SELF = "."
+PNPM_SECTIONS = ("dependencies", "devDependencies", "optionalDependencies")
+MAX_LOCK_PARENTS = 3
+YARN_ENTRY_RE = re.compile(r'^"?(@?[A-Za-z0-9._/-]+)@[^\n:]*:\n(?:.*\n)*?\s+version:? "?([^"\n]+)"?', re.M)
+AMBIGUOUS_SEPARATOR = "|"
+MAX_RUST_DEPS = 15
+MAX_GO_REQUIRES = 10
+MAX_MAKE_TARGETS = 20
+MAX_SCRIPTS = 12
+STDIN_WAIT_S = 0.2
+CRATES_IO_DIR_PREFIXES = ("index.crates.io-", "github.com-")
+CRATES_IO_SOURCE = "crates.io-index"
+REGISTRY_PREFIX = "registry+"
+SPARSE_PREFIX = "sparse+"
+GIT_PREFIX = "git+"
+CARGO_REGISTRY_SRC = ("registry", "src")
+MAKE_TARGET_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*:(?![:=])")
+CMAKE_MIN_RE = re.compile(r"cmake_minimum_required\s*\(\s*VERSION\s+([0-9.]+)", re.I)
+PIO_KEYS = ("platform", "framework", "board")
+INI_KEY_RE = re.compile(r"^\s*([a-z_]+)\s*=\s*(.+?)\s*$")
+GO_VERSION_RE = re.compile(r"^go\s+([0-9.]+)", re.M)
+GO_REQUIRE_RE = re.compile(r"^\s*(?!//)([A-Za-z0-9._~/-]+\.[A-Za-z0-9._~/-]+)\s+(v\S+)")
+INDIRECT_MARK = "// indirect"
+
+
+class Pin(NamedTuple):
+    name: str
+    locked: str
+    installed: str
+
+
+class Dep(NamedTuple):
+    name: str
+    detail: str
+    flagged: bool
+
+
+def read_text(path, limit=200000):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read(limit)
+    except OSError:
+        return None
+
+
+def read_toml(path):
+    try:
+        with open(path, "rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def read_json(path):
+    text = read_text(path, 4000000)
+    if text is None:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def normalize(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def find_repo(start):
+    path = os.path.abspath(start)
+    while True:
+        if os.path.exists(os.path.join(path, ".git")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
+def git_dir_of(root):
+    marker = os.path.join(root, ".git")
+    if os.path.isdir(marker):
+        return marker
+    text = read_text(marker, 4096) or ""
+    if text.startswith(GITDIR_PREFIX):
+        value = text[len(GITDIR_PREFIX):].strip()
+        return value if os.path.isabs(value) else os.path.normpath(os.path.join(root, value))
+    return None
+
+
+def current_branch(root):
+    git_dir = git_dir_of(root)
+    if not git_dir:
+        return None
+    head = (read_text(os.path.join(git_dir, "HEAD"), 4096) or "").strip()
+    if head.startswith(HEAD_REF_PREFIX):
+        return head[len(HEAD_REF_PREFIX):].strip()
+    return None
+
+
+def wrap_items(prefix, items, limit=MAX_LIST_LINES):
+    lines, current = [], prefix
+    for idx, item in enumerate(items):
+        piece = item if current.endswith(" ") else ", " + item
+        if len(current) + len(piece) > WRAP_WIDTH and current != prefix:
+            lines.append(current)
+            if len(lines) >= limit:
+                left = len(items) - idx
+                if left:
+                    lines[-1] += f" (+{left} more)"
+                return lines
+            current = prefix + item
+        else:
+            current += piece
+    if current != prefix:
+        lines.append(current)
+    return lines
+
+
+def python_pins(directory):
+    locked = {}
+    for name in PY_LOCK_FILES:
+        data = read_toml(os.path.join(directory, name))
+        packages = data.get("package") if isinstance(data, dict) else None
+        if not isinstance(packages, list):
+            continue
+        for entry in packages:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                locked.setdefault(normalize(entry["name"]), str(entry.get("version", "")))
+    try:
+        requirement_files = sorted(f for f in os.listdir(directory)
+                                   if f.startswith("requirements") and f.endswith(".txt"))
+    except OSError:
+        requirement_files = []
+    for name in requirement_files:
+        for line in (read_text(os.path.join(directory, name)) or "").splitlines():
+            found = REQUIREMENTS_RE.match(line.strip())
+            if found:
+                locked.setdefault(normalize(found.group(1)), found.group(2))
+    return locked
+
+
+def site_packages_dirs(directory):
+    for venv in VENV_DIRS:
+        lib = os.path.join(directory, venv, "lib")
+        try:
+            versions = sorted(os.listdir(lib))
+        except OSError:
+            continue
+        for version in versions:
+            candidate = os.path.join(lib, version, SITE_PACKAGES)
+            if os.path.isdir(candidate):
+                yield venv, version, candidate
+
+
+def python_installed(directory):
+    installed, venvs = {}, []
+    for venv, version, path in site_packages_dirs(directory):
+        venvs.append(f"{venv}({version})")
+        try:
+            entries = os.listdir(path)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.endswith(DIST_INFO_SUFFIX):
+                continue
+            stem = entry[:-len(DIST_INFO_SUFFIX)]
+            name, _, version_part = stem.rpartition("-")
+            if name:
+                installed.setdefault(normalize(name), version_part)
+    return installed, venvs
+
+
+def python_section(directory, prefix, out):
+    pyproject = read_toml(os.path.join(directory, "pyproject.toml"))
+    pinned = (read_text(os.path.join(directory, ".python-version"), 256) or "").strip().splitlines()
+    locked = python_pins(directory)
+    if pyproject is None and not pinned and not locked:
+        return
+    installed, venvs = python_installed(directory)
+    head = []
+    project = pyproject.get("project") if isinstance(pyproject, dict) else None
+    requires = project.get("requires-python") if isinstance(project, dict) else None
+    if isinstance(requires, str):
+        head.append(f"requires-python={requires}")
+    if pinned:
+        head.append(f".python-version={pinned[0]}")
+    head.append(f"venv={','.join(venvs)}" if venvs else "no project venv")
+    out.append(f"{prefix}python: {' '.join(head)}")
+    pins = [Pin(name, locked[normalize(name)], installed.get(normalize(name), ""))
+            for name in PY_ALLOWLIST if normalize(name) in locked]
+    emit_pins(prefix, "python", pins, out)
+
+
+def emit_pins(prefix, label, pins, out):
+    ok, flagged = [], []
+    for pin in pins:
+        if not pin.installed:
+            flagged.append(f"{pin.name} locked={pin.locked} not installed")
+        elif pin.installed == pin.locked:
+            ok.append(f"{pin.name} {pin.locked}")
+        else:
+            flagged.append(f"{pin.name} locked={pin.locked} installed={pin.installed} MISMATCH")
+    if ok:
+        out.extend(wrap_items(f"{prefix}{label} locked=installed: ", ok))
+    if flagged:
+        out.extend(wrap_items(f"{prefix}{label} FLAG: ", flagged))
+
+
+def pnpm_lock_context(directory):
+    current = directory
+    for _ in range(MAX_LOCK_PARENTS + 1):
+        path = os.path.join(current, PNPM_LOCK)
+        if os.path.isfile(path):
+            relative = os.path.relpath(directory, current)
+            return path, relative
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None, None
+
+
+def indent_of(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def pnpm_root_block(lines):
+    block, collecting = [], False
+    for raw in lines:
+        if not raw.strip():
+            continue
+        if indent_of(raw) == 0:
+            collecting = raw.strip().rstrip(":") in PNPM_SECTIONS
+            continue
+        if collecting:
+            block.append(raw)
+    return block
+
+
+def pnpm_importer_block(text, importer):
+    """pnpm resolves versions per importer, so only the scanned directory's own section counts."""
+    lines = text.splitlines()
+    start = None
+    for index, raw in enumerate(lines):
+        if raw.rstrip() == PNPM_IMPORTERS:
+            start = index + 1
+            break
+    if start is None:
+        return pnpm_root_block(lines)
+    wanted = {f"{importer}:", f"'{importer}':", f'"{importer}":'}
+    block, collecting = [], False
+    for raw in lines[start:]:
+        if not raw.strip():
+            continue
+        if indent_of(raw) == 0:
+            break
+        if indent_of(raw) == 2:
+            collecting = raw.strip() in wanted
+            continue
+        if collecting:
+            block.append(raw)
+    return block
+
+
+def pnpm_locked(directory):
+    path, importer = pnpm_lock_context(directory)
+    if path is None:
+        return {}
+    text = read_text(path)
+    if text is None:
+        return {}
+    locked, name = {}, None
+    for raw in pnpm_importer_block(text, importer):
+        line = raw.strip()
+        if line.endswith(":"):
+            candidate = line[:-1].strip("'\"")
+            if candidate not in PNPM_SECTIONS:
+                name = candidate
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().strip("'\"")
+        value = value.strip().strip("'\"").split("(")[0]
+        if key == "version" and name and value:
+            locked.setdefault(name, value)
+        elif key not in ("specifier", "version") and key not in PNPM_SECTIONS and value:
+            locked.setdefault(key, value)
+    return locked
+
+
+def node_locked(directory):
+    locked = {}
+    lock = read_json(os.path.join(directory, "package-lock.json"))
+    if lock:
+        packages = lock.get("packages")
+        if isinstance(packages, dict):
+            for key, value in packages.items():
+                if key.startswith(NODE_MODULES + "/") and isinstance(value, dict):
+                    name = key.split(NODE_MODULES + "/", 1)[1]
+                    if "/" + NODE_MODULES + "/" not in key and isinstance(value.get("version"), str):
+                        locked.setdefault(name, value["version"])
+        deps = lock.get("dependencies")
+        if isinstance(deps, dict):
+            for name, value in deps.items():
+                if isinstance(value, dict) and isinstance(value.get("version"), str):
+                    locked.setdefault(name, value["version"])
+    if not locked:
+        locked = pnpm_locked(directory)
+    if not locked:
+        text = read_text(os.path.join(directory, "yarn.lock"))
+        if text:
+            for name, version in YARN_ENTRY_RE.findall(text):
+                locked.setdefault(name, version)
+    return locked
+
+
+def node_installed(directory, names):
+    root = os.path.join(directory, NODE_MODULES)
+    if not os.path.isdir(root):
+        return {}, False
+    installed = {}
+    for name in names:
+        data = read_json(os.path.join(root, name, "package.json"))
+        if data and isinstance(data.get("version"), str):
+            installed[name] = data["version"]
+    return installed, True
+
+
+def node_section(directory, prefix, out):
+    package = read_json(os.path.join(directory, "package.json"))
+    if package is None:
+        return
+    head = []
+    engines = package.get("engines")
+    if isinstance(engines, dict):
+        head += [f"engines.{key}={value}" for key, value in engines.items() if isinstance(value, str)]
+    manager = package.get("packageManager")
+    if isinstance(manager, str):
+        head.append(f"packageManager={manager}")
+    for name in NODE_LOCKS:
+        if os.path.exists(os.path.join(directory, name)):
+            head.append(f"lock={name}")
+            break
+    out.append(f"{prefix}node: {' '.join(head) if head else 'package.json'}")
+    scripts = package.get("scripts")
+    if isinstance(scripts, dict) and scripts:
+        names = list(scripts)[:MAX_SCRIPTS]
+        out.extend(wrap_items(f"{prefix}npm scripts: ", names, 1))
+    locked = node_locked(directory)
+    wanted = [name for name in NODE_ALLOWLIST if name in locked]
+    installed, has_modules = node_installed(directory, wanted)
+    pins = [Pin(name, locked[name], installed.get(name, "")) for name in wanted]
+    if not has_modules and pins:
+        out.append(f"{prefix}node: no node_modules")
+    emit_pins(prefix, "node", pins, out)
+
+
+def cargo_home():
+    return os.environ.get("CARGO_HOME") or os.path.join(os.path.expanduser("~"), ".cargo")
+
+
+def registry_dirs():
+    path = os.path.join(cargo_home(), *CARGO_REGISTRY_SRC)
+    try:
+        return sorted(os.listdir(path)), path
+    except OSError:
+        return [], path
+
+
+def registry_status(source, name, version):
+    dirs, base = registry_dirs()
+    url = source.split("+", 1)[1] if "+" in source else source
+    if CRATES_IO_SOURCE in url:
+        candidates = [d for d in dirs if d.startswith(CRATES_IO_DIR_PREFIXES)]
+    else:
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+        candidates = [d for d in dirs if host and d.startswith(host)]
+    if not candidates:
+        return "unverified"
+    for directory in candidates:
+        if os.path.exists(os.path.join(base, directory, f"{name}-{version}", "Cargo.toml")):
+            return "installed"
+    return "not fetched"
+
+
+def rust_deps(directory):
+    manifest = read_toml(os.path.join(directory, "Cargo.toml"))
+    if manifest is None:
+        return None, []
+    lock = read_toml(os.path.join(directory, "Cargo.lock")) or {}
+    entries = {}
+    packages = lock.get("package")
+    if isinstance(packages, list):
+        for entry in packages:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                entries.setdefault(entry["name"], []).append(entry)
+    deps = []
+    table = manifest.get("dependencies")
+    names = list(table) if isinstance(table, dict) else []
+    for name in names[:MAX_RUST_DEPS]:
+        spec = table.get(name)
+        if isinstance(spec, dict) and isinstance(spec.get("path"), str):
+            deps.append(Dep(name, f"path={spec['path']}", False))
+            continue
+        matches = entries.get(name, [])
+        if not matches:
+            wanted = spec.get("version") if isinstance(spec, dict) else spec
+            deps.append(Dep(name, f"requested={wanted} not in Cargo.lock", True))
+            continue
+        if len(matches) > 1:
+            versions = AMBIGUOUS_SEPARATOR.join(sorted(str(m.get("version", "")) for m in matches))
+            deps.append(Dep(name, f"locked={versions} ambiguous", True))
+            continue
+        entry = matches[0]
+        version = str(entry.get("version", ""))
+        source = entry.get("source")
+        if not isinstance(source, str):
+            deps.append(Dep(name, f"{version} path", False))
+        elif source.startswith(GIT_PREFIX):
+            deps.append(Dep(name, f"{version} git-source (unverified)", True))
+        elif source.startswith((REGISTRY_PREFIX, SPARSE_PREFIX)):
+            status = registry_status(source, name, version)
+            deps.append(Dep(name, f"{version} {status}", status != "installed"))
+        else:
+            deps.append(Dep(name, f"{version} unverified", True))
+    return manifest, deps
+
+
+def rust_section(directory, prefix, out):
+    manifest, deps = rust_deps(directory)
+    if manifest is None:
+        return
+    package = manifest.get("package") if isinstance(manifest, dict) else None
+    head = []
+    if isinstance(package, dict):
+        for key in ("edition", "rust-version"):
+            if isinstance(package.get(key), str):
+                head.append(f"{key}={package[key]}")
+    workspace = manifest.get("workspace")
+    if isinstance(workspace, dict):
+        head.append("workspace")
+    out.append(f"{prefix}rust: {' '.join(head) if head else 'Cargo.toml'}")
+    ok = [f"{d.name} {d.detail}" for d in deps if not d.flagged]
+    flagged = [f"{d.name} {d.detail}" for d in deps if d.flagged]
+    if ok:
+        out.extend(wrap_items(f"{prefix}cargo locked+fetched: ", ok))
+    if flagged:
+        out.extend(wrap_items(f"{prefix}cargo FLAG: ", flagged))
+
+
+def go_section(directory, prefix, out):
+    text = read_text(os.path.join(directory, "go.mod"))
+    if text is None:
+        return
+    version = GO_VERSION_RE.search(text)
+    out.append(f"{prefix}go: go={version.group(1) if version else 'unknown'}")
+    requires = []
+    for line in text.splitlines():
+        if INDIRECT_MARK in line or line.strip().startswith("module"):
+            continue
+        found = GO_REQUIRE_RE.match(line.replace("require ", "", 1) if line.startswith("require ") else line)
+        if found:
+            requires.append(f"{found.group(1)} {found.group(2)}")
+        if len(requires) >= MAX_GO_REQUIRES:
+            break
+    if requires:
+        out.extend(wrap_items(f"{prefix}go requires: ", requires))
+
+
+def embedded_section(directory, prefix, out):
+    pio = read_text(os.path.join(directory, "platformio.ini"))
+    if pio is not None:
+        found = {}
+        for line in pio.splitlines():
+            match = INI_KEY_RE.match(line)
+            if match and match.group(1) in PIO_KEYS:
+                found.setdefault(match.group(1), match.group(2))
+        if found:
+            out.append(f"{prefix}platformio: " + " ".join(f"{k}={v}" for k, v in found.items()))
+    cmake = read_text(os.path.join(directory, "CMakeLists.txt"), 20000)
+    if cmake is not None:
+        found = CMAKE_MIN_RE.search(cmake)
+        if found:
+            out.append(f"{prefix}cmake: minimum={found.group(1)}")
+
+
+def version_files_section(directory, prefix, out):
+    tools = read_text(os.path.join(directory, ".tool-versions"), 4096)
+    if tools:
+        items = [" ".join(line.split()) for line in tools.splitlines() if line.strip()]
+        if items:
+            out.extend(wrap_items(f"{prefix}.tool-versions: ", items, 1))
+    nvmrc = read_text(os.path.join(directory, ".nvmrc"), 256)
+    if nvmrc and nvmrc.strip():
+        out.append(f"{prefix}.nvmrc: {nvmrc.strip().splitlines()[0]}")
+
+
+def make_section(directory, prefix, out):
+    text = read_text(os.path.join(directory, "Makefile"), 200000)
+    if text is None:
+        return
+    targets = []
+    for line in text.splitlines():
+        found = MAKE_TARGET_RE.match(line)
+        if found and found.group(1) not in targets:
+            targets.append(found.group(1))
+        if len(targets) >= MAX_MAKE_TARGETS:
+            break
+    if targets:
+        out.extend(wrap_items(f"{prefix}make targets: ", targets, 2))
+
+
+def directory_facts(directory, prefix, out):
+    python_section(directory, prefix, out)
+    node_section(directory, prefix, out)
+    rust_section(directory, prefix, out)
+    go_section(directory, prefix, out)
+    embedded_section(directory, prefix, out)
+    version_files_section(directory, prefix, out)
+    make_section(directory, prefix, out)
+
+
+def has_manifest(directory):
+    return any(os.path.exists(os.path.join(directory, name)) for name in MANIFESTS)
+
+
+def subprojects(root):
+    found = []
+    for parent in MONOREPO_DIRS:
+        base = os.path.join(root, parent)
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for name in names:
+            directory = os.path.join(base, name)
+            if os.path.isdir(directory) and has_manifest(directory):
+                found.append((f"{parent}/{name}", directory))
+            if len(found) >= MAX_SUBDIRS:
+                return found
+    return found
+
+
+def trim(lines):
+    kept, used = [], 0
+    for line in lines:
+        if len(kept) >= MAX_LINES or used + len(line) + 1 > MAX_CHARS:
+            kept.append("... more facts truncated (run ~/.claude/bin/repo-facts <path> for one subproject)")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return kept
+
+
+def effort_of(payload):
+    effort = payload.get("effort")
+    if isinstance(effort, dict):
+        level = effort.get("level")
+        return level if isinstance(level, str) else None
+    return effort if isinstance(effort, str) else None
+
+
+def read_payload():
+    if sys.stdin.isatty():
+        return None
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], STDIN_WAIT_S)
+        if not ready:
+            return None
+        data = json.loads(sys.stdin.read())
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def main():
+    payload = read_payload() or {}
+    effort = None
+    target = None
+    if payload.get("hook_event_name") == SESSION_START:
+        cwd = payload.get("cwd")
+        target = cwd if isinstance(cwd, str) and cwd else None
+        effort = effort_of(payload)
+    if target is None:
+        target = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+    if not os.path.isdir(target):
+        return 0
+    target = os.path.abspath(target)
+    root = find_repo(target)
+    if root is None:
+        return 0
+    relative = os.path.relpath(target, root)
+    primary = target if relative != PNPM_SELF and has_manifest(target) else root
+    branch = current_branch(root)
+    head = [f"repo: {root}"]
+    head.append(f"branch={branch}" if branch else "branch=DETACHED")
+    if effort:
+        head.append(f"effort={effort}")
+    lines = [" ".join(head)]
+    if branch and not branch.startswith(WORK_BRANCH_PREFIXES):
+        lines.append(f"branch `{branch}` is NOT a work branch ({WORK_BRANCH_HINT}) - do not commit or push here")
+    if primary != root:
+        directory_facts(primary, f"[{relative}] ", lines)
+    directory_facts(root, "", lines)
+    for name, directory in subprojects(root):
+        if directory != primary:
+            directory_facts(directory, f"[{name}] ", lines)
+    print("\n".join(trim(lines)))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.exit(0)

@@ -30,13 +30,17 @@ if [ $# -eq 1 ]; then CMD_STR=$1; else CMD_STR=$(printf '%q ' "$@"); CMD_STR=${C
 SLUG=$(printf '%s' "${NAME:-$CMD_STR}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40)
 LOG=$LOG_DIR/$(date +%Y%m%d-%H%M%S)-$SLUG-$$.log
 START=$(date +%s)
-if [ $# -eq 1 ]; then bash -c "$1" >"$LOG" 2>&1; else "$@" >"$LOG" 2>&1; fi
+if [ $# -eq 1 ]; then bash -o pipefail -c "$1" >"$LOG" 2>&1; else "$@" >"$LOG" 2>&1; fi
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
 LINES=$(wc -l <"$LOG")
 STATUS=PASS; [ "$RC" -eq 0 ] || STATUS=FAIL
 echo "VERIFY $STATUS exit=$RC time=${ELAPSED}s lines=$LINES cmd: $CMD_STR"
 echo "log: $LOG"
+if [ "$RC" -eq 0 ]; then
+  WARNINGS=$(grep -Eci 'DeprecationWarning|PendingDeprecationWarning|\bdeprecated\b' "$LOG" || true)
+  [ "${WARNINGS:-0}" -gt 0 ] && echo "warnings: $WARNINGS deprecation lines (see log)"
+fi
 python3 - "$LOG" "$TAIL" "$RC" <<'PY'
 import re, sys
 log, tail, rc = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
