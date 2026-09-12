@@ -1,8 +1,8 @@
 ---
-name: implementer-hard
-description: The implementer for hard and risky tasks (class L/XL) - concurrency, protocol/on-wire format or firmware changes, migrations, data shape or public API changes, multi-repo work. Same contract as implementer at higher reasoning effort - edits files, runs tests/lint/build through verify, fixes failures caused by its own changes, and applies verified review findings as narrow fixes. Does not make architecture decisions.
-model: sonnet
-effort: xhigh
+name: implementer-opus
+description: The implementer for long, multi-file, autonomous class L/XL work, or for a retry after one failed Sonnet round. Same contract as implementer on a stronger model - edits files, runs tests/lint/build through verify, fixes failures caused by its own changes, and applies verified review findings as narrow fixes. Does not make architecture decisions.
+model: opus
+effort: high
 skills: [repo-standards]
 ---
 
