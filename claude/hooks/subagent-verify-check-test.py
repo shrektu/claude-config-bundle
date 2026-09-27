@@ -65,7 +65,7 @@ def run(payload, timeout=30):
 def payload_for(base, path, **extra):
     data = {"hook_event_name": "SubagentStop", "session_id": "sess-1", "cwd": base,
             "scratchpad_dir": base, "agent_id": extra.pop("agent_id", "agent-" + os.path.basename(path)),
-            "agent_type": "implementer", "agent_transcript_path": path}
+            "agent_type": "developer", "agent_transcript_path": path}
     data.update(extra)
     return data
 
@@ -195,16 +195,17 @@ with tempfile.TemporaryDirectory() as base:
     rc, out, err = run(payload_for(base, dirty, agent_id="loop-agent", stop_hook_active=True))
     check("stop_hook_active", rc == 0 and not out and not err, f"rc={rc} err={err[:120]!r}")
 
-    for other in ("Explore", "codex-runner", "general-purpose"):
+    former = ("implementer", "implementer-hard", "implementer-opus", "commander-opus")
+    for other in ("Explore", "codex-runner", "general-purpose") + former:
         rc, out, err = run(payload_for(base, dirty, agent_id=f"other-{other}", agent_type=other))
         check(f"other agent_type[{other}]", rc == 0 and not out and not err, f"rc={rc} err={err[:120]!r}")
 
-    rc, out, err = run(payload_for(base, dirty, agent_id="commander-dirty", agent_type="commander-opus"))
-    check("commander-opus edit without verify blocks", rc == 2 and REASON_MARK in err and out == "",
+    rc, out, err = run(payload_for(base, dirty, agent_id="developer-dirty", agent_type="developer"))
+    check("developer edit without verify blocks", rc == 2 and REASON_MARK in err and out == "",
           f"rc={rc} out={out[:80]!r} err={err[:160]!r}")
-    rc, out, err = run(payload_for(base, allow_cases["edit then verify"], agent_id="commander-verified",
-                                    agent_type="commander-opus"))
-    check("commander-opus edit then verify allows", rc == 0 and not out and not err,
+    rc, out, err = run(payload_for(base, allow_cases["edit then verify"], agent_id="developer-verified",
+                                    agent_type="developer"))
+    check("developer edit then verify allows", rc == 0 and not out and not err,
           f"rc={rc} out={out[:80]!r} err={err[:160]!r}")
 
     rc, out, err = run(payload_for(base, dirty, agent_id="fallback-agent", scratchpad_dir="/nonexistent-dir-xyz"))
@@ -225,7 +226,7 @@ with tempfile.TemporaryDirectory() as base:
         "", "not json", "null", "[]", "17",
         json.dumps({"hook_event_name": "SubagentStop"}),
         json.dumps({"hook_event_name": "SubagentStop", "agent_transcript_path": "/nope/missing.jsonl",
-                    "agent_type": "implementer"}),
+                    "agent_type": "developer"}),
         json.dumps({"hook_event_name": "SubagentStop", "agent_transcript_path": 42, "agent_type": 42}),
         json.dumps({"agent_transcript_path": os.path.join(base, "t-edit-only.jsonl"), "agent_type": "Explore"}),
     ]
@@ -234,7 +235,7 @@ with tempfile.TemporaryDirectory() as base:
         check("garbage", done.returncode == 0 and not done.stdout and not done.stderr,
               f"{raw[:50]!r} -> rc={done.returncode} out={done.stdout[:60]!r} err={done.stderr[-120:]!r}")
 
-total = len(block_cases) + len(allow_cases) + len(garbage) + 11
+total = len(block_cases) + len(allow_cases) + len(garbage) + 11 + len(former)
 print(f"hook: {hook}\nblock cases: {len(block_cases)}, allow cases: {len(allow_cases)}, "
       f"garbage: {len(garbage)}, slowest run: {slowest * 1000:.0f} ms, FAILURES: {bad}")
 print("FAIL" if bad else f"PASS {total}/{total}")
