@@ -21,7 +21,8 @@ for d in agents skills prompts templates bin hooks; do
   [ -d "$HOME/.claude/$d" ] && cp -a "$HOME/.claude/$d" "$OUT/claude/"
 done
 cp "$HOME/.claude/CLAUDE.md" "$HOME/.claude/statusline-command.sh" "$OUT/claude/"
-cp "$HOME/.claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/requirements.txt" "$OUT/claude/mcp/codex-worker/"
+cp "$HOME/.claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/codex_worker_test.py" \
+  "$HOME/.claude/mcp/codex-worker/requirements.txt" "$OUT/claude/mcp/codex-worker/"
 cp "$HOME/.codex/AGENTS.md" "$OUT/codex/AGENTS.md"
 python3 - "$HOME/.claude/settings.json" "$OUT/claude/settings.json" <<'PY'
 import json, sys

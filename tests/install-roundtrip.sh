@@ -40,15 +40,18 @@ stub_venv() {
 }
 
 mkdir -p "$H1/.claude/prompts" "$H1/.claude/skills/orchestrate" "$H1/.claude/agents" "$H2"
+RETIRED_AGENTS="implementer implementer-hard implementer-opus commander-opus"
 for f in prompts/haiku-task.md prompts/codex-review.md skills/orchestrate/SKILL.md \
          agents/sonnet-worker.md agents/claude-reviewer.md agents/haiku-worker.md; do
   echo "old content" > "$H1/.claude/$f"
 done
+for a in $RETIRED_AGENTS; do echo "old agent" > "$H1/.claude/agents/$a.md"; done
 cat > "$H1/.claude/settings.json" <<'JSON'
 {
   "env": { "MAX_MCP_OUTPUT_TOKENS": "1000000", "LOCAL_ONLY": "keep-me" },
   "permissions": {
-    "allow": ["mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)", "Bash(ls*)"],
+    "allow": ["mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)", "Bash(ls*)",
+              "Agent(implementer)", "Agent(implementer-hard)", "Agent(implementer-opus)", "Agent(commander-opus)"],
     "defaultMode": "auto"
   },
   "effortLevel": "xhigh",
@@ -80,6 +83,22 @@ check_file "$H1/.claude/bin/repo-facts"
 check_file "$H1/.claude/hooks/git-policy.py"
 check_file "$H1/.claude/hooks/delegation-guard.py"
 check_file "$H1/.claude/hooks/subagent-verify-check.py"
+check_file "$H1/.claude/hooks/tdd-guard.py"
+check_file "$H1/.claude/hooks/tdd-guard-test.py"
+check_file "$H1/.claude/hooks/shell_words.py"
+check_file "$H1/.claude/mcp/codex-worker/codex_worker_test.py"
+check_file "$H1/.claude/agents/developer.md"
+check_file "$H1/.claude/skills/tdd/SKILL.md"
+for a in $RETIRED_AGENTS; do
+  check_gone "$H1/.claude/agents/$a.md"
+  CHECKS=$((CHECKS + 1))
+  compgen -G "$H1/.claude/backups/bundle-*/.claude/agents/$a.md" >/dev/null || fail "no backup of retired agents/$a.md"
+done
+CHECKS=$((CHECKS + 1))
+AGENTS_LEFT=$(cd "$H1/.claude/agents" && ls | sort | tr '\n' ' ')
+[ "$AGENTS_LEFT" = "codex-runner.md developer.md " ] || fail "agents left after install: $AGENTS_LEFT"
+check_grep "$WORK/install1.log" "for t in tdd-guard " "install log: post-install hint runs the tdd-guard matrix"
+check_grep "$WORK/install1.log" "codex_worker_test.py" "install log: post-install hint names the worker test"
 
 for f in prompts/haiku-task.md prompts/codex-review.md skills/orchestrate agents/sonnet-worker.md \
          agents/claude-reviewer.md agents/haiku-worker.md; do
@@ -105,10 +124,12 @@ python3 - "$H1/.claude/settings.json" <<'PY' || fail "settings.json content"
 import json, sys
 settings = json.load(open(sys.argv[1]))
 problems = []
+if settings.get("model") != "claude-opus-5-5":
+    problems.append(f"model={settings.get('model')!r}")
+if settings.get("modelSettings", {}).get("claude-opus-5-5", {}).get("effortLevel") != "high":
+    problems.append("modelSettings.claude-opus-5-5 effort missing")
 if settings.get("effortLevel") != "high":
     problems.append(f"effortLevel={settings.get('effortLevel')!r}")
-if settings.get("autoCompactWindow") != "300k":
-    problems.append("autoCompactWindow missing")
 if settings.get("bashOutputMaxChars") != 12000:
     problems.append("bashOutputMaxChars missing")
 for model, config in settings.get("modelSettings", {}).items():
@@ -120,10 +141,11 @@ if "MAX_MCP_OUTPUT_TOKENS" in env:
 if env.get("LOCAL_ONLY") != "keep-me":
     problems.append("local env entry lost")
 allow = settings.get("permissions", {}).get("allow", [])
-for stale in ("mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)"):
+for stale in ("mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)", "Agent(implementer)",
+              "Agent(implementer-hard)", "Agent(implementer-opus)", "Agent(commander-opus)"):
     if stale in allow:
         problems.append(f"stale allow {stale}")
-for wanted in ("Agent(implementer-opus)", "Agent(implementer)", "Bash(ls*)", "mcp__codex-worker__*"):
+for wanted in ("Agent(developer)", "Agent(codex-runner)", "Bash(ls*)", "mcp__codex-worker__*"):
     if wanted not in allow:
         problems.append(f"missing allow {wanted}")
 if settings.get("autoMode", {}).get("environment") != "local":
@@ -134,6 +156,7 @@ for event in ("PreToolUse", "SessionStart", "SubagentStop"):
         problems.append(f"hook event {event} missing")
 groups = {(event, entry.get("matcher")): entry for event, entries in hooks.items() for entry in entries}
 expected = [("PreToolUse", "Bash"), ("PreToolUse", "Read"), ("PreToolUse", "Agent|Task"),
+            ("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"),
             ("SessionStart", "startup|resume|clear|compact"), ("SubagentStop", None)]
 for key in expected:
     if key not in groups:
@@ -148,6 +171,9 @@ if len(bash_group) != 3:
 names = [h.get("command", "").rsplit("/", 1)[-1] for h in bash_group]
 if names != ["git-guard.py", "verify-guard.py", "git-policy.py"]:
     problems.append(f"Bash hook order {names}")
+tdd_group = groups.get(("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"), {}).get("hooks", [])
+if [h.get("command", "").rsplit("/", 1)[-1] for h in tdd_group] != ["tdd-guard.py"]:
+    problems.append(f"tdd-guard group {tdd_group}")
 if any("/old/path/git-guard.py" in h.get("command", "") for h in bash_group):
     problems.append("old union-style Bash hook still registered")
 for problem in problems:
@@ -168,6 +194,9 @@ check "installed export.sh exit status (see $WORK/export.log)" $?
 check_file "$EXPORTED/retire.json"
 check_file "$EXPORTED/claude/hooks/git-policy.py"
 check_file "$EXPORTED/claude/bin/repo-facts"
+check_file "$EXPORTED/claude/hooks/tdd-guard.py"
+check_file "$EXPORTED/claude/hooks/shell_words.py"
+check_file "$EXPORTED/claude/mcp/codex-worker/codex_worker_test.py"
 check_file "$EXPORTED/manifest.txt"
 CHECKS=$((CHECKS + 1))
 if grep -q "\./\.git/" "$EXPORTED/manifest.txt"; then fail "manifest lists .git entries"; fi
@@ -186,6 +215,8 @@ done < <(find "$EXPORTED/claude" -path '*/__pycache__' -prune -o -type f -print0
 check_file "$H2/.claude/templates/rules-standards.md"
 check_file "$H2/.claude/hooks/git-policy.py"
 check_file "$H2/.claude/bundle/retire.json"
+check_file "$H2/.claude/hooks/tdd-guard.py"
+check_file "$H2/.claude/mcp/codex-worker/codex_worker_test.py"
 check_grep "$H2/.claude/settings.json" "$H2/.claude/hooks/delegation-guard.py" "second home: rendered path"
 
 echo "checks: $CHECKS, FAILURES: $FAILURES"

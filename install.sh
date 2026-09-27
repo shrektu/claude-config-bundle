@@ -64,6 +64,7 @@ for d in bin hooks; do
   while IFS= read -r -d '' f; do install_file "$f" "$HOME/.claude/$d/${f#"$HERE"/claude/$d/}" 755; done < <(find "$HERE/claude/$d" -type f -print0)
 done
 install_file "$HERE/claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/codex_worker.py" 755
+install_file "$HERE/claude/mcp/codex-worker/codex_worker_test.py" "$HOME/.claude/mcp/codex-worker/codex_worker_test.py"
 install_file "$HERE/claude/mcp/codex-worker/requirements.txt" "$HOME/.claude/mcp/codex-worker/requirements.txt"
 printf 'CODEX_BIN=%s\n' "$CODEX_BIN" > "$HOME/.claude/mcp/codex-worker/.env"
 install_file "$HERE/codex/AGENTS.md" "$HOME/.codex/AGENTS.md"
@@ -228,7 +229,9 @@ echo "done. files changed: $CHANGED$( [ -d "$BACKUP" ] && echo "; backups in $BA
 echo "next:"
 echo "  - restart Claude Code (agents, hooks and MCP servers load at session start)"
 echo "  - claude mcp list            -> codex-worker must show Connected"
-echo '  - for t in git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
+echo '  - for t in tdd-guard git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
+echo '  - ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py'
 echo "  - bash ~/.claude/bin/verify-test.sh"
+echo "  - bash ~/.claude/bin/review-checkpoint-test.sh"
 echo "  - ~/.claude/bin/repo-facts            -> toolchain facts of the current repo (also the SessionStart hook)"
 echo "  - claude login / codex login if this machine is fresh; set autoMode.environment for this machine's repos"
