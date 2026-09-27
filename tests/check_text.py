@@ -16,6 +16,12 @@ CLAUDE_MD = REPO / "claude" / "CLAUDE.md"
 SKILLS_DIR = REPO / "claude" / "skills"
 AGENTS_DIR = REPO / "claude" / "agents"
 CODEX_WORKER = REPO / "claude" / "mcp" / "codex-worker" / "codex_worker.py"
+CODEX_WORKER_TEST = CODEX_WORKER.parent / "codex_worker_test.py"
+HOOKS_DIR = REPO / "claude" / "hooks"
+SETTINGS = REPO / "claude" / "settings.json"
+RETIRE = REPO / "retire.json"
+CODEX_AGENTS_MD = REPO / "codex" / "AGENTS.md"
+README = REPO / "README.md"
 USAGE_REPORT = REPO / "claude" / "bin" / "usage-report"
 VENV_PYTHON = Path(os.path.expanduser("~/.claude/mcp/codex-worker/.venv/bin/python"))
 
@@ -38,18 +44,32 @@ HOOK_NAMES = (
     "read-guard",
     "delegation-guard",
     "subagent-verify-check",
+    "tdd-guard",
 )
-SKILL_NAMES = ("delegate", "review", "commit", "pr-description", "repo-standards")
-IMPLEMENTER_SKILL = "repo-standards"
-COMMANDER_AGENT = "commander-opus"
-COMMANDER_MODEL = "opus"
-COMMANDER_EFFORT = "xhigh"
-COMMANDER_SKILLS = ("delegate", "review", "repo-standards", "commit")
+SHARED_HOOK_MODULE = "shell_words.py"
+SKILL_NAMES = ("delegate", "review", "commit", "pr-description", "repo-standards", "tdd")
+DEVELOPER_AGENT = "developer"
+DEVELOPER_MODEL = "claude-opus-5-5"
+DEVELOPER_EFFORT = "medium"
+DEVELOPER_SKILLS = ("tdd", "repo-standards")
+RUNNER_AGENT = "codex-runner"
+RUNNER_MODEL = "haiku"
+AGENT_NAMES = (DEVELOPER_AGENT, RUNNER_AGENT)
+RETIRED_AGENTS = ("implementer", "implementer-hard", "implementer-opus", "commander-opus")
+RETIRED_ALLOW = tuple(f"Agent({name})" for name in RETIRED_AGENTS)
+DEVELOPER_ALLOW = f"Agent({DEVELOPER_AGENT})"
+SESSION_MODEL = "claude-opus-5-5"
+SESSION_MODEL_EFFORT = "high"
+TDD_GUARD_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
+TDD_GUARD_COMMAND = "python3 __HOME__/.claude/hooks/tdd-guard.py"
+RETIRED_MODE = "final-audit"
+STALE_TERMS = re.compile(r"implementer|commander-opus|final-audit|\bXL\b")
 REVERT_SENTENCE = (
     "Never revert or discard changes you did not make (checkout/restore/stash/reset/clean are blocked "
     "by a hook); if you think a revert is needed, stop and report."
 )
-ACCEPTANCE_HEADING = re.compile(r"(?m)^\s*acceptance_criteria\s*$")
+ACCEPTANCE_HEADING = re.compile(r"(?m)^## acceptance_criteria\s*$")
+TEST_PLAN_HEADING = re.compile(r"(?m)^## test_plan\s*$")
 ABSOLUTE_PATH = re.compile(r"(?m)(?:^|\s)/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+")
 FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 HOME_LITERAL = "/home/" + "seba"
@@ -85,7 +105,6 @@ def check_claude_md() -> None:
         check(hook in text, f"CLAUDE.md does not mention the hook {hook}")
     for skill in SKILL_NAMES:
         check(skill in text, f"CLAUDE.md does not mention the skill {skill}")
-    check(COMMANDER_AGENT in text, "CLAUDE.md does not mention commander-opus")
 
 
 def check_skills() -> None:
@@ -109,38 +128,71 @@ def check_skills() -> None:
 
 def check_delegate_markers() -> None:
     text = (SKILLS_DIR / "delegate" / "SKILL.md").read_text()
-    normalized = " ".join(text.split())
-    check(bool(ACCEPTANCE_HEADING.search(text)), "delegate: no acceptance_criteria section heading")
-    check("verify --" in text, "delegate: no `verify --` in the test_command")
+    check(bool(ACCEPTANCE_HEADING.search(text)), "delegate: no `## acceptance_criteria` heading")
+    check(bool(TEST_PLAN_HEADING.search(text)), "delegate: no `## test_plan` heading")
+    check("plan_file:" in text, "delegate: no `plan_file:` in the spawn prompts")
+    check("verify --" in text, "delegate: no `verify --` in the commands")
     check(bool(ABSOLUTE_PATH.search(text)), "delegate: no absolute path in the template")
-    check(REVERT_SENTENCE in normalized, "delegate: the git-safety sentence is missing or reworded")
     check("may not touch" in text, "delegate: no repo boundary line with `may not touch`")
 
 
 def check_agents() -> None:
-    agents = sorted(AGENTS_DIR.glob("*.md"))
-    check(bool(agents), "agents/ is empty")
-    names = {p.stem for p in agents}
-    for expected in ("implementer", "implementer-hard", "implementer-opus", "codex-runner", COMMANDER_AGENT):
-        check(expected in names, f"agents/{expected}.md missing")
-    for path in agents:
+    names = sorted(p.stem for p in AGENTS_DIR.glob("*.md"))
+    check(names == sorted(AGENT_NAMES), f"agents/ holds {names}, expected {sorted(AGENT_NAMES)}")
+    for path in sorted(AGENTS_DIR.glob("*.md")):
         fields = frontmatter_of(path)
         check(bool(fields.get("model")), f"{path.name}: no model in frontmatter")
         check(bool(fields.get("effort")), f"{path.name}: no effort in frontmatter")
-        if path.stem.startswith("implementer"):
-            skills = fields.get("skills", "")
-            check(
-                IMPLEMENTER_SKILL in skills,
-                f"{path.name}: skills: does not preload {IMPLEMENTER_SKILL} (got {skills!r})",
-            )
-    commander_path = AGENTS_DIR / f"{COMMANDER_AGENT}.md"
-    if commander_path.is_file():
-        fields = frontmatter_of(commander_path)
-        check(fields.get("model") == COMMANDER_MODEL, f"{COMMANDER_AGENT}: model is {fields.get('model')!r}")
-        check(fields.get("effort") == COMMANDER_EFFORT, f"{COMMANDER_AGENT}: effort is {fields.get('effort')!r}")
+    developer = AGENTS_DIR / f"{DEVELOPER_AGENT}.md"
+    if developer.is_file():
+        fields = frontmatter_of(developer)
+        check(fields.get("model") == DEVELOPER_MODEL, f"{DEVELOPER_AGENT}: model is {fields.get('model')!r}")
+        check(fields.get("effort") == DEVELOPER_EFFORT, f"{DEVELOPER_AGENT}: effort is {fields.get('effort')!r}")
         skills = fields.get("skills", "")
-        for skill in COMMANDER_SKILLS:
-            check(skill in skills, f"{COMMANDER_AGENT}: skills: does not include {skill} (got {skills!r})")
+        for skill in DEVELOPER_SKILLS:
+            check(skill in skills, f"{DEVELOPER_AGENT}: skills: does not preload {skill} (got {skills!r})")
+        body = " ".join(FRONTMATTER.sub("", developer.read_text()).split())
+        check(REVERT_SENTENCE in body, f"{DEVELOPER_AGENT}: the git-safety sentence is missing or reworded")
+    runner = AGENTS_DIR / f"{RUNNER_AGENT}.md"
+    if runner.is_file():
+        model = frontmatter_of(runner).get("model")
+        check(model == RUNNER_MODEL, f"{RUNNER_AGENT}: model is {model!r}")
+
+
+def check_no_stale_workflow_text() -> None:
+    targets = [CLAUDE_MD, CODEX_AGENTS_MD, README]
+    targets += sorted(AGENTS_DIR.glob("*.md")) + sorted(SKILLS_DIR.glob("*/SKILL.md"))
+    for path in targets:
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            match = STALE_TERMS.search(line)
+            if match:
+                failures.append(f"{path.relative_to(REPO)}:{number} still mentions {match.group(0)!r}")
+
+
+def check_hooks_and_settings() -> None:
+    for hook in HOOK_NAMES:
+        check((HOOKS_DIR / f"{hook}.py").is_file(), f"hooks/{hook}.py missing")
+        check((HOOKS_DIR / f"{hook}-test.py").is_file(), f"hooks/{hook}-test.py missing")
+    check((HOOKS_DIR / SHARED_HOOK_MODULE).is_file(), f"hooks/{SHARED_HOOK_MODULE} missing")
+    check(CODEX_WORKER_TEST.is_file(), "codex_worker_test.py missing")
+    settings = json.loads(SETTINGS.read_text())
+    check(settings.get("model") == SESSION_MODEL, f"settings.json model is {settings.get('model')!r}")
+    effort = settings.get("modelSettings", {}).get(SESSION_MODEL, {}).get("effortLevel")
+    check(effort == SESSION_MODEL_EFFORT, f"settings.json modelSettings.{SESSION_MODEL} effort is {effort!r}")
+    allow = settings.get("permissions", {}).get("allow", [])
+    check(DEVELOPER_ALLOW in allow, f"settings.json does not allow {DEVELOPER_ALLOW}")
+    for stale in RETIRED_ALLOW:
+        check(stale not in allow, f"settings.json still allows {stale}")
+    groups = [entry for entry in settings.get("hooks", {}).get("PreToolUse", [])
+              if entry.get("matcher") == TDD_GUARD_MATCHER]
+    commands = [hook.get("command") for entry in groups for hook in entry.get("hooks", [])]
+    check(commands == [TDD_GUARD_COMMAND], f"PreToolUse {TDD_GUARD_MATCHER} runs {commands}")
+    retire = json.loads(RETIRE.read_text())
+    for name in RETIRED_AGENTS:
+        check(f"agents/{name}.md" in retire.get("files", []), f"retire.json does not retire agents/{name}.md")
+    retired_allow = retire.get("settings", {}).get("permissions.allow", [])
+    for stale in RETIRED_ALLOW:
+        check(stale in retired_allow, f"retire.json does not retire the permission {stale}")
 
 
 def check_codex_worker() -> None:
@@ -153,13 +205,13 @@ def check_codex_worker() -> None:
     interpreter = VENV_PYTHON if VENV_PYTHON.exists() else Path(sys.executable)
     code = (
         "import sys; sys.path.insert(0, %r); import codex_worker as w;"
-        "print(w.codex_review_changes(what_changed='x', review_focus='y',"
-        " project_path='/tmp', mode='bogus'), end='')" % str(CODEX_WORKER.parent)
+        "print(w.codex_review_changes(mode=%r, plan_file=%r, project_path='/tmp'), end='')"
+        % (str(CODEX_WORKER.parent), RETIRED_MODE, str(CLAUDE_MD))
     )
     result = subprocess.run([str(interpreter), "-c", code], capture_output=True, text=True)
     check(
         result.returncode == 0 and result.stdout.startswith("ERROR: unknown mode"),
-        f"codex_review_changes(mode='bogus') returned {result.stdout[:80]!r} "
+        f"codex_review_changes(mode={RETIRED_MODE!r}) returned {result.stdout[:80]!r} "
         f"(rc={result.returncode}, stderr={result.stderr.strip()[-200:]!r})",
     )
 
@@ -236,6 +288,8 @@ def main() -> int:
         check_skills,
         check_delegate_markers,
         check_agents,
+        check_no_stale_workflow_text,
+        check_hooks_and_settings,
         check_codex_worker,
         check_usage_dedup,
         check_no_home_literal,
