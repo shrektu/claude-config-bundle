@@ -1,192 +1,270 @@
 #!/usr/bin/env python3
+import json
 import os
+import re
+import shutil
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("codex-worker")
 
 REVIEW_TIMEOUT_SECONDS = 5100
+MAX_DIFF_CHARS = 120_000
+MAX_STDERR_CHARS = 2000
+INDEX_FILE_NAME = "index"
+OUTPUT_FILE_NAME = "last-message.txt"
+DEFAULT_BASE = "HEAD"
+DISABLED_FEATURES = (
+    "apps", "browser_use", "browser_use_external", "computer_use", "goals", "image_generation",
+    "in_app_browser", "multi_agent", "personality", "plugins", "remote_plugin", "skill_search", "sleep_tool",
+    "tool_suggest", "view_image", "workspace_dependencies", "fast_mode",
+)
+ACCEPTANCE_HEADING = re.compile(r"(?m)^##[ \t]+acceptance_criteria[ \t]*$")
+NEXT_HEADING = re.compile(r"(?m)^#{1,2}[ \t]")
+RECHECK_HEADER = "PREVIOUSLY REPORTED — report each again only if still present:"
 
-MODE_PLAN = "plan"
-MODE_CODE = "code"
-MODE_FINAL_AUDIT = "final-audit"
+COMMON_RULES = """You are a read-only reviewer: never modify files, never commit, never run a command that changes \
+the repository or the environment. Report ONLY defects. Read other files only to check a claim or to confirm a \
+suspected defect. No fixes, no alternatives, no new plan, no style remarks, no praise, no summary, no preamble.
+Output one line per defect, at most 30 words, most severe first, in the form {line_form}
+If there is no defect, output exactly PASS"""
 
-MODE_FOCUS = {
-    MODE_PLAN: """Review mode: PLAN REVIEW — you are reviewing a plan, not finished code.
-Look for: contradictions between the steps, dependencies the plan missed, a rollout order that leaves
-the system broken in between, data and protocol risks (migrations, on-wire compatibility, irreversible
-steps, backfills), and acceptance criteria that are missing, unmeasurable or not actually checkable.
-Read the current code wherever the plan makes a claim about it. Do not redesign the solution — report
-what would bite if the plan were executed exactly as written.""",
-    MODE_CODE: """Review mode: CODE REVIEW — the change has just been implemented.
-Look for: correctness defects, regressions in existing behaviour and in callers, contract mismatches
-(signatures, data shapes, protocol, error paths, invariants), missing or vacuous tests (tests that
-cannot fail, silently skipped tests, a bug fix with no reproducing test), and idioms that are
-deprecated or wrong for the versions pinned in this repo — the repo facts arrive in the extra context
-below; trust them over your own recollection of the library.""",
-    MODE_FINAL_AUDIT: """Review mode: FINAL AUDIT — this change was already reviewed more than once and
-the findings were fixed. Your only question is: WHAT DID THE EARLIER REVIEWS MISS. Do not restate
-findings that were already handled, and do not redesign the solution unless a defect makes the current
-design unworkable.""",
+PLAN_INSTRUCTIONS = """Review the PLAN below before it is implemented. Defects to report: false claims about the \
+existing code, contradictions, missing steps or dependencies, an unsafe order of steps, missing or uncheckable \
+acceptance criteria, behaviour without a test in test_plan, no integration test for a real path.
+""" + COMMON_RULES.format(line_form="`<section>: <defect>`.")
+
+CODE_INSTRUCTIONS = """Review the CODE CHANGE below (the DIFF against BASE) against the acceptance criteria. \
+Defects to report: bugs, regressions, broken contracts or invariants, security holes, acceptance criteria not \
+met, behaviour changed without a test, tests that cannot fail or are skipped.
+""" + COMMON_RULES.format(line_form="`<path>:<line>: <defect>`.")
+
+
+class EventType(StrEnum):
+    ERROR = "error"
+    TURN_FAILED = "turn.failed"
+    TURN_COMPLETED = "turn.completed"
+
+
+class ReviewMode(StrEnum):
+    PLAN = "plan"
+    CODE = "code"
+
+
+@dataclass(frozen=True)
+class ReviewProfile:
+    model: str
+    effort: str
+    instructions: str
+
+
+PROFILES = {
+    ReviewMode.PLAN: ReviewProfile("gpt-6-astra", "medium", PLAN_INSTRUCTIONS),
+    ReviewMode.CODE: ReviewProfile("gpt-6-sol", "high", CODE_INSTRUCTIONS),
 }
 
-OUTPUT_FORMAT = """Final response format, in exactly this order:
 
-BLOCKER
-IMPORTANT
-OPTIONAL
-  For every entry: a one-sentence statement of the defect; file:line; the conditions that trigger it;
-  the effect when it triggers; reproduced yes/no. BLOCKER = must be fixed before this lands.
-  IMPORTANT = fix now unless it is a deliberate trade-off. OPTIONAL = worth knowing, not required.
-  Leave a bucket empty instead of padding it.
-
-Checked and clean
-  What you actually verified and found correct, so the coverage is known.
-
-Could not verify
-  What you could not check and why (missing environment, unavailable data, too little context).
-  This is NOT the same as clean — never fold it into "checked and clean".
-
-PASS
-  Print PASS on its own line as the last line when there is no BLOCKER and no IMPORTANT finding."""
+@dataclass(slots=True)
+class TokenUsage:
+    input: int = 0
+    cached: int = 0
+    output: int = 0
 
 
-def resolve_project_path(project_path: Optional[str]) -> str:
+class ReviewError(Exception):
+    pass
+
+
+def resolve_project_path(project_path: str | None) -> Path:
     if project_path:
-        return str(Path(project_path).expanduser().resolve())
-
+        return Path(project_path).expanduser().resolve()
     for key in ("CLAUDE_PROJECT_DIR", "PWD"):
         value = os.environ.get(key)
         if value and Path(value).exists():
-            return str(Path(value).resolve())
+            return Path(value).resolve()
+    return Path.cwd().resolve()
 
-    return str(Path.cwd().resolve())
+
+def git(root: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env)
+
+
+def read_plan(plan_file: str) -> str:
+    path = Path(plan_file)
+    if not path.is_absolute():
+        raise ReviewError(f"plan_file {plan_file!r} is not an absolute path")
+    if not path.is_file():
+        raise ReviewError(f"plan_file {plan_file!r} is not a file")
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def acceptance_section(plan: str) -> str:
+    heading = ACCEPTANCE_HEADING.search(plan)
+    rest = plan[heading.end():] if heading else ""
+    following = NEXT_HEADING.search(rest)
+    body = (rest[:following.start()] if following else rest).strip()
+    if not body:
+        raise ReviewError("the plan has no `## acceptance_criteria` section")
+    return f"{heading.group(0)}\n{body}"
+
+
+def resolve_commit(root: Path, base: str) -> str:
+    if git(root, "rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+        raise ReviewError(f"{root} is not a git work tree")
+    found = None if base.startswith("-") else git(root, "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    if found is None or found.returncode != 0:
+        raise ReviewError(f"base {base!r} is not a commit in {root}")
+    return found.stdout.strip()
+
+
+@contextmanager
+def snapshot_index(root: Path) -> Iterator[dict[str, str]]:
+    real_index = root / git(root, "rev-parse", "--git-path", INDEX_FILE_NAME).stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="codex-review-index-") as tmp:
+        index = Path(tmp) / INDEX_FILE_NAME
+        if real_index.is_file():
+            shutil.copyfile(real_index, index)
+        env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+        added = git(root, "add", "-A", env=env)
+        if added.returncode != 0:
+            raise ReviewError(f"git add -A into a temporary index failed in {root}: {added.stderr.strip()}")
+        yield env
+
+
+def build_diff(root: Path, base: str, commit: str) -> str:
+    with snapshot_index(root) as env:
+        diff = git(root, "diff", "--cached", "--no-color", "--no-ext-diff", commit, env=env).stdout.strip("\n")
+        if len(diff) <= MAX_DIFF_CHARS:
+            return diff or "(no changes)"
+        stat = git(root, "diff", "--cached", "--no-color", "--stat", commit, env=env).stdout.strip("\n")
+    return (f"The diff is too large to inline ({len(diff)} chars). Stat against {base}, new files included:\n"
+            f"{stat}\nRead the patch with `git diff {base} -- <path>`; read files new since {base} directly.")
+
+
+def plan_prompt(root: Path, plan_file: str, plan: str) -> str:
+    return f"{PLAN_INSTRUCTIONS}\n\nProject root: {root}\n\nPLAN ({plan_file}):\n{plan}"
+
+
+def code_prompt(root: Path, base: str, plan: str, recheck: str) -> str:
+    acceptance = acceptance_section(plan)
+    commit = resolve_commit(root, base)
+    sections = [CODE_INSTRUCTIONS, f"Project root: {root}\nBASE: {base} ({commit})", acceptance]
+    if recheck.strip():
+        sections.append(f"{RECHECK_HEADER}\n{recheck.strip()}")
+    sections.append("DIFF:\n" + build_diff(root, base, commit))
+    return "\n\n".join(sections)
+
+
+def codex_argv(codex_bin: str, profile: ReviewProfile, output_path: str, root: Path) -> list[str]:
+    argv = [codex_bin, "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral",
+            "--ignore-user-config"]
+    for feature in DISABLED_FEATURES:
+        argv += ["-c", f"features.{feature}=false"]
+    argv += ["-c", 'web_search="disabled"', "-c", 'model_reasoning_summary="none"', "-m", profile.model,
+             "-c", f'model_reasoning_effort="{profile.effort}"', "-o", output_path, "-C", str(root), "-"]
+    return argv
+
+
+def json_events(stdout: str) -> list[dict]:
+    events = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def event_error(event: dict) -> str:
+    match event.get("type"):
+        case EventType.ERROR:
+            message = event.get("message")
+        case EventType.TURN_FAILED:
+            error = event.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+        case _:
+            message = None
+    return message.strip() if isinstance(message, str) else ""
+
+
+def failure_detail(stdout: str, stderr: str) -> str:
+    messages = dict.fromkeys(message for message in map(event_error, json_events(stdout)) if message)
+    detail = "\n".join([*messages, stderr.strip()]).strip()
+    return detail[-MAX_STDERR_CHARS:]
+
+
+def token_usage(stdout: str) -> TokenUsage:
+    usage = TokenUsage()
+    for event in json_events(stdout):
+        if event.get("type") != EventType.TURN_COMPLETED:
+            continue
+        counts = event.get("usage")
+        if isinstance(counts, dict):
+            usage.input += int(counts.get("input_tokens") or 0)
+            usage.cached += int(counts.get("cached_input_tokens") or 0)
+            usage.output += int(counts.get("output_tokens") or 0)
+    return usage
+
+
+def run_codex(mode: ReviewMode, profile: ReviewProfile, root: Path, prompt: str) -> str:
+    codex_bin = os.environ.get("CODEX_BIN", "codex")
+    with tempfile.TemporaryDirectory(prefix="codex-review-") as tmp:
+        output_path = os.path.join(tmp, OUTPUT_FILE_NAME)
+        try:
+            result = subprocess.run(codex_argv(codex_bin, profile, output_path, root), input=prompt, cwd=root,
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                    timeout=REVIEW_TIMEOUT_SECONDS)
+        except OSError as error:
+            return f"ERROR: Codex CLI not found or not runnable ({codex_bin}): {error}. Set CODEX_BIN."
+        except subprocess.TimeoutExpired:
+            return f"ERROR: Codex review timed out after {REVIEW_TIMEOUT_SECONDS} seconds."
+        if result.returncode != 0 or not os.path.isfile(output_path):
+            detail = failure_detail(result.stdout or "", result.stderr or "")
+            return f"ERROR: codex exited {result.returncode}\n{detail}"
+        answer = Path(output_path).read_text(encoding="utf-8", errors="replace").strip()
+    usage = token_usage(result.stdout or "")
+    tokens = f"tokens in={usage.input} cached={usage.cached} out={usage.output}"
+    return f"codex {mode} {profile.model}/{profile.effort} {tokens}\n{answer}"
 
 
 @mcp.tool()
 def codex_review_changes(
-    what_changed: str,
-    review_focus: str,
-    project_path: Optional[str] = None,
-    acceptance_criteria: str = "",
-    extra_context: str = "",
-    mode: str = MODE_CODE,
-    model: str = "gpt-6-astra",
-    reasoning_effort: str = "high",
-    service_tier: str = "default",
+    mode: str,
+    plan_file: str,
+    project_path: str | None = None,
+    base: str = DEFAULT_BASE,
+    recheck: str = "",
 ) -> str:
-    """
-    Run Codex CLI as an independent SECOND REVIEWER (read-only).
-
-    Claude is the architect, implementer-of-record and first reviewer.
-    Codex reviews the resulting plan or code adversarially and reports findings.
-    It must not edit, commit or otherwise modify anything.
-    Codex never implements; the former codex_execute_task tool was removed.
-
-    mode: "plan" (review a plan before implementation), "code" (default, review the diff)
-    or "final-audit" (what did the earlier reviews miss).
-    """
-
-    if mode not in MODE_FOCUS:
-        allowed = ", ".join(MODE_FOCUS)
-        return f"ERROR: unknown mode {mode!r}. Allowed modes: {allowed}."
-
-    root = resolve_project_path(project_path)
-    codex_bin = os.environ.get("CODEX_BIN", "codex")
-
-    prompt = f"""
-You are Codex acting as an INDEPENDENT SECOND REVIEWER.
-
-Role split:
-- Claude designed this change, an implementer agent wrote it, and Claude has already
-  reviewed it once.
-- You are an adversarial reviewer. Your value is finding what Claude missed.
-- You are READ-ONLY: do not edit, create or delete files. Do not commit, branch, push,
-  or run any command that mutates the repository or the environment.
-- Read the actual code. Do NOT trust any claim in the description below — verify it.
-- Where you can, REPRODUCE a defect (a throwaway script in /tmp is fine) rather than
-  asserting it. A reproduced finding is worth ten speculative ones.
-- Report only defects that would actually bite: wrong behaviour, security or tenancy
-  holes, data corruption, broken invariants, violated project conventions, untestable
-  or silently-skipped tests, missing coverage of a stated requirement.
-- Style preferences are not defects. Do not restate what the code does.
-- If a design decision looks wrong but was deliberate, say so and argue against it on
-  the merits instead of filing it as a bug.
-
-{MODE_FOCUS[mode]}
-
-Project root:
-{root}
-
-What was changed (Claude's account — verify it, do not assume it is true):
-{what_changed}
-
-What to focus the review on:
-{review_focus}
-
-Acceptance criteria the change is supposed to meet:
-{acceptance_criteria or "[none given — infer from the task]"}
-
-Extra context:
-{extra_context}
-
-{OUTPUT_FORMAT}
-""".strip()
-
-    # NOTE: `codex exec` has no --ask-for-approval flag (codex-cli 0.144.3); passing it
-    # makes the CLI exit with a usage error. exec is non-interactive by definition.
-    codex_args = [
-        codex_bin,
-        "exec",
-        "--sandbox",
-        "read-only",
-        "--skip-git-repo-check",
-        "-m",
-        model,
-        "-c",
-        f'model_reasoning_effort="{reasoning_effort}"',
-    ]
-    codex_args += ["-c", f'service_tier="{service_tier}"']
-    codex_args += ["-C", root, "-"]
-
+    """Read-only Codex review. mode "plan": gpt-6-astra reviews the plan file. mode "code": gpt-6-sol reviews
+    the diff of project_path against base (a commit; use the review checkpoint SHA after a fix round) with the
+    plan's acceptance_criteria; recheck lists the previously reported defects. Returns a token header line and
+    then `PASS` or one line per defect."""
     try:
-        result = subprocess.run(
-            codex_args,
-            input=prompt,
-            cwd=root,
-            text=True,
-            capture_output=True,
-            timeout=REVIEW_TIMEOUT_SECONDS,
-        )
-    except FileNotFoundError:
-        return "ERROR: Codex CLI not found. Set CODEX_BIN to the absolute path from `command -v codex`."
-    except subprocess.TimeoutExpired:
-        return f"ERROR: Codex review timed out after {REVIEW_TIMEOUT_SECONDS} seconds."
-
-    stdout = (result.stdout or "").strip()
-    stderr = (result.stderr or "").strip()
-
-    if result.returncode != 0:
-        return f"""ERROR: Codex review exited with code {result.returncode}.
-
-STDOUT:
-{stdout[-12000:]}
-
-STDERR:
-{stderr[-12000:]}
-"""
-
-    return f"""Codex review completed (mode={mode}, model={model}, reasoning_effort={reasoning_effort}, service_tier={service_tier}, sandbox=read-only).
-
-Findings:
-{stdout[-20000:]}
-
-STDERR:
-{stderr[-4000:]}
-"""
+        review_mode = ReviewMode(mode)
+    except ValueError:
+        return f"ERROR: unknown mode {mode!r}. Allowed modes: {', '.join(ReviewMode)}."
+    try:
+        plan = read_plan(plan_file)
+        root = resolve_project_path(project_path)
+        if not root.is_dir():
+            raise ReviewError(f"project path {root} is not a directory")
+        if review_mode is ReviewMode.PLAN:
+            prompt = plan_prompt(root, plan_file, plan)
+        else:
+            prompt = code_prompt(root, base, plan, recheck)
+    except ReviewError as error:
+        return f"ERROR: {error}"
+    return run_codex(review_mode, PROFILES[review_mode], root, prompt)
 
 
 if __name__ == "__main__":
