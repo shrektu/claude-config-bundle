@@ -71,6 +71,9 @@ statusline script, Codex `AGENTS.md`.
 
 ## After installing
 
+Code review runs on gpt-6-sol, which needs codex-cli 0.157.1 or newer: an older CLI makes the API answer
+"The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account". Check `codex --version`.
+
 ```bash
 for h in tdd-guard git-guard git-policy verify-guard read-guard delegation-guard subagent-verify-check; do
   python3 ~/.claude/hooks/$h-test.py || echo "FAILED: $h"
