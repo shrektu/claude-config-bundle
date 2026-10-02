@@ -9,6 +9,9 @@ and settings entries are backed up and removed). settings.json is MERGED (bundle
 machine keeps env and autoMode, allow/deny lists are unioned, hooks are replaced per event+matcher so a hook
 is never registered twice; local-only matchers stay). ~/.claude.json
 gets the codex-worker MCP server, ~/.codex/config.toml gets the codex-worker block appended if missing.
+claude/lint/ruff.toml is installed to ~/.claude/lint/ruff.toml only when that file is absent. After the run only
+the 5 newest ~/.claude/backups/bundle-* directories are kept. When ruff is not on PATH it is installed with
+`uv tool install ruff`, or a warning says lint-guard is inactive.
 Run it from a normal terminal, not from inside a Claude Code session.
 USAGE
 }
@@ -20,6 +23,7 @@ BACKUP=$HOME/.claude/backups/bundle-$STAMP
 CODEX_BIN=$(command -v codex || true)
 [ -n "$CODEX_BIN" ] || { echo "codex CLI not found on PATH - install it first (https://chatgpt.com/codex/install.sh)"; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
+BACKUPS_KEPT=5
 CHANGED=0
 
 render() { sed -e "s#__CODEX_BIN__#$CODEX_BIN#g" -e "s#__HOME__#$HOME#g" "$1"; }
@@ -63,6 +67,9 @@ for d in bin hooks; do
   [ -d "$HERE/claude/$d" ] || continue
   while IFS= read -r -d '' f; do install_file "$f" "$HOME/.claude/$d/${f#"$HERE"/claude/$d/}" 755; done < <(find "$HERE/claude/$d" -type f -print0)
 done
+if [ -f "$HERE/claude/lint/ruff.toml" ] && [ ! -e "$HOME/.claude/lint/ruff.toml" ]; then
+  install_file "$HERE/claude/lint/ruff.toml" "$HOME/.claude/lint/ruff.toml"
+fi
 install_file "$HERE/claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/codex_worker.py" 755
 install_file "$HERE/claude/mcp/codex-worker/codex_worker_test.py" "$HOME/.claude/mcp/codex-worker/codex_worker_test.py"
 install_file "$HERE/claude/mcp/codex-worker/requirements.txt" "$HOME/.claude/mcp/codex-worker/requirements.txt"
@@ -146,6 +153,17 @@ if [ ! -x "$VENV/bin/python" ] || ! cmp -s "$REQ" "$VENV/.installed-requirements
 fi
 "$VENV/bin/python" -c "import mcp" || { echo "venv is missing the mcp package"; exit 1; }
 
+RUFF_WARNING="WARNING: ruff is not installed, lint-guard is inactive (uv tool install ruff)"
+if ! command -v ruff >/dev/null; then
+  HAVE_UV=0
+  command -v uv >/dev/null && HAVE_UV=1
+  if [ "$HAVE_UV" = 1 ]; then uv tool install ruff || true; fi
+  if ! command -v ruff >/dev/null; then
+    echo "$RUFF_WARNING"
+    if [ "$HAVE_UV" = 1 ]; then echo "uv tool bin directory (add it to PATH): $(uv tool dir --bin)"; fi
+  fi
+fi
+
 SETTINGS=$HOME/.claude/settings.json
 RENDERED_SETTINGS=$(mktemp)
 render "$HERE/claude/settings.json" > "$RENDERED_SETTINGS"
@@ -224,12 +242,17 @@ else
 fi
 python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" "$CODEX_CFG" && echo "~/.codex/config.toml: valid TOML"
 
+while IFS= read -r stale; do
+  rm -rf "$stale"
+  echo "rotated backup: $stale"
+done < <(find "$HOME/.claude/backups" -mindepth 1 -maxdepth 1 -type d -name 'bundle-*' | sort -r | tail -n +$((BACKUPS_KEPT + 1)))
+
 echo
 echo "done. files changed: $CHANGED$( [ -d "$BACKUP" ] && echo "; backups in $BACKUP" )"
 echo "next:"
 echo "  - restart Claude Code (agents, hooks and MCP servers load at session start)"
 echo "  - claude mcp list            -> codex-worker must show Connected"
-echo '  - for t in tdd-guard comment-guard git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
+echo '  - for t in tdd-guard comment-guard lint-guard bash-write-guard git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
 echo '  - ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py'
 echo "  - bash ~/.claude/bin/verify-test.sh"
 echo "  - bash ~/.claude/bin/review-checkpoint-test.sh"

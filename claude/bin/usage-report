@@ -6,6 +6,7 @@ import glob
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -25,13 +26,30 @@ BIG_READ_CHARS = 3_000 * CHARS_PER_TOKEN
 TOP_TOOLS = 8
 CODEX_TOOL = "mcp__codex-worker__codex_review_changes"
 RECORD_KEY_PREFIX = "record-"
-VERIFY_MARKER = "verify"
+HOOKS_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), os.pardir, "hooks")
 
-TEST_COMMAND = re.compile(
-    r"\b(pytest|vitest|npm (run )?(test|lint|build|e2e)|make (test|lint|build|check|benchmark)"
-    r"|ruff|eslint|tsc\b|playwright|cargo (test|build|clippy)|go test|uv run pytest|alembic"
-    r"|pio (run|test)|ctest|cmake --build|docker (compose )?build)"
+sys.dont_write_bytecode = True
+sys.path.insert(0, HOOKS_DIR)
+from shell_words import (  # noqa: E402
+    MAX_SHELL_DEPTH,
+    SHELLS,
+    is_verify_word,
+    parse_segment,
+    split_heredocs,
+    split_segments,
+    strip_prefix,
 )
+
+SHELL_COMMAND_FLAG = "c"
+
+RUNNER_BODY = (
+    r"(?:pytest|vitest|npm (?:run )?(?:test|lint|build|e2e)|make (?:test|lint|build|check|benchmark)"
+    r"|ruff|eslint|tsc\b|playwright|cargo (?:test|build|clippy)|go test|alembic"
+    r"|pio (?:run|test)|ctest|cmake --build|docker (?:compose )?build)"
+)
+RUNNER_PREFIX = r"(?:(?:uv run|poetry run|npx|pnpm exec|python3?\s+-m)\s+)?"
+EXECUTED_RUNNER = re.compile(RUNNER_PREFIX + RUNNER_BODY)
+WRAPPED_RUNNER = re.compile(r"\b" + RUNNER_BODY)
 
 
 @dataclass
@@ -107,6 +125,31 @@ def result_text(content) -> str:
     return content if isinstance(content, str) else str(content or "")
 
 
+def shell_command_string(args: list[str]) -> str | None:
+    for index, arg in enumerate(args[:-1]):
+        if arg.startswith("-") and not arg.startswith("--") and SHELL_COMMAND_FLAG in arg:
+            return args[index + 1]
+    return None
+
+
+def count_runs(command: str, depth: int = 0) -> tuple[int, int]:
+    verify_runs = raw_runs = 0
+    for segment in split_segments(split_heredocs(command).command):
+        words = strip_prefix(parse_segment(segment).words)
+        if not words:
+            continue
+        executable = os.path.basename(words[0])
+        nested = shell_command_string(words[1:]) if executable in SHELLS and depth < MAX_SHELL_DEPTH else None
+        if nested is not None:
+            inner_verify, inner_raw = count_runs(nested, depth + 1)
+            verify_runs, raw_runs = verify_runs + inner_verify, raw_runs + inner_raw
+        elif is_verify_word(executable):
+            verify_runs += bool(WRAPPED_RUNNER.search(" ".join(words[1:])))
+        elif EXECUTED_RUNNER.match(" ".join([executable, *words[1:]])):
+            raw_runs += 1
+    return verify_runs, raw_runs
+
+
 def scan(path: str, stats: Stats) -> None:
     is_sub = SUBAGENT_MARKER in path
     tool_names = {}
@@ -147,11 +190,9 @@ def scan(path: str, stats: Stats) -> None:
                             unbounded_reads.add(block.get("id"))
                     elif name == "Bash":
                         command = str(params.get("command") or "")
-                        if TEST_COMMAND.search(command):
-                            if VERIFY_MARKER in command:
-                                stats.tests_verify += 1
-                            else:
-                                stats.tests_raw += 1
+                        verify_runs, raw_runs = count_runs(command)
+                        stats.tests_verify += verify_runs
+                        stats.tests_raw += raw_runs
             elif kind == "user" and isinstance(message.get("content"), list):
                 for block in message["content"]:
                     if not isinstance(block, dict) or block.get("type") != "tool_result":

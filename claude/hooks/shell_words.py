@@ -2,7 +2,17 @@
 import os
 import re
 import shlex
+from dataclasses import dataclass
 
+REDIRECT_OPERATORS = frozenset({">", ">>", ">|", "&>", "&>>"})
+FD_DUP_OPERATOR = ">&"
+INPUT_OPERATOR_PREFIX = "<"
+QUOTES = "'\""
+MIN_QUOTED_LENGTH = 2
+FD_CLOSE = "-"
+HEREDOC = re.compile(
+    r"(?<!<)<<(?!<)(-?)[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|([A-Za-z_][^\s;&|<>()'\"]*))"
+)
 VERIFY_NAME = "verify"
 VERIFY_PATH_SUFFIX = "/bin/verify"
 MAX_SHELL_DEPTH = 3
@@ -28,6 +38,13 @@ SHELL_OPTS_WITH_ARG = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 SEGMENT_BREAKS = ";&|\n()"
 
 
+def is_redirect_part(command, index):
+    char = command[index]
+    follows_redirect = index > 0 and command[index - 1] == ">"
+    precedes_redirect = index + 1 < len(command) and command[index + 1] == ">"
+    return (char in "|&" and follows_redirect) or (char == "&" and precedes_redirect)
+
+
 def split_segments(command):
     parts, current, quote, i, n = [], [], "", 0, len(command)
     while i < n:
@@ -43,7 +60,7 @@ def split_segments(command):
         elif char in "'\"":
             quote = char
             current.append(char)
-        elif char in SEGMENT_BREAKS:
+        elif char in SEGMENT_BREAKS and not is_redirect_part(command, i):
             parts.append("".join(current))
             current = []
         else:
@@ -129,3 +146,66 @@ def runs_verify(command, depth=0):
     if depth > MAX_SHELL_DEPTH:
         return False
     return any(segment_runs_verify(segment, depth) for segment in split_segments(command))
+
+
+@dataclass(frozen=True, slots=True)
+class Heredocs:
+    command: str
+    bodies: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSegment:
+    words: list[str]
+    targets: list[str]
+
+
+def split_heredocs(command):
+    kept, bodies, waiting, body = [], [], [], []
+    for line in command.split("\n"):
+        if waiting:
+            delimiter, indented = waiting[0]
+            if (line.lstrip("\t") if indented else line) == delimiter:
+                waiting.pop(0)
+                bodies.append("\n".join(body))
+                body = []
+            else:
+                body.append(line)
+            continue
+        kept.append(line)
+        waiting = [(next(group for group in match.groups()[1:] if group), match.group(1) == "-")
+                   for match in HEREDOC.finditer(line)]
+    return Heredocs("\n".join(kept), bodies)
+
+
+def unquote(word):
+    if len(word) >= MIN_QUOTED_LENGTH and word[0] in QUOTES and word[-1] == word[0]:
+        return word[1:-1]
+    return word
+
+
+def parse_segment(text):
+    lexer = shlex.shlex(text, posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return ParsedSegment(tokens_of(text), [])
+    words, targets, skip_next = [], [], False
+    for index, token in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        is_dup = token == FD_DUP_OPERATOR and following is not None and (
+            following.isdigit() or following == FD_CLOSE
+        )
+        if token in REDIRECT_OPERATORS or (token == FD_DUP_OPERATOR and not is_dup):
+            if following is not None:
+                targets.append(unquote(following))
+            skip_next = True
+        elif is_dup or token.startswith(INPUT_OPERATOR_PREFIX):
+            skip_next = True
+        else:
+            words.append(unquote(token))
+    return ParsedSegment(words, targets)

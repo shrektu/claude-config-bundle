@@ -41,7 +41,8 @@ each finding, sends the real ones back as one fix round, and runs the unit and i
 After a fix round sol re-reviews only the checkpoint diff plus the earlier findings. Fast path: a change of
 ≤ ~20 lines in ≤ 2 files outside any risk area is done by Claude directly, still test-first, without
 Codex reviews or the developer. The relay passes only paths and SHAs; the codex-worker MCP server builds the
-prompt and returns `PASS` or one line per defect under a token header.
+prompt and returns `PASS` or one `H:`/`L:` line per defect (H = real defect, L = minor; L never opens a
+fix round) under a token header.
 
 Hooks (`claude/hooks/`, registered in `settings.json`): `git-guard.py` (destructive git),
 `git-policy.py` (branch rule + commit message format), `verify-guard.py` (bare test/lint/build),
@@ -49,8 +50,11 @@ Hooks (`claude/hooks/`, registered in `settings.json`): `git-guard.py` (destruct
 plan file), `tdd-guard.py` (the developer edits production code only after a test edit and a
 `VERIFY FAIL`), `comment-guard.py` (no edit may add a comment to code; directives and one-line
 docstrings pass; `--scan [--raw] FILE…` lists findings), `subagent-verify-check.py` (the developer must
-verify after its last edit), plus `repo-facts` as the SessionStart context. `shell_words.py` is their
-shared command parser, `code_files.py` their shared code-file and comment-syntax map. Each hook
+verify after its last edit), `lint-guard.py` (an edit may not add a ruff violation, or an eslint one where
+the repo has an eslint config; the repo's own config wins, else `~/.claude/lint/ruff.toml`; it fails open),
+`bash-write-guard.py` (a Bash command may not write a code file inside a git work tree), plus `repo-facts`
+as the SessionStart context. `shell_words.py` is their shared command parser, `code_files.py` their shared
+code-file and comment-syntax map, `edit_texts.py` their shared before/after texts of an edit. Each hook
 ships with a `*-test.py` matrix; the worker ships with `codex_worker_test.py`.
 
 Skills (`claude/skills/`): `tdd` (red → green → refactor, test_plan design, `tdd_exempt:`), `delegate`
@@ -67,7 +71,9 @@ CLIs (`claude/bin/`): `verify` (runs checks, keeps the log on disk, prints the s
 CLAUDE.md, settings.json (workflow keys, permissions, hooks, output caps), `agents/`, `skills/`,
 `templates/` (the `.claude/rules/standards.md` template for projects), `bin/` (verify,
 review-checkpoint, repo-facts, usage-report), `hooks/` (git-guard, git-policy, verify-guard, read-guard,
-delegation-guard, tdd-guard, comment-guard, subagent-verify-check, shell_words, code_files + their test matrices), `retire.json` (what install.sh removes
+delegation-guard, tdd-guard, comment-guard, lint-guard, bash-write-guard, subagent-verify-check, shell_words,
+code_files, edit_texts + their test matrices), `lint/ruff.toml` (the global ruff config; install.sh never
+overwrites an existing one), `retire.json` (what install.sh removes
 from an older home), the codex-worker MCP server with its unit test and its registration for Claude and Codex, the
 statusline script, Codex `AGENTS.md`.
 
@@ -77,7 +83,7 @@ Code review runs on gpt-6-sol, which needs codex-cli 0.157.1 or newer: an older 
 "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account". Check `codex --version`.
 
 ```bash
-for h in tdd-guard comment-guard git-guard git-policy verify-guard read-guard delegation-guard subagent-verify-check; do
+for h in tdd-guard comment-guard lint-guard bash-write-guard git-guard git-policy verify-guard read-guard delegation-guard subagent-verify-check; do
   python3 ~/.claude/hooks/$h-test.py || echo "FAILED: $h"
 done
 ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py
@@ -85,6 +91,9 @@ bash ~/.claude/bin/review-checkpoint-test.sh
 ~/.claude/bin/repo-facts                  # inside a repo: versions, locked vs installed
 ~/.claude/bin/usage-report --days 30      # token/context baseline
 ```
+
+install.sh keeps the 5 newest `~/.claude/backups/bundle-*` directories and removes older ones.
+`settings.json` sets `autoCompactWindow` to `200k`.
 
 ## What stays local on purpose
 

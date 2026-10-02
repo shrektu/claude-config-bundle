@@ -32,6 +32,7 @@
       "effortLevel": "high"
     }
   },
+  "autoCompactWindow": "200k",
   "skipDangerousModePermissionPrompt": true,
   "skipWorkflowUsageWarning": true,
   "theme": "auto",
@@ -62,6 +63,12 @@
             "command": "python3 __HOME__/.claude/hooks/git-policy.py",
             "timeout": 10,
             "statusMessage": "git-policy"
+          },
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/bash-write-guard.py",
+            "timeout": 10,
+            "statusMessage": "bash-write-guard"
           }
         ]
       },
@@ -101,6 +108,12 @@
             "command": "python3 __HOME__/.claude/hooks/comment-guard.py",
             "timeout": 10,
             "statusMessage": "comment-guard"
+          },
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/lint-guard.py",
+            "timeout": 10,
+            "statusMessage": "lint-guard"
           }
         ]
       }

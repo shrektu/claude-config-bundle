@@ -24,10 +24,21 @@ check() { CHECKS=$((CHECKS + 1)); if [ "$2" != 0 ]; then fail "$1"; fi; }
 check_file() { CHECKS=$((CHECKS + 1)); [ -e "$1" ] || fail "missing $1"; }
 check_gone() { CHECKS=$((CHECKS + 1)); [ ! -e "$1" ] || fail "still present $1"; }
 check_grep() { CHECKS=$((CHECKS + 1)); grep -qF -- "$2" "$1" 2>/dev/null || fail "$3"; }
-run_install() { env -i HOME="$1" PATH="$FAKEBIN:/usr/bin:/bin" USER="${USER:-tester}" TERM=dumb \
+SYSBIN=$WORK/sysbin
+UVBIN=$WORK/uvbin
+RUFFBIN=$WORK/ruffbin
+run_install() { env -i HOME="$1" PATH="${4:-$FAKEBIN:$SYSBIN}" USER="${USER:-tester}" TERM=dumb \
   bash "$2" >"$3" 2>&1; }
 
-mkdir -p "$FAKEBIN"
+mkdir -p "$FAKEBIN" "$SYSBIN" "$UVBIN" "$RUFFBIN"
+for f in /usr/bin/* /bin/*; do
+  case ${f##*/} in uv|uvx|ruff) continue ;; esac
+  ln -sf "$f" "$SYSBIN/${f##*/}"
+done
+printf '#!/bin/sh\ncase "$*" in\n  "tool dir --bin") echo "%s/uv-tool-bin" ;;\n  *) echo "$*" > "%s/uv-called" ;;\nesac\n' \
+  "$UVBIN" "$UVBIN" > "$UVBIN/uv"
+printf '#!/bin/sh\necho "ruff 0.0.0-test"\n' > "$RUFFBIN/ruff"
+chmod 755 "$UVBIN/uv" "$RUFFBIN/ruff"
 printf '#!/bin/sh\necho "codex-cli 0.0.0-test"\n' > "$FAKEBIN/codex"
 chmod 755 "$FAKEBIN/codex"
 
@@ -64,6 +75,15 @@ cat > "$H1/.claude/settings.json" <<'JSON'
   }
 }
 JSON
+RETIRED_HOME_ENTRIES="audit-2026-09-12 settings.json.bak-manual settings.json.bak-manual2"
+mkdir -p "$H1/.claude/audit-2026-09-12" "$H1/.claude/lint" "$H1/.claude/backups/unrelated"
+echo "old audit" > "$H1/.claude/audit-2026-09-12/report.md"
+echo "{}" > "$H1/.claude/settings.json.bak-manual"
+echo "{}" > "$H1/.claude/settings.json.bak-manual2"
+CUSTOM_RUFF='line-length = 77'
+echo "$CUSTOM_RUFF" > "$H1/.claude/lint/ruff.toml"
+FAKE_BACKUPS="20200101-000001 20200101-000002 20200101-000003 20200101-000004 20200101-000005 20200101-000006 20200101-000007"
+for stamp in $FAKE_BACKUPS; do mkdir -p "$H1/.claude/backups/bundle-$stamp"; done
 stub_venv "$H1"
 stub_venv "$H2"
 
@@ -89,7 +109,25 @@ check_file "$H1/.claude/hooks/shell_words.py"
 check_file "$H1/.claude/hooks/comment-guard.py"
 check_file "$H1/.claude/hooks/comment-guard-test.py"
 check_file "$H1/.claude/hooks/code_files.py"
+check_file "$H1/.claude/hooks/edit_texts.py"
+check_file "$H1/.claude/hooks/lint-guard.py"
+check_file "$H1/.claude/hooks/lint-guard-test.py"
+check_file "$H1/.claude/hooks/bash-write-guard.py"
+check_file "$H1/.claude/hooks/bash-write-guard-test.py"
 check_file "$H1/.claude/mcp/codex-worker/codex_worker_test.py"
+check_grep "$H1/.claude/lint/ruff.toml" "$CUSTOM_RUFF" "install overwrote an existing ~/.claude/lint/ruff.toml"
+for entry in $RETIRED_HOME_ENTRIES prompts; do
+  check_gone "$H1/.claude/$entry"
+  CHECKS=$((CHECKS + 1))
+  compgen -G "$H1/.claude/backups/bundle-2*/.claude/$entry" >/dev/null || fail "no backup of retired $entry"
+done
+CHECKS=$((CHECKS + 1))
+BACKUPS_LEFT=$(cd "$H1/.claude/backups" && ls -d bundle-* | wc -l | tr -d ' ')
+[ "$BACKUPS_LEFT" = 5 ] || fail "backup rotation kept $BACKUPS_LEFT bundle-* dirs, wanted 5"
+check_gone "$H1/.claude/backups/bundle-20200101-000001"
+check_gone "$H1/.claude/backups/bundle-20200101-000003"
+check_file "$H1/.claude/backups/bundle-20200101-000007"
+check_file "$H1/.claude/backups/unrelated"
 check_file "$H1/.claude/agents/developer.md"
 check_file "$H1/.claude/skills/tdd/SKILL.md"
 for a in $RETIRED_AGENTS; do
@@ -170,14 +208,16 @@ if len(groups) != len(expected) + 1:
 if ("PreToolUse", "Grep") not in groups:
     problems.append("local-only Grep matcher dropped")
 bash_group = groups.get(("PreToolUse", "Bash"), {}).get("hooks", [])
-if len(bash_group) != 3:
-    problems.append(f"Bash group has {len(bash_group)} hook commands, wanted 3")
+if len(bash_group) != 4:
+    problems.append(f"Bash group has {len(bash_group)} hook commands, wanted 4")
 names = [h.get("command", "").rsplit("/", 1)[-1] for h in bash_group]
-if names != ["git-guard.py", "verify-guard.py", "git-policy.py"]:
+if names != ["git-guard.py", "verify-guard.py", "git-policy.py", "bash-write-guard.py"]:
     problems.append(f"Bash hook order {names}")
 tdd_group = groups.get(("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"), {}).get("hooks", [])
-if [h.get("command", "").rsplit("/", 1)[-1] for h in tdd_group] != ["tdd-guard.py", "comment-guard.py"]:
+if [h.get("command", "").rsplit("/", 1)[-1] for h in tdd_group] != ["tdd-guard.py", "comment-guard.py", "lint-guard.py"]:
     problems.append(f"Edit|Write group {tdd_group}")
+if settings.get("autoCompactWindow") != "200k":
+    problems.append(f"autoCompactWindow={settings.get('autoCompactWindow')!r}")
 if any("/old/path/git-guard.py" in h.get("command", "") for h in bash_group):
     problems.append("old union-style Bash hook still registered")
 for problem in problems:
@@ -202,6 +242,10 @@ check_file "$EXPORTED/claude/hooks/tdd-guard.py"
 check_file "$EXPORTED/claude/hooks/shell_words.py"
 check_file "$EXPORTED/claude/hooks/comment-guard.py"
 check_file "$EXPORTED/claude/hooks/code_files.py"
+check_file "$EXPORTED/claude/hooks/edit_texts.py"
+check_file "$EXPORTED/claude/hooks/lint-guard.py"
+check_file "$EXPORTED/claude/hooks/bash-write-guard.py"
+check_file "$EXPORTED/claude/lint/ruff.toml"
 check_file "$EXPORTED/claude/mcp/codex-worker/codex_worker_test.py"
 check_file "$EXPORTED/manifest.txt"
 CHECKS=$((CHECKS + 1))
@@ -219,11 +263,30 @@ while IFS= read -r -d '' file; do
   check_file "$H2/.claude/$rel"
 done < <(find "$EXPORTED/claude" -path '*/__pycache__' -prune -o -type f -print0)
 check_file "$H2/.claude/templates/rules-standards.md"
+check_file "$H2/.claude/lint/ruff.toml"
+check_file "$H2/.claude/hooks/lint-guard.py"
 check_file "$H2/.claude/hooks/git-policy.py"
 check_file "$H2/.claude/bundle/retire.json"
 check_file "$H2/.claude/hooks/tdd-guard.py"
 check_file "$H2/.claude/mcp/codex-worker/codex_worker_test.py"
 check_grep "$H2/.claude/settings.json" "$H2/.claude/hooks/delegation-guard.py" "second home: rendered path"
+
+mkdir -p "$WORK/home-uv" "$WORK/home-none" "$WORK/home-ruff"
+for home in home-uv home-none home-ruff; do stub_venv "$WORK/$home"; done
+run_install "$WORK/home-uv" "$ROOT/install.sh" "$WORK/install-uv.log" "$UVBIN:$FAKEBIN:$SYSBIN"
+check "install without ruff but with uv, exit status" $?
+check_grep "$UVBIN/uv-called" "tool install ruff" "uv was not asked to install ruff"
+check_grep "$WORK/install-uv.log" "lint-guard is inactive" "no warning although ruff is still off PATH after uv"
+check_grep "$WORK/install-uv.log" "$UVBIN/uv-tool-bin" "warning does not say where uv put ruff"
+rm -f "$UVBIN/uv-called"
+run_install "$WORK/home-none" "$ROOT/install.sh" "$WORK/install-none.log"
+check "install without ruff and uv, exit status" $?
+check_grep "$WORK/install-none.log" "lint-guard is inactive" "no warning that lint-guard is inactive"
+run_install "$WORK/home-ruff" "$ROOT/install.sh" "$WORK/install-ruff.log" "$RUFFBIN:$UVBIN:$FAKEBIN:$SYSBIN"
+check "install with ruff present, exit status" $?
+check_gone "$UVBIN/uv-called"
+CHECKS=$((CHECKS + 1))
+if grep -q "lint-guard is inactive" "$WORK/install-ruff.log"; then fail "warned about ruff although it is installed"; fi
 
 echo "checks: $CHECKS, FAILURES: $FAILURES"
 if [ "$FAILURES" != 0 ]; then

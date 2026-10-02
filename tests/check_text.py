@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -46,8 +47,28 @@ HOOK_NAMES = (
     "subagent-verify-check",
     "tdd-guard",
     "comment-guard",
+    "lint-guard",
+    "bash-write-guard",
 )
-SHARED_HOOK_MODULES = ("shell_words.py", "code_files.py")
+SHARED_HOOK_MODULES = ("shell_words.py", "code_files.py", "edit_texts.py")
+RUFF_CONFIG = REPO / "claude" / "lint" / "ruff.toml"
+RUFF_SELECTED_FAMILIES = (
+    "E", "F", "W", "I", "UP", "B", "SIM", "C4", "PERF", "RET", "PIE", "FURB", "PTH", "ARG", "ERA", "RUF",
+    "PL", "C90",
+)
+RUFF_TEST_GLOBS = ("**/tests/**", "**/test_*.py", "**/*_test.py", "**/*-test.py", "**/conftest.py")
+RUFF_TEST_IGNORES = ("PLR2004", "ARG", "S101", "PLR0913")
+RUFF_TARGET_VERSION = "py312"
+RUFF_LINE_LENGTH = 110
+RUFF_MAX_ARGS = 6
+RUFF_MAX_COMPLEXITY = 10
+AUTO_COMPACT_WINDOW = "200k"
+STALE_DOC = REPO / "docs" / "PLAN-superworkflow.md"
+RETIRED_HOME_FILES = ("audit-2026-09-12", "prompts", "settings.json.bak-manual", "settings.json.bak-manual2")
+BASH_MATCHER = "Bash"
+BASH_COMMANDS = tuple(f"python3 __HOME__/.claude/hooks/{name}.py"
+                      for name in ("git-guard", "verify-guard", "git-policy", "bash-write-guard"))
+LINT_GUARD_COMMAND = "python3 __HOME__/.claude/hooks/lint-guard.py"
 SKILL_NAMES = ("delegate", "review", "commit", "pr-description", "repo-standards", "tdd", "quality-bar")
 DEVELOPER_AGENT = "developer"
 DEVELOPER_MODEL = "claude-sonnet-5-5"
@@ -192,13 +213,50 @@ def check_hooks_and_settings() -> None:
     groups = [entry for entry in settings.get("hooks", {}).get("PreToolUse", [])
               if entry.get("matcher") == TDD_GUARD_MATCHER]
     commands = [hook.get("command") for entry in groups for hook in entry.get("hooks", [])]
-    check(commands == [TDD_GUARD_COMMAND, COMMENT_GUARD_COMMAND], f"PreToolUse {TDD_GUARD_MATCHER} runs {commands}")
+    check(
+        commands == [TDD_GUARD_COMMAND, COMMENT_GUARD_COMMAND, LINT_GUARD_COMMAND],
+        f"PreToolUse {TDD_GUARD_MATCHER} runs {commands}",
+    )
+    bash_groups = [entry for entry in settings.get("hooks", {}).get("PreToolUse", [])
+                   if entry.get("matcher") == BASH_MATCHER]
+    bash_commands = [hook.get("command") for entry in bash_groups for hook in entry.get("hooks", [])]
+    check(bash_commands == list(BASH_COMMANDS), f"PreToolUse {BASH_MATCHER} runs {bash_commands}")
+    check(
+        settings.get("autoCompactWindow") == AUTO_COMPACT_WINDOW,
+        f"settings.json autoCompactWindow is {settings.get('autoCompactWindow')!r}",
+    )
     retire = json.loads(RETIRE.read_text())
+    for name in RETIRED_HOME_FILES:
+        check(name in retire.get("files", []), f"retire.json does not retire {name}")
+    check(not STALE_DOC.exists(), f"{STALE_DOC.relative_to(REPO)} still exists")
     for name in RETIRED_AGENTS:
         check(f"agents/{name}.md" in retire.get("files", []), f"retire.json does not retire agents/{name}.md")
     retired_allow = retire.get("settings", {}).get("permissions.allow", [])
     for stale in RETIRED_ALLOW:
         check(stale in retired_allow, f"retire.json does not retire the permission {stale}")
+
+
+def check_ruff_config() -> None:
+    check(RUFF_CONFIG.is_file(), "claude/lint/ruff.toml missing")
+    if not RUFF_CONFIG.is_file():
+        return
+    config = tomllib.loads(RUFF_CONFIG.read_text())
+    lint = config.get("lint", {})
+    target = config.get("target-version")
+    check(target == RUFF_TARGET_VERSION, f"ruff target-version is {target!r}")
+    length = config.get("line-length")
+    check(length == RUFF_LINE_LENGTH, f"ruff line-length is {length!r}")
+    selected = lint.get("select", [])
+    check(set(selected) == set(RUFF_SELECTED_FAMILIES), f"ruff select is {selected!r}")
+    max_args = lint.get("pylint", {}).get("max-args")
+    check(max_args == RUFF_MAX_ARGS, f"ruff pylint max-args is {max_args!r}")
+    complexity = lint.get("mccabe", {}).get("max-complexity")
+    check(complexity == RUFF_MAX_COMPLEXITY, f"ruff max-complexity is {complexity!r}")
+    check("PLR0913" not in lint.get("ignore", []), "ruff ignores PLR0913 instead of setting max-args")
+    ignores = lint.get("per-file-ignores", {})
+    for glob in RUFF_TEST_GLOBS:
+        found = ignores.get(glob)
+        check(set(found or []) == set(RUFF_TEST_IGNORES), f"ruff per-file-ignores for {glob} is {found!r}")
 
 
 def check_codex_worker() -> None:
@@ -296,6 +354,7 @@ def main() -> int:
         check_agents,
         check_no_stale_workflow_text,
         check_hooks_and_settings,
+        check_ruff_config,
         check_codex_worker,
         check_usage_dedup,
         check_no_home_literal,
