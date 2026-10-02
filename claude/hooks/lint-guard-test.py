@@ -105,9 +105,23 @@ def test_file_block(repo, env):
            needles=("PLR2004",))
 
 
+NEW_FAMILY_CASES = (
+    ("TRY003", "def check(value):\n    raise ValueError(f\"bad value {value}\")\n"),
+    ("BLE001", "def check():\n    try:\n        return 1\n    except Exception:\n        return None\n"),
+    ("S307", "def check(text):\n    return eval(text)\n"),
+    ("N802", "def checkValue():\n    return 1\n"),
+    ("DTZ005", "from datetime import datetime\n\n\ndef stamp():\n    return datetime.now()\n"),
+    ("T201", "def show():\n    print(\"hello\")\n"),
+    ("FBT001", "def check(flag: bool):\n    return flag\n"),
+)
+
+
 def ruff_block(base):
     env = {**BASE_ENV, "LINT_GUARD_RUFF_CONFIG": str(BUNDLE_RUFF_CONFIG)}
     plain = make_repo(base, "plain")
+    for code, source in NEW_FAMILY_CASES:
+        target = plain / "src" / f"{code.lower()}.py"
+        expect(f"DENY {code}", write(target, source), True, env, needles=(code,))  # type: ignore[no-untyped-call]
     legacy_old = "x = 1\n"
     legacy_new = "from typing import List\n\nx: List[int] = []\n"
     target = put(plain / "src" / "a.py", legacy_old)
