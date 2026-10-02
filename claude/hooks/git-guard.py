@@ -17,6 +17,7 @@ SHELL_OPTS_WITH_ARG = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 GIT_GLOBAL_OPTS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
 VALUE_SHORT_OPTS = {"checkout": "bB", "switch": "cC", "restore": "s", "clean": "e", "push": "o", "stash": "m"}
 STASH_READ_ONLY = {"list", "show", "create"}
+FORCE_FLAGS = {"-f", "--force"}
 PLACEHOLDER = "__subst__"
 NEWLINE_MARK = ""
 WORD_END = set(" \t\n;|&()<>")
@@ -397,6 +398,15 @@ def verdict(sub, args):
     return None
 
 
+def worktree_verdict(sub, args):
+    if sub != "worktree":
+        return None
+    events, positional = parse(sub, args)
+    if positional[:1] == ["remove"] and FORCE_FLAGS & set(events):
+        return "`git worktree remove --force` discards uncommitted work; use `feature-worktree done`."
+    return None
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -407,7 +417,7 @@ def main():
         if not isinstance(command, str):
             return
         for sub, args in git_calls(command):
-            reason = verdict(sub, args)
+            reason = verdict(sub, args) or worktree_verdict(sub, args)
             if reason:
                 deny(reason)
     except SystemExit:

@@ -23,7 +23,15 @@ SETTINGS = REPO / "claude" / "settings.json"
 RETIRE = REPO / "retire.json"
 CODEX_AGENTS_MD = REPO / "codex" / "AGENTS.md"
 README = REPO / "README.md"
-USAGE_REPORT = REPO / "claude" / "bin" / "usage-report"
+BIN_DIR = REPO / "claude" / "bin"
+USAGE_REPORT = BIN_DIR / "usage-report"
+FEATURE_WORKTREE_FILES = ("feature-worktree", "feature-worktree-test.sh")
+EN_DASH = chr(0x2013)
+STEP_MINUTES = f"2{EN_DASH}5 minutes"
+VERIFY_STEP_LINE = re.compile(r"(?m)^\s*\d+\.\s.*verify:")
+MIN_ANTI_PATTERNS = 3
+ANTI_PATTERNS_SECTION = re.compile(r"(?ms)^## Anti-patterns\b[^\n]*\n(.*?)(?=^## |\Z)")
+BULLET_LINE = re.compile(r"(?m)^- ")
 VENV_PYTHON = Path(os.path.expanduser("~/.claude/mcp/codex-worker/.venv/bin/python"))
 
 CLAUDE_MD_MAX_BYTES = 8400
@@ -346,11 +354,37 @@ def check_usage_report() -> None:
     )
 
 
+def anti_pattern_bullets(text: str) -> int:
+    section = ANTI_PATTERNS_SECTION.search(text)
+    return len(BULLET_LINE.findall(section.group(1))) if section else 0
+
+
+def check_habits() -> None:
+    delegate = (SKILLS_DIR / "delegate" / "SKILL.md").read_text()
+    check(STEP_MINUTES in delegate, f"delegate: the plan template does not require {STEP_MINUTES!r} steps")
+    check(bool(VERIFY_STEP_LINE.search(delegate)), "delegate: no numbered step line with `verify:`")
+    tdd = (SKILLS_DIR / "tdd" / "SKILL.md").read_text()
+    empty_section = "## Anti-patterns (each one is a finding)\n\n## Next\n- not a bullet of the section\n"
+    check(anti_pattern_bullets(empty_section) == 0, "self-test: an empty Anti-patterns section has bullets")
+    full_section = "## Anti-patterns\n\n- a\n- b\n- c\n\n## Next\n"
+    check(anti_pattern_bullets(full_section) == MIN_ANTI_PATTERNS, "self-test: a full section is miscounted")
+    bullets = anti_pattern_bullets(tdd)
+    check(bullets >= MIN_ANTI_PATTERNS, f"tdd: Anti-patterns has {bullets} bullets, min {MIN_ANTI_PATTERNS}")
+    quality_bar = (SKILLS_DIR / "quality-bar" / "SKILL.md").read_text()
+    check("anti-patterns" in quality_bar, "quality-bar: does not reference the tdd anti-patterns")
+    readme = README.read_text()
+    for script in FEATURE_WORKTREE_FILES:
+        path = BIN_DIR / script
+        check(path.is_file() and os.access(path, os.X_OK), f"claude/bin/{script} missing or not executable")
+        check(script in readme, f"README.md does not list {script}")
+
+
 def main() -> int:
     for step in (
         check_claude_md,
         check_skills,
         check_delegate_markers,
+        check_habits,
         check_agents,
         check_no_stale_workflow_text,
         check_hooks_and_settings,

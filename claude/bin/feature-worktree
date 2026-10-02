@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+usage() {
+  cat <<'USAGE'
+usage: feature-worktree new <repo> <branch> [<base>]
+       feature-worktree done <repo> <branch>
+       feature-worktree list <repo>
+new   creates <repo parent>/<repo name>.worktrees/<branch with / as ->  on a new branch feature/*, bugfix/*
+      or hotfix/* cut from <base> (default: origin/HEAD, else the current branch) and prints the path.
+done  removes the worktree and the branch once the work has landed on its base; refuses otherwise.
+list  shows the worktrees of <repo>.
+USAGE
+}
+set -euo pipefail
+EXIT_NOT_DONE=1
+EXIT_REFUSED=2
+EXIT_USAGE=64
+BRANCH_PREFIXES='feature/* | bugfix/* | hotfix/*'
+
+die() { echo "feature-worktree: $2" >&2; exit "$1"; }
+usage_exit() { usage >&2; exit "$EXIT_USAGE"; }
+
+branch_exists() { git -C "$1" show-ref --verify --quiet "refs/heads/$2"; }
+
+default_base() {
+  git -C "$1" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null \
+    || git -C "$1" branch --show-current
+}
+
+worktree_of() {
+  git -C "$1" worktree list --porcelain | awk -v ref="refs/heads/$2" '
+    $1 == "worktree" { path = substr($0, 10) }
+    $1 == "branch" && $2 == ref { print path }'
+}
+
+cmd_new() {
+  [ $# -ge 2 ] && [ $# -le 3 ] || usage_exit
+  local repo branch base parent name path
+  repo=$(cd "$1" && pwd)
+  branch=$2
+  case $branch in
+    feature/* | bugfix/* | hotfix/*) ;;
+    *) die "$EXIT_REFUSED" "branch must match $BRANCH_PREFIXES: $branch" ;;
+  esac
+  base=${3:-$(default_base "$repo")}
+  parent=$(dirname "$repo")
+  name=$(basename "$repo")
+  path=$parent/$name.worktrees/${branch//\//-}
+  [ ! -e "$path" ] || die "$EXIT_REFUSED" "path exists: $path"
+  ! branch_exists "$repo" "$branch" || die "$EXIT_REFUSED" "branch exists: $branch"
+  git -C "$repo" worktree add --no-track -b "$branch" "$path" "$base" >&2
+  git -C "$repo" config "branch.$branch.featureBase" "$base"
+  echo "$path"
+}
+
+landed() {
+  local repo=$1 branch=$2 base=$3 fork
+  git -C "$repo" merge-base --is-ancestor "$branch" "$base" && return 0
+  [ -z "$(git -C "$repo" ls-remote --heads origin "$branch" 2>/dev/null)" ] || return 1
+  fork=$(git -C "$repo" merge-base "$base" "$branch")
+  local -a changed
+  mapfile -t changed < <(git -C "$repo" diff --no-renames --name-only "$fork" "$branch")
+  [ ${#changed[@]} -gt 0 ] || return 1
+  git -C "$repo" diff --quiet "$branch" "$base" -- "${changed[@]}"
+}
+
+cmd_done() {
+  [ $# -eq 2 ] || usage_exit
+  local repo=$1 branch=$2 base path
+  if git -C "$repo" remote | grep -qx origin; then
+    git -C "$repo" fetch --quiet --prune origin || echo "feature-worktree: warning: fetch failed, using local refs" >&2
+  fi
+  base=$(git -C "$repo" config --get "branch.$branch.featureBase") \
+    || die "$EXIT_NOT_DONE" "no featureBase recorded for $branch"
+  landed "$repo" "$branch" "$base" || die "$EXIT_NOT_DONE" "$branch has not landed on $base"
+  path=$(worktree_of "$repo" "$branch")
+  if [ -n "$path" ]; then
+    git -C "$repo" worktree remove "$path" || die "$EXIT_NOT_DONE" "worktree not removed: $path"
+  fi
+  git -C "$repo" branch -D "$branch" >&2
+}
+
+cmd_list() {
+  [ $# -eq 1 ] || usage_exit
+  git -C "$1" worktree list
+}
+
+case ${1:-} in
+  -h | --help) usage ;;
+  new) shift; cmd_new "$@" ;;
+  done) shift; cmd_done "$@" ;;
+  list) shift; cmd_list "$@" ;;
+  *) usage_exit ;;
+esac

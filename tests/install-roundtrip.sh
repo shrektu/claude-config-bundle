@@ -22,6 +22,7 @@ CHECKS=0
 fail() { echo "FAIL $1"; FAILURES=$((FAILURES + 1)); }
 check() { CHECKS=$((CHECKS + 1)); if [ "$2" != 0 ]; then fail "$1"; fi; }
 check_file() { CHECKS=$((CHECKS + 1)); [ -e "$1" ] || fail "missing $1"; }
+check_exec() { CHECKS=$((CHECKS + 1)); [ -x "$1" ] || fail "not executable $1"; }
 check_gone() { CHECKS=$((CHECKS + 1)); [ ! -e "$1" ] || fail "still present $1"; }
 check_grep() { CHECKS=$((CHECKS + 1)); grep -qF -- "$2" "$1" 2>/dev/null || fail "$3"; }
 SYSBIN=$WORK/sysbin
@@ -100,6 +101,7 @@ check_file "$H1/.claude/bundle/retire.json"
 check_file "$H1/.claude/bundle/install.sh"
 check_file "$H1/.codex/AGENTS.md"
 check_file "$H1/.claude/bin/repo-facts"
+for tool in feature-worktree feature-worktree-test.sh; do check_exec "$H1/.claude/bin/$tool"; done
 check_file "$H1/.claude/hooks/git-policy.py"
 check_file "$H1/.claude/hooks/delegation-guard.py"
 check_file "$H1/.claude/hooks/subagent-verify-check.py"
@@ -238,6 +240,7 @@ check "installed export.sh exit status (see $WORK/export.log)" $?
 check_file "$EXPORTED/retire.json"
 check_file "$EXPORTED/claude/hooks/git-policy.py"
 check_file "$EXPORTED/claude/bin/repo-facts"
+for tool in feature-worktree feature-worktree-test.sh; do check_exec "$EXPORTED/claude/bin/$tool"; done
 check_file "$EXPORTED/claude/hooks/tdd-guard.py"
 check_file "$EXPORTED/claude/hooks/shell_words.py"
 check_file "$EXPORTED/claude/hooks/comment-guard.py"

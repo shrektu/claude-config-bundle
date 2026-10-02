@@ -221,6 +221,11 @@ with tempfile.TemporaryDirectory() as base:
                  "/repo/src/parser_test.c", "/repo/src/parser_test.cc", "/repo/src/parser_test.cpp"):
         expect(f"test path {path}", payload(edit_input(path)), False)
 
+    for path in ("/repo/bin/feature-worktree-test.sh", "/repo/bin/run_test.bash", "/repo/bin/test_deploy.sh",
+                 "/repo/bin/test_deploy.bash", "/repo/bin/deploy-test.bash", "/repo/bin/cli.bats"):
+        expect(f"shell test path {path}", payload(edit_input(path)), False)
+    expect("shell source without red", payload(edit_input("/repo/bin/deploy.sh")), True)
+
     for path in ("/repo/README.md", "/repo/package.json", "/repo/config.yaml", "/repo/ci.yml",
                  "/repo/pyproject.toml", "/repo/docs/guide.rst", "/repo/.env.example", "/repo/styles/app.css"):
         expect(f"other path {path}", payload(edit_input(path)), False)
