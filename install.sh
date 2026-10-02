@@ -256,5 +256,6 @@ echo '  - for t in tdd-guard comment-guard lint-guard bash-write-guard git-guard
 echo '  - ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py'
 echo "  - bash ~/.claude/bin/verify-test.sh"
 echo "  - bash ~/.claude/bin/review-checkpoint-test.sh"
+echo "  - bash ~/.claude/bin/feature-worktree-test.sh"
 echo "  - ~/.claude/bin/repo-facts            -> toolchain facts of the current repo (also the SessionStart hook)"
 echo "  - claude login / codex login if this machine is fresh; set autoMode.environment for this machine's repos"

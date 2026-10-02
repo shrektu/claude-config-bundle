@@ -29,10 +29,12 @@ deny = [
  "cat <<EOF\n'$(git reset --hard)'\nEOF", "cat <<EOF\n# $(git reset --hard)\nEOF", "bash -oc pipefail 'git reset --hard'", "bash -oec pipefail 'git reset --hard'",
  "bash -Oec extglob 'git reset --hard'", "eval 'echo ok\ngit reset --hard'", "cat 0<<EOF\n$(git clean -fd)\nEOF", "echo ok > $(git reset --hard)",
  "echo ok 2>\"$(git stash)\"", "sh -c 'x=1\ngit clean -fd'",
- # round 4
+ "git worktree remove -f w", "git worktree remove --force w", "git -C r worktree remove w -f",
  "cat <<EOF\n`echo \\`git reset --hard\\``\nEOF", "echo \"unterminated; git reset --hard",
 ]
 allow = [
+ "git worktree remove ../w", "git worktree add --no-track -b feature/x ../w main",
+ "git worktree prune", "git worktree list", "git worktree add -f ../w feature/x", "git worktree remove -- x",
  "git status --short", "git diff --stat", "git diff HEAD --stat", "git diff HEAD -- a.py", "git stash create", "git stash list", "git stash show -p",
  "git stash -q list", "git reset HEAD~1", "git reset --soft HEAD~1", "git reset -- file.py", "git reset -- --hard", "git reset --hard --soft HEAD~1",
  "git checkout -b feature/x", "git checkout -q -b feature/y origin/develop", "git checkout -bfeature/fix",

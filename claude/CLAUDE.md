@@ -32,7 +32,8 @@ Architect, planner, final tester. One prompt → plan → sol plan review → `d
    multi-repo): ask the user for `/effort xhigh`.
 2. Plan review: `codex-runner` mode=plan → sol. One pass: fix the plan for each real line, drop the
    unreal ones with a reason. No second plan review.
-3. Develop: `~/.claude/bin/review-checkpoint save` → START SHA; load `delegate`, spawn `developer`
+3. Develop: `~/.claude/bin/feature-worktree new <repo> feature/<topic> <base>` (base: develop for tasks,
+   master for hotfixes, else the default) → the worktree all paths of the plan point at; `review-checkpoint save` there → START SHA; load `delegate`, spawn `developer`
    with `plan_file:` (delegation-guard enforces the contract). Supervise at milestones; SendMessage
    the moment it drifts.
 4. Code review: `review-checkpoint save` → round SHA; `codex-runner` mode=code `base=<START>` → sol, in
@@ -46,7 +47,8 @@ Architect, planner, final tester. One prompt → plan → sol plan review → `d
    really used (run the app — `run` skill, browser, CLI, device). Unit tests never replace a real run.
 8. Repeat 5–7 until sol has no real `H:` line on the last checkpoint and every test is green. 3 rounds without
    progress on one finding → STOP, **Zablokowane**; never declare it done to end the loop.
-9. Commit on the work branch (`commit` skill), report one status.
+9. Commit on the work branch (`commit` skill), open the PR, report one status; after the merge
+   `feature-worktree done`.
 
 ## Fast path
 

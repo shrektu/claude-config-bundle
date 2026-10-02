@@ -3,8 +3,10 @@ name: commit
 description: Zasady commitów, gałęzi i PR na tej maszynie — praca tylko na feature/bugfix/hotfix/*, wiadomość = jedno zdanie w trybie rozkazującym 3–7 słów z `git commit -s` i zero innych trailerów (bez Co-Authored-By), commity wielkości milestone'u, fixup + autosquash zamiast "poprawek po review", PR otwierany samodzielnie przez `gh pr create`, a każda zmiana main/master/dev/develop tylko za zgodą użytkownika (git-policy pyta). Załaduj przed każdym git commit, fixup, rebase, push lub PR.
 ---
 
-- Work only on `feature/*`, `bugfix/*`, `hotfix/*`; create the branch from the right base (`develop` for
-  tasks, `master` for hotfixes, else the default branch) when it does not exist yet. On a work branch
+- Work only on `feature/*`, `bugfix/*`, `hotfix/*`, each in its own worktree:
+  `~/.claude/bin/feature-worktree new <repo> feature/<topic> [<base>]` (base: `develop` for tasks,
+  `master` for hotfixes, else the default branch) prints the path to work in; after the PR is merged,
+  `feature-worktree done <repo> <branch>` removes it. The user's main checkout is never touched. On a work branch
   every history op is yours: commit, reword, rebase, `push`, `push --force-with-lease`.
 - Any op that changes another branch (main, master, dev, develop, anything else) or its remote —
   commit, push, merge, rebase, reset, tag, branch delete, `gh pr merge` — needs the user's consent.

@@ -26,6 +26,9 @@ TEST_NAMES = tuple(re.compile(pattern) for pattern in (
     r"_spec\.rb$",
     r"^test_.*\.c$",
     r"_test\.(c|cc|cpp)$",
+    r"[_-]test\.(sh|bash)$",
+    r"^test_.*\.(sh|bash)$",
+    r"\.bats$",
 ))
 GIT_MARKER = ".git"
 SHEBANG = "#!"

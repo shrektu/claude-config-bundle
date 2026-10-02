@@ -64,13 +64,14 @@ gate, rounds, final report), `repo-standards` (pinned versions, the API oracle, 
 
 CLIs (`claude/bin/`): `verify` (runs checks, keeps the log on disk, prints the summary),
 `review-checkpoint` (incremental review diffs, new files included, via a temporary index), `repo-facts` (toolchain and pinned-version facts),
-`usage-report` (token/context baseline from the local transcripts).
+`usage-report` (token/context baseline from the local transcripts), `feature-worktree` (`new` / `done` / `list`:
+one git worktree per feature branch next to the repo; `done` removes only work that has landed on its base).
 
 ## What travels
 
 CLAUDE.md, settings.json (workflow keys, permissions, hooks, output caps), `agents/`, `skills/`,
 `templates/` (the `.claude/rules/standards.md` template for projects), `bin/` (verify,
-review-checkpoint, repo-facts, usage-report), `hooks/` (git-guard, git-policy, verify-guard, read-guard,
+review-checkpoint, repo-facts, usage-report, feature-worktree), `hooks/` (git-guard, git-policy, verify-guard, read-guard,
 delegation-guard, tdd-guard, comment-guard, lint-guard, bash-write-guard, subagent-verify-check, shell_words,
 code_files, edit_texts + their test matrices), `lint/ruff.toml` (the global ruff config; install.sh never
 overwrites an existing one), `retire.json` (what install.sh removes
@@ -88,6 +89,7 @@ for h in tdd-guard comment-guard lint-guard bash-write-guard git-guard git-polic
 done
 ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py
 bash ~/.claude/bin/review-checkpoint-test.sh
+bash ~/.claude/bin/feature-worktree-test.sh
 ~/.claude/bin/repo-facts                  # inside a repo: versions, locked vs installed
 ~/.claude/bin/usage-report --days 30      # token/context baseline
 ```
