@@ -27,6 +27,7 @@ description: Zasady commitów, gałęzi i PR na tej maszynie — praca tylko na 
   `gh pr create --base <base> --head <branch> --title "<3–7 word imperative title>" --body-file <file>`
   with the body in the `pr-description` format and no "Generated with" line. On Bitbucket remotes write
   the description with `pr-description` and give the user the create-PR link. Merging stays with the
-  user (`gh pr merge` asks for consent).
+  user (`gh pr merge` asks for consent); merge without `--delete-branch`, then `feature-worktree done`
+  removes the worktree and the local and remote branch.
 - Commits are made by Claude (the main session) after the test gate, never by the developer or any
   other subagent.

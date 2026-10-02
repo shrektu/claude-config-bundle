@@ -62,11 +62,11 @@ install_file "$HERE/claude/CLAUDE.md" "$HOME/.claude/CLAUDE.md"
 install_file "$HERE/claude/statusline-command.sh" "$HOME/.claude/statusline-command.sh" 755
 for d in agents skills prompts templates; do
   [ -d "$HERE/claude/$d" ] || continue
-  while IFS= read -r -d '' f; do install_file "$f" "$HOME/.claude/$d/${f#"$HERE"/claude/$d/}"; done < <(find "$HERE/claude/$d" -type f -print0)
+  while IFS= read -r -d '' f; do install_file "$f" "$HOME/.claude/$d/${f#"$HERE"/claude/$d/}"; done < <(find "$HERE/claude/$d" -name __pycache__ -prune -o -type f ! -name '*.pyc' -print0)
 done
 for d in bin hooks; do
   [ -d "$HERE/claude/$d" ] || continue
-  while IFS= read -r -d '' f; do install_file "$f" "$HOME/.claude/$d/${f#"$HERE"/claude/$d/}" 755; done < <(find "$HERE/claude/$d" -type f -print0)
+  while IFS= read -r -d '' f; do install_file "$f" "$HOME/.claude/$d/${f#"$HERE"/claude/$d/}" 755; done < <(find "$HERE/claude/$d" -name __pycache__ -prune -o -type f ! -name '*.pyc' -print0)
 done
 [ ! -f "$HERE/claude/lint/ruff.toml" ] || install_file "$HERE/claude/lint/ruff.toml" "$HOME/.claude/lint/ruff.toml"
 install_file "$HERE/claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/codex_worker.py" 755

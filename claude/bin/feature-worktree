@@ -75,8 +75,13 @@ cmd_done() {
   path=$(worktree_of "$repo" "$branch")
   if [ -n "$path" ]; then
     git -C "$repo" worktree remove "$path" || die "$EXIT_NOT_DONE" "worktree not removed: $path"
+    rmdir "$(dirname "$path")" 2>/dev/null || true
   fi
   git -C "$repo" branch -D "$branch" >&2
+  if [ -n "$(git -C "$repo" ls-remote --heads origin "$branch" 2>/dev/null)" ]; then
+    git -C "$repo" push --quiet origin --delete "$branch" >&2 \
+      || echo "feature-worktree: warning: remote branch $branch not deleted" >&2
+  fi
 }
 
 cmd_list() {

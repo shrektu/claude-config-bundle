@@ -269,13 +269,18 @@ check_grep "$EXPORTED/claude/settings.json" "__HOME__/.claude/hooks/git-policy.p
 
 check_file "$EXPORTED/claude/templates/rules-standards.md"
 
+mkdir -p "$EXPORTED/claude/bin/__pycache__" "$EXPORTED/claude/hooks/__pycache__"
+printf 'stale' > "$EXPORTED/claude/bin/__pycache__/probe.cpython-314.pyc"
+printf 'stale' > "$EXPORTED/claude/hooks/stray.pyc"
 run_install "$H2" "$EXPORTED/install.sh" "$WORK/install3.log"
 check "install from export exit status (see $WORK/install3.log)" $?
+check_gone "$H2/.claude/bin/__pycache__/probe.cpython-314.pyc"
+check_gone "$H2/.claude/hooks/stray.pyc"
 while IFS= read -r -d '' file; do
   rel=${file#"$EXPORTED"/claude/}
   [ "$rel" = "mcp-servers.json" ] && continue
   check_file "$H2/.claude/$rel"
-done < <(find "$EXPORTED/claude" -path '*/__pycache__' -prune -o -type f -print0)
+done < <(find "$EXPORTED/claude" -path '*/__pycache__' -prune -o -type f ! -name '*.pyc' -print0)
 check_file "$H2/.claude/templates/rules-standards.md"
 check_file "$H2/.claude/lint/ruff.toml"
 check_file "$H2/.claude/hooks/lint-guard.py"

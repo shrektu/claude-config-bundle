@@ -107,10 +107,13 @@ exists "$WT"
 check "unmerged branch kept" "$(has_branch "$REPO" feature/m; echo $?)"
 LISTED=$("$FW" list "$REPO" 2>&1); expect_rc "list" "$?" 0
 has "$LISTED" "$WT" "list shows the worktree"
+git -C "$WT" push -q origin feature/m
 git -C "$REPO" merge -q feature/m
 git -C "$REPO" push -q origin main
 "$FW" done "$REPO" feature/m >/dev/null 2>&1; expect_rc "done after merge" "$?" 0
 gone "$WT"
+gone "$(dirname "$WT")"
+check "merged remote branch deleted" "$([ -z "$(git -C "$REPO" ls-remote --heads origin feature/m)" ]; echo $?)"
 check "merged branch deleted" "$(lacks_branch "$REPO" feature/m; echo $?)"
 check "featureBase unset" "$(git -C "$REPO" config branch.feature/m.featureBase >/dev/null 2>&1; [ $? -ne 0 ]; echo $?)"
 
