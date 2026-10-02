@@ -27,7 +27,7 @@ HEADER_RE = re.compile(r"^codex (?P<mode>plan|code) (?P<model>\S+)/(?P<effort>\S
 PLAN_LINE_RE = re.compile(r"^[HL]: [^:\n]{1,80}: \S")
 CODE_LINE_RE = re.compile(r"^[HL]: (?P<path>[^:\s]+):(?P<line>\d+)(?:-\d+)?: \S")
 PASS = "PASS"
-SUGGESTION_WORDS = ("should ", "consider ", "instead ", "suggest", "recommend")
+SUGGESTION_WORDS = ("should ", "consider ", "use instead", "replace it with", "suggest", "recommend")
 
 WINDOW_SOURCE = '''def last_n(items: list[int], n: int) -> list[int]:
     if n <= 0:
