@@ -24,8 +24,8 @@ EXPECTED_PARAMS = {"mode", "plan_file", "project_path", "base", "recheck"}
 FORBIDDEN_PARAMS = {"model", "reasoning_effort", "service_tier"}
 CALL_TIMEOUT = timedelta(minutes=30)
 HEADER_RE = re.compile(r"^codex (?P<mode>plan|code) (?P<model>\S+)/(?P<effort>\S+) tokens in=(?P<tin>\d+) cached=(?P<tcached>\d+) out=(?P<tout>\d+)$")
-PLAN_LINE_RE = re.compile(r"^[^:\n]{1,80}: \S")
-CODE_LINE_RE = re.compile(r"^(?P<path>[^:\s]+):(?P<line>\d+)(?:-\d+)?: \S")
+PLAN_LINE_RE = re.compile(r"^[HL]: [^:\n]{1,80}: \S")
+CODE_LINE_RE = re.compile(r"^[HL]: (?P<path>[^:\s]+):(?P<line>\d+)(?:-\d+)?: \S")
 PASS = "PASS"
 SUGGESTION_WORDS = ("should ", "consider ", "instead ", "suggest", "recommend")
 

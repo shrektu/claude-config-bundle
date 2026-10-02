@@ -39,18 +39,21 @@ TOOL_DESCRIPTION = (
 COMMON_RULES = """You are a read-only reviewer: never modify files, never commit, never run a command that changes \
 the repository or the environment. Report ONLY defects. Read other files only to check a claim or to confirm a \
 suspected defect. No fixes, no alternatives, no new plan, no style remarks, no praise, no summary, no preamble.
-Output one line per defect, at most 30 words, most severe first, in the form {line_form}
+Output one line per defect, at most 30 words, most severe first, in the form `H: {line_form}` or `L: {line_form}`. \
+H = wrong behaviour, data loss, security, a broken criterion or contract, a missing or vacuous test. \
+L = an edge case needing contrived input, a cosmetic or hint-quality issue.
 If there is no defect, output exactly PASS"""
 
-PLAN_INSTRUCTIONS = """Review the PLAN below before it is implemented. Defects to report: false claims about the \
+PLAN_INSTRUCTIONS = """Review the PLAN below before it is implemented. Read only the files the plan names, and \
+only to check a claim the plan makes about them. Defects to report: false claims about the \
 existing code, contradictions, missing steps or dependencies, an unsafe order of steps, missing or uncheckable \
 acceptance criteria, behaviour without a test in test_plan, no integration test for a real path.
-""" + COMMON_RULES.format(line_form="`<section>: <defect>`.")
+""" + COMMON_RULES.format(line_form="<section>: <defect>")
 
 CODE_INSTRUCTIONS = """Review the CODE CHANGE below (the DIFF against BASE) against the acceptance criteria. \
 Defects to report: bugs, regressions, broken contracts or invariants, security holes, acceptance criteria not \
 met, behaviour changed without a test, tests that cannot fail or are skipped.
-""" + COMMON_RULES.format(line_form="`<path>:<line>: <defect>`.")
+""" + COMMON_RULES.format(line_form="<path>:<line>: <defect>")
 
 
 class EventType(StrEnum):

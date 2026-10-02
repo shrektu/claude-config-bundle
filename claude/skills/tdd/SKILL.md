@@ -51,6 +51,15 @@ The `commands` section of the plan gives the verify command for each level.
 - Deterministic: fixed seeds, frozen time, no sleeps for synchronisation — poll with a timeout.
 - Before reporting, run the whole relevant suite, not only the new tests; it stays green.
 
+## Debugging protocol
+
+1. Reproduce first: a failing test (or a verify-run command) that shows the bug; no reproduction, no fix.
+2. Find the root cause: read the failing path and its data until the cause is certain; one hypothesis at
+   a time, each checked with a command or an assertion, not with a guess-fix.
+3. Fix the cause, not the symptom, in the smallest change; the reproducing test goes green.
+4. Look for the same cause elsewhere (same pattern, same caller) and cover it with the same test.
+5. Two fixes that did not turn the test green → stop and report the evidence instead of trying a third.
+
 ## tdd-guard
 
 Applies to the `developer` agent only. An Edit/Write on a production source file is denied until the

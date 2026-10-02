@@ -129,6 +129,16 @@ class WorkerTest(unittest.TestCase):
         self.assertIn(worker.PLAN_INSTRUCTIONS, prompt)
         self.assertTrue(out.startswith("codex plan gpt-6-sol/high"), out)
 
+    def test_both_instructions_demand_weighted_line_prefix(self):
+        for instructions in (worker.PLAN_INSTRUCTIONS, worker.CODE_INSTRUCTIONS):
+            self.assertIn("`H: ", instructions)
+            self.assertIn("`L: ", instructions)
+            self.assertIn("exactly PASS", instructions)
+
+    def test_plan_instructions_limit_reading_to_plan_named_files(self):
+        self.assertIn("only the files the plan names", worker.PLAN_INSTRUCTIONS)
+        self.assertIn("only to check a claim the plan makes", worker.PLAN_INSTRUCTIONS)
+
     def test_code_mode_uses_sol_high(self):
         self.review("code")
         argv = self.recorded()["argv"]

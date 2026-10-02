@@ -38,12 +38,13 @@ Architect, planner, final tester. One prompt → plan → sol plan review → `d
 4. Code review: `review-checkpoint save` → round SHA; `codex-runner` mode=code `base=<START>` → sol, in
    the SAME batch as your own verify runs; review the diff yourself meanwhile (`review` skill).
 5. Adjudicate: reproduce every finding, yours or sol's (failing test or command). Unreal → dropped
-   with a reason; a deliberate trade-off is argued or escalated, never silently changed.
+   with a reason; a deliberate trade-off is argued or escalated, never silently changed. Sol's `L:`
+   lines go to the report, never into a fix round; only real `H:` lines and your own findings do.
 6. Fix round: all real findings in ONE SendMessage to the same developer. Then sol reviews only
    `base=<last round SHA>` + `recheck=<those findings>`.
 7. Test gate, yours: rerun unit + integration through verify, then use the feature the way it is
    really used (run the app — `run` skill, browser, CLI, device). Unit tests never replace a real run.
-8. Repeat 5–7 until sol returns PASS on the last checkpoint and every test is green. 3 rounds without
+8. Repeat 5–7 until sol has no real `H:` line on the last checkpoint and every test is green. 3 rounds without
    progress on one finding → STOP, **Zablokowane**; never declare it done to end the loop.
 9. Commit on the work branch (`commit` skill), report one status.
 
@@ -76,9 +77,11 @@ Docs, config or text outside product code: no tests, no reviews.
   inlines the diff and strips unused Codex tools. Never paste a plan, diff or report into a prompt.
 - Raw outputs stay out: test/build/lint through verify, log opened only in the relevant range;
   read-guard denies whole-file reads above ~4k tokens.
-- Round 1 reads the full diff once; later rounds read `review-checkpoint diff <SHA>` only.
+- Round 1: the stat, the hunks sol or a failing test points at, and quality-bar spot checks — the
+  full patch only below ~300 lines; later rounds read `review-checkpoint diff <SHA>` only.
 - Never forward one agent's report into another prompt — point to files and verify logs.
-- Watch context in the status line; `/compact` with a focus at a milestone.
+- One feature, one session: after its PR start a new session. Auto-compact runs at 200k; `/compact`
+  with a focus at a milestone before that.
 
 ## Reports
 
@@ -93,7 +96,9 @@ commit invalidates the prior review. PR description on request: `pr-description`
 - Comments: zero. Code that seems to need one gets rewritten instead. Not comments: tool directives
   (shebang, `# type: ignore`, `# noqa`, `// eslint-disable…`, `// @ts-expect-error`, `//go:build`) and a
   one-line docstring or doc comment; descriptions go into parameters (`description=`). comment-guard
-  denies every edit that adds a comment. Code is written with Edit/Write only, never via Bash heredoc/sed.
+  denies every edit that adds a comment, lint-guard every edit that adds a ruff/eslint violation (repo
+  config first, else the strict global ruff.toml). Code is written with Edit/Write only; bash-write-guard
+  denies Bash writes of code files inside a repo.
 - Raw dicts: as few as possible. Data with a known shape lives in a typed model (dataclass, Pydantic,
   TypedDict, NamedTuple, enum); a raw dict only for genuinely dynamic keys at a JSON boundary, converted
   immediately.

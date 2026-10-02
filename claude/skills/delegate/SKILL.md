@@ -26,6 +26,7 @@ sol's code review — nobody gets the plan pasted into a prompt.
 ## commands
 Unit: ~/.claude/bin/verify -- 'cd /absolute/path/to/repo && <unit test command>'
 Integration: ~/.claude/bin/verify -- 'cd /absolute/path/to/repo && <integration test command>'
+Lint/types: ~/.claude/bin/verify -- 'cd /absolute/path/to/repo && <ruff check . && pyright | eslint . && tsc --noEmit>'
 
 ## repos
 You may only touch /absolute/path/to/repo; you may not touch <everything else, named>.
@@ -45,6 +46,9 @@ tdd_exempt: <reason>          (only when the tdd skill allows it; otherwise leav
 <at most a few lines the plan does not hold, e.g. a plan-review line you rejected and why>
 Report per your agent contract.
 ```
+
+When an agent definition changed in this session, pass its model explicitly (`model: sonnet` for the
+developer): the harness keeps the old definition until the session reloads.
 
 Save `~/.claude/bin/review-checkpoint save` → START SHA before the spawn; it is the base of the first
 code review.

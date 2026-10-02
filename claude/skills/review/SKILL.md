@@ -5,8 +5,9 @@ description: Jak przeprowadzić rundę review w workflow TDD - własna checklist
 
 ## Your own review (every round)
 
-`git status --short` + `git diff <START> --stat` first (later rounds: `review-checkpoint diff <SHA>`),
-then the patch per file. Untracked files never appear in a diff — list them and read them. Check every
+`git status --short` + `git diff <START> --stat` first (later rounds: `review-checkpoint diff <SHA>`).
+Read the full patch only when it is under ~300 lines; above that read the hunks sol, a failing test or a
+quality-bar spot check points at, plus every new public signature. Untracked files never appear in a diff — list them and read them. Check every
 item of the `quality-bar` skill — the same list the developer went through before reporting — and on top:
 
 - red evidence is real: open the logs the developer listed; for a test that carries a criterion, confirm
@@ -17,7 +18,9 @@ item of the `quality-bar` skill — the same list the developer went through bef
 
 ## Sol lines (plan and code)
 
-Both answer `PASS` or one defect per line. Every line is adjudicated before anything is acted on:
+Both answer `PASS` or one defect per line prefixed `H:` (behaviour, data, security, a broken
+criterion, contract or test) or `L:` (contrived edge case, cosmetic, hint quality). `L:` lines go to the
+report and never open a fix round. Every `H:` line is adjudicated before anything is acted on:
 
 - reproduce it — a failing test, a command, or the code path read until certain;
 - real → into the plan fix (plan review) or the round's fix list (code review);

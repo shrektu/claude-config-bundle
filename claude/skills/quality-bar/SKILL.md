@@ -23,5 +23,10 @@ list, so anything left here comes back as a finding.
 7. Style: zero comments (tool directives excepted), at most one-line docstrings, descriptions as
    parameters, no magic numbers or strings (named constants or enum members), typed models instead of raw
    dicts, no needless `__init__.py`.
-8. Hygiene: code written with Edit/Write only (never Bash heredoc, sed or a script writing files), no
+8. Senior code: the shortest correct solution; the standard library and the framework before own code;
+   the newest construct the pinned versions offer (`match`, dataclass(slots, frozen), `X | None`,
+   pathlib, `satisfies`, discriminated unions, readonly); early returns over nesting; no abstraction,
+   option or layer the plan does not need; no defensive code for states the types rule out; deleting
+   beats adding. lint-guard enforces the mechanical part (ruff UP/FURB/SIM/C4/PERF/RET, complexity 10).
+9. Hygiene: code written with Edit/Write only (never Bash heredoc, sed or a script writing files), no
    stray debug output, temp files or untracked leftovers, nothing outside the plan's `repos`.
