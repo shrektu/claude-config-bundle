@@ -1,27 +1,19 @@
 ---
 name: review
-description: Jak przeprowadzić rundę review w workflow TDD - własna checklista Claude (zgodność z planem, dowody red → green dla każdego testu, sensowne testy jednostkowe i integracyjne, idiomy dla wersji z repo-facts, regresje, pliki untracked, styl), adjudykacja linii od sol (plan i kod) (reprodukcja, zanim cokolwiek wróci do developera), bramka testów (unit + integracja przez verify + realne uruchomienie), mechanika rund z review-checkpoint i re-review sol tylko na diffie poprawek, limit 3 rund oraz raport z trzema statusami. Załaduj, gdy developer skończył albo gdy wracają findingi.
+description: Jak przeprowadzić rundę review w workflow TDD - własna checklista Claude = skill quality-bar (ta sama, którą developer przechodzi przed raportem) plus weryfikacja dowodów red i ponowne uruchomienie testów, adjudykacja linii od sol (plan i kod) (reprodukcja, zanim cokolwiek wróci do developera), bramka testów (unit + integracja przez verify + realne uruchomienie), mechanika rund z review-checkpoint i re-review sol tylko na diffie poprawek, limit 3 rund oraz raport z trzema statusami. Załaduj, gdy developer skończył albo gdy wracają findingi.
 ---
 
 ## Your own review (every round)
 
 `git status --short` + `git diff <START> --stat` first (later rounds: `review-checkpoint diff <SHA>`),
-then the patch per file. Untracked files never appear in a diff — list them and read them. Check:
+then the patch per file. Untracked files never appear in a diff — list them and read them. Check every
+item of the `quality-bar` skill — the same list the developer went through before reporting — and on top:
 
-- plan conformance: what the plan says, no extra scope, no architecture invented by the developer;
-- TDD evidence: every new or changed test has a red verify log from before the production change (the
-  developer's report lists them). For a test that carries a criterion, confirm it really fails without
-  the change: `git worktree add <tmp> <START>`, copy the test in, run it through verify — it must fail;
-  remove the worktree afterwards;
-- tests are meaningful: behaviour asserted, cannot pass vacuously, nothing skipped, the integration
-  tests really integrate (real app wiring, DB, HTTP, CLI), no mocks of the project's own code;
-- acceptance criteria: each one checked, with evidence you can open;
-- idioms match the versions `~/.claude/bin/repo-facts` prints; a deprecated-for-this-version API or a
-  `warnings: N deprecation lines` line on a verify PASS is a finding (`repo-standards` skill);
-- regressions: callers, signatures, migrations, serialized shapes, error paths, concurrency;
-- code style: no added comments (comment-guard blocks Edit/Write; look for ones that came in through
-  Bash or a generator), no multi-line docstrings, no magic numbers or strings, typed models instead of
-  raw dicts, no needless `__init__.py`.
+- red evidence is real: open the logs the developer listed; for a test that carries a criterion, confirm
+  it fails without the change: `git worktree add <tmp> <START>`, copy the test in, run it through verify —
+  it must fail; remove the worktree afterwards;
+- comments that slipped in through Bash or a generator (comment-guard only sees Edit/Write);
+- claims: rerun the checks yourself through verify — a report saying "tests pass" is not evidence.
 
 ## Sol lines (plan and code)
 

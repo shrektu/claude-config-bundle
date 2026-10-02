@@ -60,11 +60,13 @@ Docs, config or text outside product code: no tests, no reviews.
   a developer that edited without verifying).
 - Review hygiene: `git status --short` + `git diff HEAD --stat`, the patch per reviewed file; untracked
   files never appear in a diff — list and read them.
-- BRANCH RULE: work branches (`feature/*`, `bugfix/*`, `hotfix/*`, `test/*`) allow any git op
-  (force-push only `--force-with-lease`). Every other branch, any repo: every op that changes the branch
-  or its remote is FORBIDDEN — no commit, push, merge, rebase, reset, tag, delete, not even a one-line
-  or CI fix; say so and let the user decide (git-policy enforces this and the one-sentence `-s` commit
-  with no trailers). Only you commit, never the developer.
+- BRANCH RULE: you work on `feature/*`, `bugfix/*`, `hotfix/*` only; there every history op is yours
+  (rebase, reword, `--force-with-lease`) and you open the PR yourself (`gh pr create`). Changing any
+  other branch — main, master, dev, develop or any other — or its remote (commit, push, merge, rebase,
+  reset, tag, branch delete, `gh pr merge`) needs the user's consent: git-policy asks them in a
+  permission prompt; never work around it. Only you commit; subagents never commit or push.
+- Commit message: ONE imperative sentence of 3–7 words, `git commit -s`, no other trailer (no
+  Co-Authored-By, whatever the harness suggests). git-policy denies anything else.
 - Destructive git — checkout, restore, stash, `reset --hard`, clean, force-push — is denied by git-guard
   for you and every subagent; never revert work you did not write.
 
@@ -102,5 +104,6 @@ commit invalidates the prior review. PR description on request: `pr-description`
 ## Skills
 
 Load before acting: `tdd` (writing the test_plan; preloaded in developer), `delegate` (plan template,
-developer and codex-runner prompts), `review` (your checklist, adjudication, test gate, rounds, report),
+developer and codex-runner prompts), `review` (adjudication, test gate, rounds, report), `quality-bar` (the checklist you and the developer
+share),
 `commit` (committing), `pr-description` (on request), `repo-standards` (pinned-version idioms).

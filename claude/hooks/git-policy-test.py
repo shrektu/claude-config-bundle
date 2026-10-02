@@ -10,6 +10,12 @@ ENV = {**os.environ,
        "GIT_TERMINAL_PROMPT": "0"}
 ROCKET = "\U0001f680"
 CHECK = "✅"
+BRANCH_REPOS = {"master": "master", "dev": "dev", "develop": "develop", "testx": "test/x", "release1": "release/1"}
+UPSTREAM_REPOS = {"work_upstream": "main", "work_upstream_ok": "feature/x"}
+WORK_REPOS = {"bugfix": "bugfix/x", "hotfix": "hotfix/x", "work_matching": "feature/x", "work_pushcfg": "feature/x",
+              **{key: "feature/x" for key in UPSTREAM_REPOS}}
+MESSAGE_FILES = {"msg_ok": "Add parser module\n", "msg_bad": "Updated stuff\n",
+                 "msg_two": "Add parser module\nsecond line\n", "msg_missing": None}
 
 
 def git(cwd, *args, check=True):
@@ -76,13 +82,29 @@ def build(base):
     git(dirs["main"], "worktree", "add", "-q", "-b", "feature/wt", dirs["wt_feat"], "main")
     dirs["plain"] = os.path.join(base, "plain")
     os.makedirs(dirs["plain"], exist_ok=True)
+    for key, branch in BRANCH_REPOS.items():
+        dirs[key] = init_repo(os.path.join(base, f"{key}_repo"), branch)
+    for key, branch in WORK_REPOS.items():
+        dirs[key] = init_repo(os.path.join(base, f"{key}_repo"), branch)
+    git(dirs["work_matching"], "config", "push.default", "matching")
+    git(dirs["work_pushcfg"], "config", "remote.origin.push", "refs/heads/*:refs/heads/*")
+    for key, remote_branch in UPSTREAM_REPOS.items():
+        bare = os.path.join(base, f"{key}.git")
+        git(base, "init", "-q", "--bare", bare)
+        git(dirs[key], "remote", "add", "origin", bare)
+        git(dirs[key], "push", "-q", "origin", f"feature/x:{remote_branch}")
+        git(dirs[key], "branch", f"--set-upstream-to=origin/{remote_branch}")
+        git(dirs[key], "config", "push.default", "upstream")
+    for key, text in MESSAGE_FILES.items():
+        dirs[key] = os.path.join(base, f"{key}.txt")
+        if text is not None:
+            write(dirs[key], text)
     return dirs
 
 
 def cases(d):
-    deny = [
+    ask = [
         ("main", 'git commit -s -m "Add a thing."'),
-        ("main", "git commit --amend"),
         ("main", "git merge feature/old"),
         ("main", "git rebase feature/old"),
         ("main", "git cherry-pick abc1234"),
@@ -99,10 +121,7 @@ def cases(d):
         ("main", "git tag -d v1.0"),
         ("main", 'git tag -a v1.0 -m "release"'),
         ("main", "git tag -f v1.0"),
-        ("main", "git branch -d feature/old"),
         ("main", "git branch -M renamed"),
-        ("main", "git branch -f feature/old HEAD~1"),
-        ("main", "git update-ref refs/heads/feature/old HEAD"),
         ("main", "git symbolic-ref HEAD refs/heads/feature/old"),
         ("main", "git filter-branch --tree-filter true HEAD"),
         ("main", "git filter-repo --path src"),
@@ -123,22 +142,9 @@ def cases(d):
         ("detached", "git reset HEAD~1"),
         ("rebase_main", "git rebase --continue"),
         ("rebase_main", 'git commit -s -m "Resolve the conflict."'),
-        ("rebase_main", "git commit --amend --no-edit"),
+        ("rebase_main", "git commit --amend --no-edit -s"),
         ("apply_main", "git rebase --continue"),
         ("apply_main", 'git commit -s -m "Resolve the conflict."'),
-        ("work", 'git commit -m "Add a thing."'),
-        ("work", 'git commit -am "Add a thing."'),
-        ("work", 'git commit -s -m "Add a thing." -m "And a body."'),
-        ("work", 'git commit -s -m "Add a thing.\n\nWith a body."'),
-        ("work", 'git commit -s -m "Add a thing. Co-Authored-By: Claude <x@y>"'),
-        ("work", 'git commit -s -m "Add a thing (Generated with Claude Code)"'),
-        ("work", 'git commit -s -m "Add a thing. Claude-Session: 1234"'),
-        ("work", f'git commit -s -m "Ship it {ROCKET}"'),
-        ("work", f'git commit -s -m "Done {CHECK}"'),
-        ("work", "git commit -F /tmp/message.txt"),
-        ("work", "git commit -C HEAD~1"),
-        ("work", 'git commit --message="Add a thing." --message="body"'),
-        ("wt_feat", 'git commit -m "Add a thing."'),
         ("main", "git pull"),
         ("main", "git pull --ff-only origin main"),
         ("main", "git pull --rebase"),
@@ -155,18 +161,13 @@ def cases(d):
         ("main", f"(cd {d['work']} && git status); git commit -s -m \"Add a thing.\""),
         ("plain", f"{{ cd {d['main']}; git push origin main; }}"),
         ("work", f"(cd {d['main']} && git commit -s -m \"Add a thing.\")"),
-        ("work", 'git commit -s --no-signoff -m "One sentence."'),
-        ("work", 'git commit -s -m "One sentence." --trailer "Co-Authored-By: Claude <x@y>"'),
-        ("work", 'git commit -s -m "One sentence." --trailer=Claude-Session:abc123'),
-        ("work", 'git commit -s -m "One sentence." --trailer "Generated with Claude Code"'),
-        ("work", 'git commit --trailer "Co-Authored-By: Claude" -F /tmp/message.txt'),
-        ("plain", f'git --git-dir={d["main"]}/.git --work-tree={d["work"]} commit -s -m "One sentence."'),
+        ("plain",f'git --git-dir={d["main"]}/.git --work-tree={d["work"]} commit -s -m "Add a thing."'),
         ("work", f'git --work-tree={d["work"]} --git-dir={d["main"]}/.git push origin main'),
-        ("main", f'git --work-tree={d["work"]} commit -s -m "One sentence."'),
+        ("main", f'git --work-tree={d["work"]} commit -s -m "Add a thing."'),
         ("main", "git -c alias.publish='-c color.ui=false push' publish origin main"),
         ("main", "git pub origin main"),
         ("work", f'(cd {d["main"]} && echo "$(git push origin main)")'),
-        ("work", f'(cd {d["main"]} && echo "$(git commit -s -m \"One sentence.\")")'),
+        ("work", f'(cd {d["main"]} && echo "$(git commit -s -m \"Add a thing.\")")'),
         ("work", f'(cd {d["main"]}; case x in x) git push origin main;; esac)'),
         ("work", f'case x in x) (cd {d["main"]} && git push origin main);; esac'),
         ("work", f'(cd {d["main"]}; case x in x) echo skip;; *) git push origin main;; esac)'),
@@ -183,6 +184,124 @@ def cases(d):
         ("work", f'(cd {d["main"]}; while true; do case x in x) git push origin main;; esac; done)'),
         ("main", "git tag __redir_0__"),
         ("main", "git tag __subst_0__"),
+        ("main", 'git commit -s -m "Add parser module"'),
+        ("master", 'git commit -s -m "Add parser module"'),
+        ("dev", 'git commit -s -m "Add parser module"'),
+        ("develop", 'git commit -s -m "Add parser module"'),
+        ("testx", 'git commit -s -m "Add parser module"'),
+        ("release1", 'git commit -s -m "Add parser module"'),
+        ("detached", 'git commit -s -m "Add parser module"'),
+        ("main", "git merge feature/x"),
+        ("work", "git push origin HEAD:main"),
+        ("work", "git push origin feature/x:main"),
+        ("work", "git push origin +feature/x:refs/heads/develop"),
+        ("work", "git push origin :main"),
+        ("work", "git push --all"),
+        ("work", "git push --mirror"),
+        ("work", "git push --tags"),
+        ("work", "git push --follow-tags"),
+        ("work", "git push origin refs/tags/v1"),
+        ("work", "git push origin tag v1"),
+        ("work", "git push origin --delete develop"),
+        ("work", "git push origin feature/x:"),
+        ("work_matching", "git push"),
+        ("work_pushcfg", "git push"),
+        ("work_pushcfg", "git push origin"),
+        ("work", "git branch -D main"),
+        ("work", "git branch -m develop old"),
+        ("work", "git branch -m renamed"),
+        ("work", "git branch -f main HEAD~1"),
+        ("work", "git branch -d feature/old main"),
+        ("work", "git update-ref refs/heads/main HEAD"),
+        ("work", "git update-ref -d refs/heads/master"),
+        ("work", "git update-ref refs/heads/tmp HEAD"),
+        ("rebase_main", "git rebase main"),
+        ("work", "git update-ref --stdin"),
+        ("work", "git --config-env=push.default=PUSHDEF push"),
+        ("work", "git --config-env push.default=PUSHDEF push origin feature/x"),
+        ("work", "git symbolic-ref refs/heads/main refs/heads/feature/x"),
+        ("work", "git symbolic-ref -d refs/heads/main"),
+        ("work_upstream", "git push"),
+        ("work_upstream", "git push origin"),
+        ("work", "git -c push.default=matching push"),
+        ("work", "git -c remote.origin.push=refs/heads/*:refs/heads/* push"),
+        ("main", 'git commit -s -m "Add parser module" && git push origin HEAD:main'),
+        ("work", "gh pr merge 12 --squash"),
+        ("plain", f"cd {d['work']} && gh pr merge --auto 3"),
+        ("work", "gh -R org/repo pr merge 3"),
+        ("work", 'bash -c "gh pr merge 3"'),
+        ("work", "sudo gh pr merge 3"),
+        ("work", f"(cd {d['plain']} && gh pr merge 3)"),
+    ]
+    deny = [
+        ("main", "git commit --amend"),
+        ("work", 'git commit -m "Add a thing."'),
+        ("work", 'git commit -am "Add a thing."'),
+        ("work", 'git commit -s -m "Add a thing." -m "And a body."'),
+        ("work", 'git commit -s -m "Add a thing.\n\nWith a body."'),
+        ("work", 'git commit -s -m "Add a thing. Co-Authored-By: Claude <x@y>"'),
+        ("work", 'git commit -s -m "Add a thing (Generated with Claude Code)"'),
+        ("work", 'git commit -s -m "Add a thing. Claude-Session: 1234"'),
+        ("work", f'git commit -s -m "Ship it {ROCKET}"'),
+        ("work", f'git commit -s -m "Done {CHECK}"'),
+        ("work", f"git commit -s -F {d['msg_missing']}"),
+        ("work", "git commit -s -C HEAD~1"),
+        ("work", "git commit -s -c HEAD~1"),
+        ("work", "git commit -s --reuse-message=HEAD~1"),
+        ("work", "git commit -s --reedit-message=HEAD~1"),
+        ("work", 'git commit --message="Add a thing." --message="body"'),
+        ("wt_feat", 'git commit -m "Add a thing."'),
+        ("work", 'git commit -s --no-signoff -m "Add a thing."'),
+        ("work", 'git commit -s -m "Add a thing." --trailer "Co-Authored-By: Claude <x@y>"'),
+        ("work", 'git commit -s -m "Add a thing." --trailer=Claude-Session:abc123'),
+        ("work", 'git commit -s -m "Add a thing." --trailer "Generated with Claude Code"'),
+        ("work", f'git commit -s --trailer "Co-Authored-By: Claude" -F {d["msg_ok"]}'),
+        ("work", 'git commit -s -m "Add a thing." --trailer "Reviewed-by: x"'),
+        ("work", 'git commit -s -m "Add parser module" --trailer "Co-Authored-By: x"'),
+        ("work", 'git commit -s -m "Add parser"'),
+        ("work", 'git commit -s -m "Add"'),
+        ("work", 'git commit -s -m "Add the parser module to the build now"'),
+        ("work", 'git commit -s -m "Added parser module"'),
+        ("work", 'git commit -s -m "Adding parser module"'),
+        ("work", 'git commit -s -m "Adds parser module"'),
+        ("work", 'git commit -s -m "Fixes the parser bug"'),
+        ("work", 'git commit -s -m "Uses cached parser output"'),
+        ("work", 'git commit -s -m "fix parser module now"'),
+        ("work", 'git commit -s -m "Fix parser. Add tests"'),
+        ("work", 'git commit -s -m "Fix parser! Add tests"'),
+        ("work", 'git commit -s -m "Add a thing, with a comma; and a semicolon."'),
+        ("work", 'git commit -m "Add parser module"'),
+        ("work", f"git commit -s -F {d['msg_bad']}"),
+        ("work", f"git commit -s -F {d['msg_two']}"),
+        ("work", "git commit -s"),
+        ("work", 'git commit -s --fixup HEAD -m "Add parser module"'),
+        ("work", 'git commit -s --squash HEAD -m "Add parser module"'),
+        ("work", 'git commit -s --fixup=amend:HEAD -m "Add parser module"'),
+        ("work", f"git commit -s --fixup=reword:HEAD -F {d['msg_ok']}"),
+        ("work", "git update-ref --stdin", "developer"),
+        ("work", "git commit -s -C HEAD"),
+        ("work", "git commit --fixup HEAD"),
+        ("work", "git commit --squash HEAD"),
+        ("work", "git commit --amend --no-edit"),
+        ("work", "git commit --amend -s"),
+        ("work", 'git commit -s --amend'),
+        ("work", 'git commit -s -m "Add parser module" --trailer "Reviewed-by: x"'),
+        ("work", 'git commit -s -m "Add a thing. Co-Authored-By: Claude <x@y>" --amend'),
+        ("work", 'git commit -s -m "Add parser module" -F /dev/null'),
+        ("work", 'git commit -s -m "Add parser module" -C HEAD'),
+        ("work", "git commit -s -m 'Add parser module' && git commit -s -m 'Added parser module'"),
+        ("work", 'git commit -s -m "Add parser module"', "developer"),
+        ("work", "git push", "general-purpose"),
+        ("work", "git merge main", "developer"),
+        ("work", "git rebase main", "developer"),
+        ("work", "git reset --soft HEAD~1", "developer"),
+        ("work", "git tag v1", "developer"),
+        ("work", "git branch -D old", "developer"),
+        ("work", "git cherry-pick abc1234", "developer"),
+        ("work", "git pull", "developer"),
+        ("work", "git update-ref refs/heads/feature/tmp HEAD", "developer"),
+        ("work", "gh pr merge 3", "developer"),
+        ("main", "git push origin main", "developer"),
     ]
     allow = [
         ("main", "git status"),
@@ -222,29 +341,74 @@ def cases(d):
         ("main", "echo 'git commit -s -m x'"),
         ("main", "grep -rn 'git commit' ."),
         ("main", "make test"),
-        ("work", 'git commit -s -m "One sentence."'),
-        ("work", 'git commit --signoff --message="One sentence."'),
-        ("work", 'git commit -s -am "One sentence."'),
-        ("work", 'git commit -s -m "Add a thing, with a comma; and a semicolon."'),
-        ("work", "git commit --amend --no-edit"),
-        ("work", "git commit --fixup HEAD~1"),
-        ("work", "git commit --squash HEAD~1"),
-        ("work", "git commit --amend --no-edit --no-verify"),
+        ("work", 'git commit -s -m "Add a thing."'),
+        ("work", 'git commit --signoff --message="Add a thing."'),
+        ("work", 'git commit -s -am "Add a thing."'),
+        ("work", 'git commit -s -m "Add a thing, with commas"'),
+        ("work", "git commit --amend --no-edit -s"),
+        ("work", "git commit --amend --no-edit --signoff"),
+        ("work", "git commit -s --fixup HEAD~1"),
+        ("work", "git commit -s --squash HEAD~1"),
+        ("work", "git commit -s --fixup=HEAD"),
+        ("work", "git commit -s --amend --no-edit --no-verify"),
+        ("bugfix", 'git commit -s -m "Add parser module"'),
+        ("hotfix", 'git commit -s -m "Add parser module"'),
+        ("work", 'git commit -s -m "Embed fonts in report"'),
+        ("work", 'git commit -s -m "Process queued jobs"'),
+        ("work", 'git commit -s -m "Address review notes"'),
+        ("work", 'git commit -s -m "Seed demo programs"'),
+        ("work", 'git commit -s -m "Fix parser bounds."'),
+        ("work", 'git commit -s -m "Add the parser module to the build"'),
+        ("work", 'git commit -s -m "Add v1.2 parser support"'),
+        ("work", f"git commit -s -F {d['msg_ok']}"),
+        ("work", f"cd {d['work']} && git commit -s -F ../msg_ok.txt"),
+        ("work", 'git commit -s -m "Add parser module" --trailer "Signed-off-by: Test <test@example.com>"'),
+        ("work_upstream_ok", "git push"),
+        ("work", "git -c push.default=simple push"),
+        ("work", "git -c user.name=x status"),
+        ("work", "git --config-env=user.name=NAME_VAR status"),
+        ("work", "git symbolic-ref refs/heads/feature/alias refs/heads/feature/x"),
+        ("main", "git branch -d feature/old"),
+        ("main", "git branch -f feature/old HEAD~1"),
+        ("main", "git update-ref refs/heads/feature/old HEAD"),
+        ("work", "git push -u origin feature/x"),
+        ("work", "git push --force-with-lease"),
+        ("work", "git push --force-with-lease origin feature/x"),
+        ("work", "git push origin HEAD"),
+        ("work", "git push origin feature/x:feature/y"),
+        ("work", "git push origin +feature/x:refs/heads/feature/x"),
+        ("work", "git push origin --delete feature/old"),
+        ("work", "git push --dry-run --all"),
+        ("work", "gh pr create --fill"),
+        ("work", "gh pr view 3"),
+        ("work", "gh pr list"),
+        ("work", "gh pr checks 3"),
+        ("work", "gh pr diff 3"),
+        ("work", "gh pr comment 3 --body merge"),
+        ("work", "gh pr edit 3 --title merge"),
+        ("main", "gh pr view 3"),
+        ("main", "echo gh pr merge 3"),
+        ("main", "git branch -m feature/old feature/older"),
+        ("main", "git status", "developer"),
+        ("main", "git log --oneline -3", "developer"),
+        ("work", "git commit --dry-run", "developer"),
+        ("work", "git tag -l", "developer"),
+        ("work", "gh pr create --fill", "developer"),
         ("work", "git reset --soft HEAD~1"),
         ("work", "git push origin feature/x"),
         ("work", "git merge main"),
         ("work", "git rebase main"),
         ("work", "git tag v9.9.9"),
         ("work", "git branch -d feature/old"),
-        ("work", "git update-ref refs/heads/tmp HEAD"),
+        ("work", "git update-ref refs/heads/feature/tmp HEAD"),
         ("work", "git cherry-pick abc1234"),
         ("rebase_work", "git rebase --continue"),
         ("rebase_work", "git rebase --abort"),
         ("rebase_work", "git rebase --skip"),
         ("rebase_work", "git rebase --edit-todo"),
         ("rebase_work", 'git commit -s -m "Resolve the conflict."'),
-        ("rebase_work", "git commit --amend --no-edit"),
-        ("wt_feat", 'git commit -s -m "One sentence."'),
+        ("rebase_work", "git commit --amend --no-edit -s"),
+        ("wt_feat", 'git commit -s -m "Add a thing."'),
         ("wt_feat", "git reset --soft HEAD~1"),
         ("plain", 'git commit -s -m "Add a thing."'),
         ("plain", "git reset --hard HEAD~1"),
@@ -252,8 +416,8 @@ def cases(d):
         ("plain", "ls -la"),
         ("work", "git pull --rebase"),
         ("work", "git pull origin feature/x"),
-        ("plain", f"git --git-dir={d['work']}/.git commit -s -m \"One sentence.\""),
-        ("main", f"git --work-tree={d['work']} --git-dir={d['work']}/.git commit -s -m \"One sentence.\""),
+        ("plain", f"git --git-dir={d['work']}/.git commit -s -m \"Add a thing.\""),
+        ("main", f"git --work-tree={d['work']} --git-dir={d['work']}/.git commit -s -m \"Add a thing.\""),
         ("plain", f"git --git-dir={d['main']}/.git status"),
         ("main", "git shellhack"),
         ("main", "git lg"),
@@ -261,8 +425,8 @@ def cases(d):
         ("work", "git publish origin feature/x"),
         ("main", "git unknown-subcommand --flag"),
         ("plain", f"(cd {d['main']} && git status); ls"),
-        ("work", f"(cd {d['plain']} && pwd); git commit -s -m \"One sentence.\""),
-        ("main", f"(cd {d['work']} && git commit -s -m \"One sentence.\")"),
+        ("work", f"(cd {d['plain']} && pwd); git commit -s -m \"Add a thing.\""),
+        ("main", f"(cd {d['work']} && git commit -s -m \"Add a thing.\")"),
         ("main", "git commit --short"),
         ("main", "git commit --porcelain"),
         ("main", "git commit --dry-run --long"),
@@ -271,38 +435,37 @@ def cases(d):
         ("main", "git tag -v v1.0"),
         ("main", "git replace -l abc"),
         ("main", "git replace --list"),
-        ("work", 'git commit --no-signoff -s -m "One sentence."'),
-        ("work", 'git commit -s -m "One sentence." --trailer "Reviewed-by: Someone"'),
-        ("plain", f'git --git-dir={d["work"]}/.git --work-tree={d["main"]} commit -s -m "One sentence."'),
-        ("work", f'git --work-tree={d["main"]} commit -s -m "One sentence."'),
+        ("work", 'git commit --no-signoff -s -m "Add a thing."'),
+        ("plain", f'git --git-dir={d["work"]}/.git --work-tree={d["main"]} commit -s -m "Add a thing."'),
+        ("work", f'git --work-tree={d["main"]} commit -s -m "Add a thing."'),
         ("work", f'git --work-tree={d["main"]} --git-dir={d["work"]}/.git push origin feature/x'),
         ("main", "git st --short"),
         ("main", "git -c alias.look='-c color.ui=false status' look"),
-        ("main", f'(cd {d["work"]} && echo "$(git commit -s -m \"One sentence.\")")'),
-        ("main", f'x=$(cd {d["work"]} && git commit -s -m "One sentence.")'),
-        ("main", f'(cd {d["work"]}; case x in x) git commit -s -m "One sentence.";; esac)'),
-        ("main", f'case x in x) (cd {d["work"]} && git commit -s -m "One sentence.");; esac'),
-        ("work", 'case x in x) git commit -s -m "One sentence.";; esac'),
+        ("main", f'(cd {d["work"]} && echo "$(git commit -s -m \"Add a thing.\")")'),
+        ("main", f'x=$(cd {d["work"]} && git commit -s -m "Add a thing.")'),
+        ("main", f'(cd {d["work"]}; case x in x) git commit -s -m "Add a thing.";; esac)'),
+        ("main", f'case x in x) (cd {d["work"]} && git commit -s -m "Add a thing.");; esac'),
+        ("work", 'case x in x) git commit -s -m "Add a thing.";; esac'),
         ("work", f'(cd {d["plain"]} && echo "$(git push origin main)")'),
         ("main", "git pull --dry-run"),
         ("main", "git commit -z -m x"),
         ("main", 'git commit -sz -m "Bad Co-Authored-By: Claude"'),
         ("main", "git commit --null"),
-        ("work", f'cat >"$(git commit -s -m \"One sentence.\")"; (cd {d["main"]} && echo "$(git status)")'),
-        ("main", f'cat >"$(cd {d["work"]} && git commit -s -m \"One sentence.\")"'),
-        ("main", f'(cd {d["work"]} && cat <<EOF\n$(git commit -s -m "One sentence.")\nEOF\n)'),
+        ("work", f'cat >"$(git commit -s -m \'Add a thing.\')"; (cd {d["main"]} && echo "$(git status)")'),
+        ("main", f'cat >"$(cd {d["work"]} && git commit -s -m \'Add a thing.\')"'),
+        ("main", f'(cd {d["work"]} && cat <<EOF\n$(git commit -s -m "Add a thing.")\nEOF\n)'),
         ("main", f"(cd {d['work']} && cat <<'EOF'\n$(git push origin main)\nEOF\n)"),
         ("main", "cat <<'EOF'\n$(git push origin main)\nEOF"),
         ("main", 'git commit -s -m esac --dry-run'),
         ("main", 'echo case; git status'),
-        ("work", f'(cd {d["work"]} && echo case); git commit -s -m "One sentence."'),
-        ("work", f'cat <<EOF\n$(cd {d["main"]})\n$(git commit -s -m "One sentence.")\nEOF'),
+        ("work", f'(cd {d["work"]} && echo case); git commit -s -m "Add a thing."'),
+        ("work", f'cat <<EOF\n$(cd {d["main"]})\n$(git commit -s -m "Add a thing.")\nEOF'),
         ("work", f'(cd {d["work"]}; if true; then case x in x) git push origin feature/x;; esac; fi)'),
-        ("work", f'(cd {d["plain"]}; if true; then case x in x) git commit -s -m "One sentence.";; esac; fi)'),
+        ("work", f'(cd {d["plain"]}; if true; then case x in x) git commit -s -m "Add a thing.";; esac; fi)'),
         ("main", "echo __subst_0__"),
         ("main", "echo __redir_3__ && git status"),
     ]
-    return deny, allow
+    return deny, ask, allow
 
 
 GARBAGE = ["", "not json", "null", "[]", "1", '{"tool_input":{"command":42}}',
@@ -316,34 +479,38 @@ GARBAGE = ["", "not json", "null", "[]", "1", '{"tool_input":{"command":42}}',
            json.dumps({"tool_name": "Bash", "tool_input": {"command": "cat <<EOF\n" + "x\n" * 3000}})]
 
 
-def run(cmd, cwd):
-    payload = json.dumps({"tool_name": "Bash", "cwd": cwd, "tool_input": {"command": cmd}})
-    done = subprocess.run(["python3", hook], input=payload, capture_output=True, text=True, timeout=30)
+def run(cmd, cwd, agent=None):
+    body = {"tool_name": "Bash", "cwd": cwd, "tool_input": {"command": cmd}}
+    if agent:
+        body["agent_type"] = agent
+    done = subprocess.run(["python3", hook], input=json.dumps(body), capture_output=True, text=True, timeout=30,
+                          env=ENV)
     return done.returncode, done.stdout.strip(), done.stderr.strip()
+
+
+def check_bucket(name, entries, dirs, decision):
+    bad, slowest = 0, 0.0
+    for key, cmd, *rest in entries:
+        t0 = time.time()
+        rc, out, err = run(cmd, dirs[key], *rest)
+        slowest = max(slowest, time.time() - t0)
+        ok = rc == 0 and not err and (f'"{decision}"' in out if decision else out == "")
+        bad += not ok
+        if not ok:
+            print(f"{name} MISS  [{key}]{rest} {cmd!r} -> rc={rc} {out[:200]} {err[-160:]}")
+    return bad, slowest
 
 
 def main():
     with tempfile.TemporaryDirectory() as base:
         dirs = build(base)
-        deny, allow = cases(dirs)
+        deny, ask, allow = cases(dirs)
         bad = 0
         slowest = 0.0
-        for key, cmd in deny:
-            t0 = time.time()
-            rc, out, err = run(cmd, dirs[key])
-            slowest = max(slowest, time.time() - t0)
-            ok = rc == 0 and '"deny"' in out and not err
-            bad += not ok
-            if not ok:
-                print(f"DENY MISS  [{key}] {cmd!r} -> rc={rc} {out[:120]} {err[-160:]}")
-        for key, cmd in allow:
-            t0 = time.time()
-            rc, out, err = run(cmd, dirs[key])
-            slowest = max(slowest, time.time() - t0)
-            ok = rc == 0 and out == "" and not err
-            bad += not ok
-            if not ok:
-                print(f"ALLOW FP   [{key}] {cmd!r} -> rc={rc} {out[:200]} {err[-160:]}")
+        for name, entries, decision in (("DENY", deny, "deny"), ("ASK", ask, "ask"), ("ALLOW", allow, None)):
+            missed, slow = check_bucket(name, entries, dirs, decision)
+            bad += missed
+            slowest = max(slowest, slow)
         for raw in GARBAGE:
             done = subprocess.run(["python3", hook], input=raw, capture_output=True, text=True, timeout=30)
             ok = done.returncode == 0 and not done.stderr and done.stdout == ""
@@ -352,34 +519,64 @@ def main():
                 print(f"garbage {raw[:60]!r} -> rc={done.returncode} out={done.stdout[:60]!r} err={done.stderr[-160:]!r}")
 
         spots = [
-            (dirs["work"], 'git commit -m "Add a thing."', ["-s", "git commit -s -m 'Add a thing.'"]),
-            (dirs["work"], 'git commit -s -m "A." -m "B."', ["ONE sentence", "2 `-m`"]),
+            (dirs["work"], 'git commit -m "Add a thing."', ["-s", "git commit -s -m 'Add a thing.'"], "deny"),
+            (dirs["work"], 'git commit -s -m "A." -m "B."', ["ONE sentence", "2 `-m`"], "deny"),
             (dirs["work"], 'git commit -s -m "Add a thing. Co-Authored-By: Claude"',
-             ["Co-Authored-By", "git commit -s -m 'Add a thing.'"]),
-            (dirs["main"], 'git commit -s -m "Add a thing."', ["not a work branch", "main", "feature/"]),
-            (dirs["detached"], "git reset HEAD~1", ["detached"]),
-            (dirs["rebase_main"], "git rebase --continue", ["rebase", "main"]),
-            (dirs["main"], "git publish origin main", ["`git push`", "not a work branch"]),
-            (dirs["main"], "git pull", ["`git pull`", "not a work branch"]),
-            (dirs["work"], 'git commit -s -m "One sentence." --trailer "Claude-Session: x"',
-             ["Claude-Session", "git commit -s -m 'One sentence.'"]),
-            (dirs["work"], 'git commit -s --no-signoff -m "One sentence."',
-             ["signed off", "git commit -s -m 'One sentence.'"]),
-            (dirs["main"], "git pub origin main", ["`git push`", "not a work branch"]),
-            (dirs["work"], f'(cd {dirs["main"]} && echo "$(git push origin main)")',
-             ["`git push`", "main"]),
+             ["Co-Authored-By", "git commit -s -m 'Add a thing.'"], "deny"),
+            (dirs["main"], 'git commit -s -m "Add a thing."', ["not a work branch", "main", "feature/"], "ask"),
+            (dirs["detached"], "git reset HEAD~1", ["detached"], "ask"),
+            (dirs["rebase_main"], "git rebase --continue", ["rebase", "main"], "ask"),
+            (dirs["main"], "git publish origin main", ["`git push`", "not a work branch"], "ask"),
+            (dirs["main"], "git pull", ["`git pull`", "not a work branch"], "ask"),
+            (dirs["work"], 'git commit -s -m "Add a thing." --trailer "Claude-Session: x"',
+             ["Claude-Session", "git commit -s -m 'Add a thing.'"], "deny"),
+            (dirs["work"], 'git commit -s --no-signoff -m "Add a thing."',
+             ["signed off", "git commit -s -m 'Add a thing.'"], "deny"),
+            (dirs["main"], "git pub origin main", ["`git push`", "not a work branch"], "ask"),
+            (dirs["work"], f'(cd {dirs["main"]} && echo "$(git push origin main)")', ["`git push`", "main"], "ask"),
+            (dirs["work"], 'git commit -s -m "Add the parser module to the build now"',
+             ["3–7 words", "<Imperative verb, 3–7 words>"], "deny"),
+            (dirs["work"], 'git commit -s -m "Adding parser module"',
+             ["imperative", "<Imperative verb, 3–7 words>"], "deny"),
+            (dirs["work"], 'git commit -s -m "Fix parser. Add tests"',
+             ["one sentence", "<Imperative verb, 3–7 words>"], "deny"),
+            (dirs["work"], 'git commit -m "Add parser module"', ["signed off", "git commit -s -m 'Add parser module'"],
+             "deny"),
+            (dirs["work"], 'git commit -s -m "Add parser module" --trailer "Reviewed-by: x"',
+             ["Signed-off-by", "git commit -s -m 'Add parser module'"], "deny"),
+            (dirs["work"], "git commit -s", ["<Imperative verb, 3–7 words>"], "deny"),
+            (dirs["work"], f"git commit -F {dirs['msg_ok']}", ["signed off", "git commit -s -m 'Add parser module'"],
+             "deny"),
+            (dirs["work"], f"git commit -s -F {dirs['msg_two']}", ["body"], "deny"),
+            (dirs["work"], "git push", ["main session"], "deny"),
+            (dirs["work"], "git push origin feature/x:main", ["main", "not a work branch"], "ask"),
+            (dirs["work"], "gh pr merge 3", ["merges a PR into its base branch"], "ask"),
+            (dirs["work"], "git branch -D main", ["main", "not a work branch"], "ask"),
+            (dirs["main"], 'git commit -s -m "Add parser module" && git push origin HEAD:main',
+             ["creates a commit", "publishes", "; "], "ask"),
+            (dirs["work"], 'git commit -s --fixup HEAD -m "Add parser module"',
+             ["plain `--fixup <sha>`", "Use: git commit -s --fixup HEAD"], "deny"),
+            (dirs["work"], 'git commit -s --fixup=amend:HEAD~2 -m "Add parser module"',
+             ["Use: git commit -s --fixup 'amend:HEAD~2'"], "deny"),
+            (dirs["work"], 'git commit -s --squash abc1234 -m "Add parser module"',
+             ["Use: git commit -s --squash abc1234"], "deny"),
+            (dirs["work"], "git --config-env=push.default=PUSHDEF push", ["--config-env"], "ask"),
+            (dirs["work_upstream"], "git push", ["`main`", "not a work branch"], "ask"),
         ]
-        for cwd, cmd, needles in spots:
-            rc, out, err = run(cmd, cwd)
-            missing = [n for n in needles if n not in out]
-            ok = rc == 0 and '"deny"' in out and not missing
+        for cwd, cmd, needles, decision in spots:
+            agent = "general-purpose" if needles == ["main session"] else None
+            rc, out, err = run(cmd, cwd, agent)
+            reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"] if out else ""
+            missing = [n for n in needles if n not in reason]
+            ok = rc == 0 and f'"{decision}"' in out and not missing
             bad += not ok
             if not ok:
                 print(f"SPOT FAIL  {cmd!r} missing={missing} -> {out[:300]}")
 
-        total = len(deny) + len(allow) + len(GARBAGE) + len(spots)
-        print(f"hook: {hook}\ndeny cases: {len(deny)}, allow cases: {len(allow)}, garbage: {len(GARBAGE)}, "
-              f"spot checks: {len(spots)}, slowest run: {slowest * 1000:.0f} ms, FAILURES: {bad}")
+        total = len(deny) + len(ask) + len(allow) + len(GARBAGE) + len(spots)
+        print(f"hook: {hook}\ndeny cases: {len(deny)}, ask cases: {len(ask)}, allow cases: {len(allow)}, "
+              f"garbage: {len(GARBAGE)}, spot checks: {len(spots)}, slowest run: {slowest * 1000:.0f} ms, "
+              f"FAILURES: {bad}")
         print(("FAIL " if bad else "PASS ") + f"{total - bad}/{total}")
         return 1 if bad else 0
 

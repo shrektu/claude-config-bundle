@@ -48,11 +48,11 @@ HOOK_NAMES = (
     "comment-guard",
 )
 SHARED_HOOK_MODULES = ("shell_words.py", "code_files.py")
-SKILL_NAMES = ("delegate", "review", "commit", "pr-description", "repo-standards", "tdd")
+SKILL_NAMES = ("delegate", "review", "commit", "pr-description", "repo-standards", "tdd", "quality-bar")
 DEVELOPER_AGENT = "developer"
 DEVELOPER_MODEL = "claude-sonnet-5-5"
 DEVELOPER_EFFORT = "medium"
-DEVELOPER_SKILLS = ("tdd", "repo-standards")
+DEVELOPER_SKILLS = ("tdd", "repo-standards", "quality-bar")
 RUNNER_AGENT = "codex-runner"
 RUNNER_MODEL = "haiku"
 AGENT_NAMES = (DEVELOPER_AGENT, RUNNER_AGENT)
