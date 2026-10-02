@@ -5,8 +5,8 @@ description: Szablon pliku planu (task, architecture, test_plan, acceptance_crit
 
 ## Plan file
 
-Path: `~/.claude/plans/<repo>-<slug>.md`. One file is the single source for sol's plan review, the developer and
-sol's code review — nobody gets the plan pasted into a prompt.
+Path: `~/.claude/plans/<repo>-<slug>.md`. One file is the single source for sol's plan review, the
+developer and sol's code review — nobody gets the plan pasted into a prompt.
 
 ```
 # Plan: <title>
@@ -16,6 +16,8 @@ sol's code review — nobody gets the plan pasted into a prompt.
 
 ## architecture
 <decisions: files, signatures, data shapes, what must not change; no decision left open>
+<design: dependency direction (domain imports no framework/DB/I/O), module boundaries, where input is
+ validated and converted to typed models, error policy, what stays immutable>
 <then numbered steps of 2–5 minutes each, in TDD order:
  1. <test file> — <test to add> — verify: <command> → VERIFY FAIL (<expected reason>)
  2. <source file> — <the change> — verify: <command> → VERIFY PASS
@@ -31,6 +33,7 @@ sol's code review — nobody gets the plan pasted into a prompt.
 Unit: ~/.claude/bin/verify -- 'cd /absolute/path/to/repo && <unit test command>'
 Integration: ~/.claude/bin/verify -- 'cd /absolute/path/to/repo && <integration test command>'
 Lint/types: ~/.claude/bin/verify -- 'cd /absolute/path/to/repo && <ruff check . && pyright | eslint . && tsc --noEmit>'
+Quality: ~/.claude/bin/verify -- 'cd /absolute/path/to/repo && ~/.claude/bin/quality-gate --base <START SHA>'
 
 ## repos
 You may only touch /absolute/path/to/repo; you may not touch <everything else, named>.
@@ -95,7 +98,7 @@ recheck: <the findings sent to the developer, one per line>
 ```
 
 The answer is a header `codex <mode> <model>/<effort> tokens in=… cached=… out=…` followed by `PASS` or one
-line per defect (`<section>: …` for a plan, `<path>:<line>: …` for code).
+line per defect prefixed `H:` or `L:` (`H: <section>: …` for a plan, `H: <path>:<line>: …` for code).
 
 ## Explore first?
 
