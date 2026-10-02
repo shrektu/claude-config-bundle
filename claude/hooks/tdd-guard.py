@@ -7,6 +7,7 @@ import sys
 from enum import Enum
 
 sys.dont_write_bytecode = True
+from code_files import CODE_SUFFIXES
 from shell_words import runs_verify
 
 GUARDED_AGENT = "developer"
@@ -26,11 +27,6 @@ TEST_NAMES = tuple(re.compile(pattern) for pattern in (
     r"^test_.*\.c$",
     r"_test\.(c|cc|cpp)$",
 ))
-CODE_SUFFIXES = {
-    "py", "pyi", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "rs", "c", "h", "cc", "cpp", "cxx", "hpp", "hh",
-    "java", "kt", "kts", "cs", "rb", "php", "swift", "scala", "vue", "svelte", "sh", "bash", "sql", "ino", "lua",
-    "dart", "ex", "exs", "m", "mm", "ipynb",
-}
 GIT_MARKER = ".git"
 SHEBANG = "#!"
 INLINE_TEST_MARKERS = ("#[test]", "#[cfg(test)]", "#[tokio::test]")

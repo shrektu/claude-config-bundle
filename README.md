@@ -47,8 +47,10 @@ Hooks (`claude/hooks/`, registered in `settings.json`): `git-guard.py` (destruct
 `git-policy.py` (branch rule + commit message format), `verify-guard.py` (bare test/lint/build),
 `read-guard.py` (whole-file reads), `delegation-guard.py` (developer and codex-runner need a complete
 plan file), `tdd-guard.py` (the developer edits production code only after a test edit and a
-`VERIFY FAIL`), `subagent-verify-check.py` (the developer must verify after its last edit), plus
-`repo-facts` as the SessionStart context. `shell_words.py` is their shared command parser. Each hook
+`VERIFY FAIL`), `comment-guard.py` (no edit may add a comment to code; directives and one-line
+docstrings pass; `--scan [--raw] FILE…` lists findings), `subagent-verify-check.py` (the developer must
+verify after its last edit), plus `repo-facts` as the SessionStart context. `shell_words.py` is their
+shared command parser, `code_files.py` their shared code-file and comment-syntax map. Each hook
 ships with a `*-test.py` matrix; the worker ships with `codex_worker_test.py`.
 
 Skills (`claude/skills/`): `tdd` (red → green → refactor, test_plan design, `tdd_exempt:`), `delegate`
@@ -65,7 +67,7 @@ CLIs (`claude/bin/`): `verify` (runs checks, keeps the log on disk, prints the s
 CLAUDE.md, settings.json (workflow keys, permissions, hooks, output caps), `agents/`, `skills/`,
 `templates/` (the `.claude/rules/standards.md` template for projects), `bin/` (verify,
 review-checkpoint, repo-facts, usage-report), `hooks/` (git-guard, git-policy, verify-guard, read-guard,
-delegation-guard, tdd-guard, subagent-verify-check, shell_words + their test matrices), `retire.json` (what install.sh removes
+delegation-guard, tdd-guard, comment-guard, subagent-verify-check, shell_words, code_files + their test matrices), `retire.json` (what install.sh removes
 from an older home), the codex-worker MCP server with its unit test and its registration for Claude and Codex, the
 statusline script, Codex `AGENTS.md`.
 
@@ -75,7 +77,7 @@ Code review runs on gpt-6-sol, which needs codex-cli 0.157.1 or newer: an older 
 "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account". Check `codex --version`.
 
 ```bash
-for h in tdd-guard git-guard git-policy verify-guard read-guard delegation-guard subagent-verify-check; do
+for h in tdd-guard comment-guard git-guard git-policy verify-guard read-guard delegation-guard subagent-verify-check; do
   python3 ~/.claude/hooks/$h-test.py || echo "FAILED: $h"
 done
 ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py

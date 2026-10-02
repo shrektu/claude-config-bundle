@@ -95,6 +95,12 @@
             "command": "python3 __HOME__/.claude/hooks/tdd-guard.py",
             "timeout": 10,
             "statusMessage": "tdd-guard"
+          },
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/comment-guard.py",
+            "timeout": 10,
+            "statusMessage": "comment-guard"
           }
         ]
       }

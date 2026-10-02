@@ -19,8 +19,9 @@ then the patch per file. Untracked files never appear in a diff — list them an
 - idioms match the versions `~/.claude/bin/repo-facts` prints; a deprecated-for-this-version API or a
   `warnings: N deprecation lines` line on a verify PASS is a finding (`repo-standards` skill);
 - regressions: callers, signatures, migrations, serialized shapes, error paths, concurrency;
-- code style: no narrating comments, no magic numbers or strings, typed models instead of raw dicts,
-  no needless `__init__.py`.
+- code style: no added comments (comment-guard blocks Edit/Write; look for ones that came in through
+  Bash or a generator), no multi-line docstrings, no magic numbers or strings, typed models instead of
+  raw dicts, no needless `__init__.py`.
 
 ## Astra (plan) and sol (code) lines
 

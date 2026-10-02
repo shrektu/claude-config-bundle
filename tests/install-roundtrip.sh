@@ -86,6 +86,9 @@ check_file "$H1/.claude/hooks/subagent-verify-check.py"
 check_file "$H1/.claude/hooks/tdd-guard.py"
 check_file "$H1/.claude/hooks/tdd-guard-test.py"
 check_file "$H1/.claude/hooks/shell_words.py"
+check_file "$H1/.claude/hooks/comment-guard.py"
+check_file "$H1/.claude/hooks/comment-guard-test.py"
+check_file "$H1/.claude/hooks/code_files.py"
 check_file "$H1/.claude/mcp/codex-worker/codex_worker_test.py"
 check_file "$H1/.claude/agents/developer.md"
 check_file "$H1/.claude/skills/tdd/SKILL.md"
@@ -98,6 +101,7 @@ CHECKS=$((CHECKS + 1))
 AGENTS_LEFT=$(cd "$H1/.claude/agents" && ls | sort | tr '\n' ' ')
 [ "$AGENTS_LEFT" = "codex-runner.md developer.md " ] || fail "agents left after install: $AGENTS_LEFT"
 check_grep "$WORK/install1.log" "for t in tdd-guard " "install log: post-install hint runs the tdd-guard matrix"
+check_grep "$WORK/install1.log" " comment-guard " "install log: post-install hint runs the comment-guard matrix"
 check_grep "$WORK/install1.log" "codex_worker_test.py" "install log: post-install hint names the worker test"
 
 for f in prompts/haiku-task.md prompts/codex-review.md skills/orchestrate agents/sonnet-worker.md \
@@ -172,8 +176,8 @@ names = [h.get("command", "").rsplit("/", 1)[-1] for h in bash_group]
 if names != ["git-guard.py", "verify-guard.py", "git-policy.py"]:
     problems.append(f"Bash hook order {names}")
 tdd_group = groups.get(("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"), {}).get("hooks", [])
-if [h.get("command", "").rsplit("/", 1)[-1] for h in tdd_group] != ["tdd-guard.py"]:
-    problems.append(f"tdd-guard group {tdd_group}")
+if [h.get("command", "").rsplit("/", 1)[-1] for h in tdd_group] != ["tdd-guard.py", "comment-guard.py"]:
+    problems.append(f"Edit|Write group {tdd_group}")
 if any("/old/path/git-guard.py" in h.get("command", "") for h in bash_group):
     problems.append("old union-style Bash hook still registered")
 for problem in problems:
@@ -196,6 +200,8 @@ check_file "$EXPORTED/claude/hooks/git-policy.py"
 check_file "$EXPORTED/claude/bin/repo-facts"
 check_file "$EXPORTED/claude/hooks/tdd-guard.py"
 check_file "$EXPORTED/claude/hooks/shell_words.py"
+check_file "$EXPORTED/claude/hooks/comment-guard.py"
+check_file "$EXPORTED/claude/hooks/code_files.py"
 check_file "$EXPORTED/claude/mcp/codex-worker/codex_worker_test.py"
 check_file "$EXPORTED/manifest.txt"
 CHECKS=$((CHECKS + 1))

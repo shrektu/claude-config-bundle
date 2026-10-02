@@ -88,9 +88,10 @@ commit invalidates the prior review. PR description on request: `pr-description`
 
 ## Code style
 
-- Comments: as few as possible, ideally zero. Code that needs a comment gets rewritten instead. When one
-  is genuinely necessary it is ONE line of a few words stating a WHY the code cannot express (hardware
-  quirk, protocol constraint, deliberate deviation). Never param/return blocks, never commented-out code.
+- Comments: zero. Code that seems to need one gets rewritten instead. Not comments: tool directives
+  (shebang, `# type: ignore`, `# noqa`, `// eslint-disable…`, `// @ts-expect-error`, `//go:build`) and a
+  one-line docstring or doc comment; descriptions go into parameters (`description=`). comment-guard
+  denies every edit that adds a comment. Code is written with Edit/Write only, never via Bash heredoc/sed.
 - Raw dicts: as few as possible. Data with a known shape lives in a typed model (dataclass, Pydantic,
   TypedDict, NamedTuple, enum); a raw dict only for genuinely dynamic keys at a JSON boundary, converted
   immediately.

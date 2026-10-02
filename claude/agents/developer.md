@@ -55,9 +55,12 @@ workspace that is not yours.
 
 ## Code style
 
-As few comments as possible, ideally zero; when one is unavoidable it is a single line of a few words
-stating a WHY the code cannot express. No magic numbers or strings — named constants or enum members.
-Data with a known shape lives in a typed model, not in a `dict[str, Any]` passed around.
+Zero comments. Not comments: tool directives (shebang, `# type: ignore`, `# noqa`,
+`// eslint-disable…`, `// @ts-expect-error`, `//go:build`) and a one-line docstring or doc comment;
+descriptions go into parameters (`description=`). comment-guard denies an edit that adds a comment.
+Write code with Edit/Write only — never through Bash heredocs or sed, which the hooks cannot see. No magic
+numbers or strings — named constants or enum members. Data with a known shape lives in a typed model, not
+in a `dict[str, Any]` passed around.
 
 ## Report — under 40 lines
 

@@ -45,8 +45,9 @@ HOOK_NAMES = (
     "delegation-guard",
     "subagent-verify-check",
     "tdd-guard",
+    "comment-guard",
 )
-SHARED_HOOK_MODULE = "shell_words.py"
+SHARED_HOOK_MODULES = ("shell_words.py", "code_files.py")
 SKILL_NAMES = ("delegate", "review", "commit", "pr-description", "repo-standards", "tdd")
 DEVELOPER_AGENT = "developer"
 DEVELOPER_MODEL = "claude-opus-5-5"
@@ -62,6 +63,7 @@ SESSION_MODEL = "claude-opus-5-5"
 SESSION_MODEL_EFFORT = "high"
 TDD_GUARD_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
 TDD_GUARD_COMMAND = "python3 __HOME__/.claude/hooks/tdd-guard.py"
+COMMENT_GUARD_COMMAND = "python3 __HOME__/.claude/hooks/comment-guard.py"
 RETIRED_MODE = "final-audit"
 STALE_TERMS = re.compile(r"implementer|commander-opus|final-audit|\bXL\b")
 REVERT_SENTENCE = (
@@ -173,7 +175,11 @@ def check_hooks_and_settings() -> None:
     for hook in HOOK_NAMES:
         check((HOOKS_DIR / f"{hook}.py").is_file(), f"hooks/{hook}.py missing")
         check((HOOKS_DIR / f"{hook}-test.py").is_file(), f"hooks/{hook}-test.py missing")
-    check((HOOKS_DIR / SHARED_HOOK_MODULE).is_file(), f"hooks/{SHARED_HOOK_MODULE} missing")
+    for module in SHARED_HOOK_MODULES:
+        check((HOOKS_DIR / module).is_file(), f"hooks/{module} missing")
+    readme = README.read_text()
+    for name in HOOK_NAMES + SHARED_HOOK_MODULES:
+        check(name in readme, f"README.md does not mention {name}")
     check(CODEX_WORKER_TEST.is_file(), "codex_worker_test.py missing")
     settings = json.loads(SETTINGS.read_text())
     check(settings.get("model") == SESSION_MODEL, f"settings.json model is {settings.get('model')!r}")
@@ -186,7 +192,7 @@ def check_hooks_and_settings() -> None:
     groups = [entry for entry in settings.get("hooks", {}).get("PreToolUse", [])
               if entry.get("matcher") == TDD_GUARD_MATCHER]
     commands = [hook.get("command") for entry in groups for hook in entry.get("hooks", [])]
-    check(commands == [TDD_GUARD_COMMAND], f"PreToolUse {TDD_GUARD_MATCHER} runs {commands}")
+    check(commands == [TDD_GUARD_COMMAND, COMMENT_GUARD_COMMAND], f"PreToolUse {TDD_GUARD_MATCHER} runs {commands}")
     retire = json.loads(RETIRE.read_text())
     for name in RETIRED_AGENTS:
         check(f"agents/{name}.md" in retire.get("files", []), f"retire.json does not retire agents/{name}.md")

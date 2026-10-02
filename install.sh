@@ -229,7 +229,7 @@ echo "done. files changed: $CHANGED$( [ -d "$BACKUP" ] && echo "; backups in $BA
 echo "next:"
 echo "  - restart Claude Code (agents, hooks and MCP servers load at session start)"
 echo "  - claude mcp list            -> codex-worker must show Connected"
-echo '  - for t in tdd-guard git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
+echo '  - for t in tdd-guard comment-guard git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
 echo '  - ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py'
 echo "  - bash ~/.claude/bin/verify-test.sh"
 echo "  - bash ~/.claude/bin/review-checkpoint-test.sh"
