@@ -13,7 +13,8 @@ list, so anything left here comes back as a finding.
    test_plan gives (log path kept), then passing. A test that never failed proves nothing.
 3. Meaningful tests: they assert behaviour (outputs, state, errors), cannot pass vacuously, nothing is
    skipped or xfailed without the plan saying why; integration tests really integrate (real app wiring,
-   DB, HTTP, CLI, files) and never mock the project's own code.
+   DB, HTTP, CLI, files) and never mock the project's own code; none of the anti-patterns the `tdd`
+   skill lists.
 4. Acceptance criteria: each one met, with evidence that can be opened (a test name, a verify log).
 5. Pinned versions: the code uses the APIs of the versions `~/.claude/bin/repo-facts` prints (installed
    source as the oracle); a verify PASS that reports `warnings: N deprecation lines` is not done.

@@ -15,7 +15,11 @@ sol's code review — nobody gets the plan pasted into a prompt.
 <what and why, two to four sentences>
 
 ## architecture
-<exact files, functions, signatures, data shapes; what must not change; no decision left open>
+<decisions: files, signatures, data shapes, what must not change; no decision left open>
+<then numbered steps of 2–5 minutes each, in TDD order:
+ 1. <test file> — <test to add> — verify: <command> → VERIFY FAIL (<expected reason>)
+ 2. <source file> — <the change> — verify: <command> → VERIFY PASS
+ …>
 
 ## test_plan
 <per acceptance criterion at least one line: unit | integ | e2e — test name — asserts — fails today because>
@@ -41,7 +45,7 @@ The plan holds the contract, so the prompt stays short:
 
 ```
 plan_file: <absolute path of the plan file, ~ expanded>
-repo: /absolute/path/to/repo — branch <work branch>; do not commit
+repo: <absolute worktree path printed by feature-worktree new> — branch <work branch>; do not commit
 tdd_exempt: <reason>          (only when the tdd skill allows it; otherwise leave the line out)
 <at most a few lines the plan does not hold, e.g. a plan-review line you rejected and why>
 Report per your agent contract.

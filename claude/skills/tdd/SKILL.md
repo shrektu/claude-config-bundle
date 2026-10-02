@@ -40,6 +40,17 @@ The `commands` section of the plan gives the verify command for each level.
 - Mock only what cannot run locally or is non-deterministic: third-party remote or paid APIs, wall-clock
   time, randomness, hardware that is not attached. Never mock the code under test or its own modules.
 
+## Anti-patterns (each one is a finding)
+
+- Asserting on mocks — that a mock was called — instead of on the behaviour it stands for.
+- Mocking the code under test or its own modules; mocking what can run locally (DB, files, CLI).
+- Production methods, flags or branches that exist only so a test can reach them.
+- A test that passes without the change: it never saw red, or it tests the fixture, not the code.
+- Snapshot or golden files accepted without reading them; asserting on whole dumps instead of the field
+  that matters.
+- `sleep` for synchronisation; order-dependent tests; shared mutable state between tests.
+- Catch-all assertions (`assert result`, `toBeTruthy()`) where a value is known.
+
 ## Rules
 
 - Bug fix: a test that reproduces the bug and fails, then the fix. A verified behavioural review
