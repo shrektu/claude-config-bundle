@@ -1,12 +1,12 @@
 ---
 name: delegate
-description: Szablon pliku planu (task, architecture, test_plan, acceptance_criteria, commands, repos, risks) i prompty workflow TDD - spawn agenta developer (Opus 5.5 medium, implementuje test-first z plan_file), runda poprawek przez SendMessage oraz codex-runner (review planu przez gpt-6-astra/medium albo kodu przez gpt-6-sol/high; przekazujesz tylko ścieżki i SHA, nigdy treść planu ani diff). Załaduj przed napisaniem planu i przed każdym Agent(...) z tymi typami - delegation-guard odrzuca spawn bez plan_file albo z planem bez test_plan, acceptance_criteria, `verify --`, ścieżki absolutnej lub granicy repo.
+description: Szablon pliku planu (task, architecture, test_plan, acceptance_criteria, commands, repos, risks) i prompty workflow TDD - spawn agenta developer (Sonnet 5.5 medium, implementuje test-first z plan_file), runda poprawek przez SendMessage oraz codex-runner (review planu i kodu przez gpt-6-sol/high; przekazujesz tylko ścieżki i SHA, nigdy treść planu ani diff). Załaduj przed napisaniem planu i przed każdym Agent(...) z tymi typami - delegation-guard odrzuca spawn bez plan_file albo z planem bez test_plan, acceptance_criteria, `verify --`, ścieżki absolutnej lub granicy repo.
 ---
 
 ## Plan file
 
-Path: `~/.claude/plans/<repo>-<slug>.md`. One file is the single source for astra, the developer and
-sol — nobody gets the plan pasted into a prompt.
+Path: `~/.claude/plans/<repo>-<slug>.md`. One file is the single source for sol's plan review, the developer and
+sol's code review — nobody gets the plan pasted into a prompt.
 
 ```
 # Plan: <title>
@@ -42,7 +42,7 @@ The plan holds the contract, so the prompt stays short:
 plan_file: <absolute path of the plan file, ~ expanded>
 repo: /absolute/path/to/repo — branch <work branch>; do not commit
 tdd_exempt: <reason>          (only when the tdd skill allows it; otherwise leave the line out)
-<at most a few lines the plan does not hold, e.g. an astra line you rejected and why>
+<at most a few lines the plan does not hold, e.g. a plan-review line you rejected and why>
 Report per your agent contract.
 ```
 
@@ -58,7 +58,7 @@ or has drifted.
 
 ## codex-runner prompts
 
-The MCP server fixes model and effort (plan → gpt-6-astra/medium, code → gpt-6-sol/high), builds the
+The MCP server fixes model and effort (plan and code → gpt-6-sol/high), builds the
 prompt, inlines the diff and the plan's acceptance_criteria itself. Run the runner in the background, in
 the same batch as your own verify run.
 

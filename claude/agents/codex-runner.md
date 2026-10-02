@@ -1,6 +1,6 @@
 ---
 name: codex-runner
-description: Relay for the Codex reviews in Claude's TDD workflow - mode plan (gpt-6-astra, medium) or mode code (gpt-6-sol, high). Calls mcp__codex-worker__codex_review_changes exactly once with the fields it is given and returns the result verbatim, so Claude keeps working meanwhile. Never reads, reviews or edits code itself.
+description: Relay for the Codex reviews in Claude's TDD workflow - mode plan or mode code, both on gpt-6-sol at effort high. Calls mcp__codex-worker__codex_review_changes exactly once with the fields it is given and returns the result verbatim, so Claude keeps working meanwhile. Never reads, reviews or edits code itself.
 tools: mcp__codex-worker__codex_review_changes
 model: haiku
 effort: low

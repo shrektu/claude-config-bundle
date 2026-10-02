@@ -1,6 +1,6 @@
 ---
 name: review
-description: Jak przeprowadzić rundę review w workflow TDD - własna checklista Claude (zgodność z planem, dowody red → green dla każdego testu, sensowne testy jednostkowe i integracyjne, idiomy dla wersji z repo-facts, regresje, pliki untracked, styl), adjudykacja linii od astry i sol (reprodukcja, zanim cokolwiek wróci do developera), bramka testów (unit + integracja przez verify + realne uruchomienie), mechanika rund z review-checkpoint i re-review sol tylko na diffie poprawek, limit 3 rund oraz raport z trzema statusami. Załaduj, gdy developer skończył albo gdy wracają findingi.
+description: Jak przeprowadzić rundę review w workflow TDD - własna checklista Claude (zgodność z planem, dowody red → green dla każdego testu, sensowne testy jednostkowe i integracyjne, idiomy dla wersji z repo-facts, regresje, pliki untracked, styl), adjudykacja linii od sol (plan i kod) (reprodukcja, zanim cokolwiek wróci do developera), bramka testów (unit + integracja przez verify + realne uruchomienie), mechanika rund z review-checkpoint i re-review sol tylko na diffie poprawek, limit 3 rund oraz raport z trzema statusami. Załaduj, gdy developer skończył albo gdy wracają findingi.
 ---
 
 ## Your own review (every round)
@@ -23,16 +23,16 @@ then the patch per file. Untracked files never appear in a diff — list them an
   Bash or a generator), no multi-line docstrings, no magic numbers or strings, typed models instead of
   raw dicts, no needless `__init__.py`.
 
-## Astra (plan) and sol (code) lines
+## Sol lines (plan and code)
 
 Both answer `PASS` or one defect per line. Every line is adjudicated before anything is acted on:
 
 - reproduce it — a failing test, a command, or the code path read until certain;
-- real → into the plan fix (astra) or the round's fix list (sol);
+- real → into the plan fix (plan review) or the round's fix list (code review);
 - unreal → dropped, with the reason kept for the report;
 - a deliberate trade-off → argued on the merits or escalated to the user, never silently changed.
 
-Astra reviews the plan once; your fixes close the plan phase. Record the token header of every Codex
+Sol reviews the plan once; your fixes close the plan phase. Record the token header of every Codex
 call for the report.
 
 ## Test gate (yours, after the review is clean)
@@ -64,6 +64,6 @@ One status, then the details:
   means done when the task requires a working deployment.
 - **Zablokowane** — the blocker, the evidence, the exact next step or decision needed.
 
-Plus: changes, verify summary lines (unit, integration) and the real run, astra and sol outcome with
+Plus: changes, verify summary lines (unit, integration) and the real run, sol plan and code outcome with
 their token headers, confirmed findings, rejected findings with the reason, remaining risks. A new
 commit invalidates the previous review — the status always refers to the final commit.

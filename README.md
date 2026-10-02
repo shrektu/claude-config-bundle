@@ -34,13 +34,13 @@ After changing anything in `~/.claude` on either machine, run `export.sh` there,
 ## Workflow v3 in one screen
 
 One TDD pipeline. Claude (the main session, Opus 5.5) writes a plan file (task, architecture, test_plan,
-acceptance_criteria, commands, repos, risks) → `codex-runner` gets gpt-6-astra/medium to list plan defects
-→ Claude fixes the plan → `developer` (Opus 5.5, effort medium) implements it test-first: red through
+acceptance_criteria, commands, repos, risks) → `codex-runner` gets gpt-6-sol/high to list plan defects
+→ Claude fixes the plan → `developer` (Sonnet 5.5, effort medium) implements it test-first: red through
 `verify`, green, refactor → `codex-runner` gets gpt-6-sol/high to list code defects → Claude reproduces
 each finding, sends the real ones back as one fix round, and runs the unit and integration tests itself.
 After a fix round sol re-reviews only the checkpoint diff plus the earlier findings. Fast path: a change of
 ≤ ~20 lines in ≤ 2 files outside any risk area is done by Claude directly, still test-first, without
-astra, sol or the developer. The relay passes only paths and SHAs; the codex-worker MCP server builds the
+Codex reviews or the developer. The relay passes only paths and SHAs; the codex-worker MCP server builds the
 prompt and returns `PASS` or one line per defect under a token header.
 
 Hooks (`claude/hooks/`, registered in `settings.json`): `git-guard.py` (destructive git),

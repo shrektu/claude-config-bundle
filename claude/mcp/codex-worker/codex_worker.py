@@ -29,6 +29,12 @@ DISABLED_FEATURES = (
 ACCEPTANCE_HEADING = re.compile(r"(?m)^##[ \t]+acceptance_criteria[ \t]*$")
 NEXT_HEADING = re.compile(r"(?m)^#{1,2}[ \t]")
 RECHECK_HEADER = "PREVIOUSLY REPORTED — report each again only if still present:"
+TOOL_DESCRIPTION = (
+    'Read-only Codex review. mode "plan": gpt-6-sol reviews the plan file. mode "code": gpt-6-sol reviews the '
+    "diff of project_path against base (a commit; use the review checkpoint SHA after a fix round) with the "
+    "plan's acceptance_criteria; recheck lists the previously reported defects. Returns a token header line "
+    "and then `PASS` or one line per defect."
+)
 
 COMMON_RULES = """You are a read-only reviewer: never modify files, never commit, never run a command that changes \
 the repository or the environment. Report ONLY defects. Read other files only to check a claim or to confirm a \
@@ -66,7 +72,7 @@ class ReviewProfile:
 
 
 PROFILES = {
-    ReviewMode.PLAN: ReviewProfile("gpt-6-astra", "medium", PLAN_INSTRUCTIONS),
+    ReviewMode.PLAN: ReviewProfile("gpt-6-sol", "high", PLAN_INSTRUCTIONS),
     ReviewMode.CODE: ReviewProfile("gpt-6-sol", "high", CODE_INSTRUCTIONS),
 }
 
@@ -237,7 +243,7 @@ def run_codex(mode: ReviewMode, profile: ReviewProfile, root: Path, prompt: str)
     return f"codex {mode} {profile.model}/{profile.effort} {tokens}\n{answer}"
 
 
-@mcp.tool()
+@mcp.tool(description=TOOL_DESCRIPTION)
 def codex_review_changes(
     mode: str,
     plan_file: str,
@@ -245,10 +251,6 @@ def codex_review_changes(
     base: str = DEFAULT_BASE,
     recheck: str = "",
 ) -> str:
-    """Read-only Codex review. mode "plan": gpt-6-astra reviews the plan file. mode "code": gpt-6-sol reviews
-    the diff of project_path against base (a commit; use the review checkpoint SHA after a fix round) with the
-    plan's acceptance_criteria; recheck lists the previously reported defects. Returns a token header line and
-    then `PASS` or one line per defect."""
     try:
         review_mode = ReviewMode(mode)
     except ValueError:

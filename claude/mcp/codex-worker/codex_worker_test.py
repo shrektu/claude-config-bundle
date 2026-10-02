@@ -119,15 +119,15 @@ class WorkerTest(unittest.TestCase):
         params = list(inspect.signature(worker.codex_review_changes).parameters)
         self.assertEqual(params, ["mode", "plan_file", "project_path", "base", "recheck"])
 
-    def test_plan_mode_uses_astra_medium_and_full_plan(self):
+    def test_plan_mode_uses_sol_high_and_full_plan(self):
         out = self.review("plan")
         argv, prompt = self.recorded()["argv"], self.recorded()["stdin"]
-        self.assertEqual(self.argv_value(argv, "-m"), "gpt-6-astra")
-        self.assertIn('model_reasoning_effort="medium"', self.config_values(argv))
+        self.assertEqual(self.argv_value(argv, "-m"), "gpt-6-sol")
+        self.assertIn('model_reasoning_effort="high"', self.config_values(argv))
         self.assertIn(PLAN_TEXT, prompt)
         self.assertIn(str(self.repo), prompt)
         self.assertIn(worker.PLAN_INSTRUCTIONS, prompt)
-        self.assertTrue(out.startswith("codex plan gpt-6-astra/medium"), out)
+        self.assertTrue(out.startswith("codex plan gpt-6-sol/high"), out)
 
     def test_code_mode_uses_sol_high(self):
         self.review("code")

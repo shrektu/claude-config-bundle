@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Live integration test: starts the INSTALLED codex-worker over MCP stdio and runs one real plan review
-(gpt-6-astra) and one real code review (gpt-6-sol) on a throwaway repo with planted defects.
+(gpt-6-sol) and one real code review (gpt-6-sol) on a throwaway repo with planted defects.
 Spends Codex tokens. Run with ~/.claude/mcp/codex-worker/.venv/bin/python."""
 import asyncio
 import os
@@ -140,7 +140,7 @@ async def main() -> int:
 
             planned = await review(session, {"mode": "plan", "plan_file": str(plan), "project_path": str(repo)})
             if planned:
-                check((planned.header["model"], planned.header["effort"]) == ("gpt-6-astra", "medium"),
+                check((planned.header["model"], planned.header["effort"]) == ("gpt-6-sol", "high"),
                       f"plan review ran on {planned.header['model']}/{planned.header['effort']}")
                 check_terse(planned, PLAN_LINE_RE)
                 check(any("middle_n" in line for line in planned.body), "the false middle_n claim was not flagged")
