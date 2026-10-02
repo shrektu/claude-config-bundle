@@ -9,9 +9,10 @@ and settings entries are backed up and removed). settings.json is MERGED (bundle
 machine keeps env and autoMode, allow/deny lists are unioned, hooks are replaced per event+matcher so a hook
 is never registered twice; local-only matchers stay). ~/.claude.json
 gets the codex-worker MCP server, ~/.codex/config.toml gets the codex-worker block appended if missing.
-claude/lint/ruff.toml is installed to ~/.claude/lint/ruff.toml only when that file is absent. After the run only
-the 5 newest ~/.claude/backups/bundle-* directories are kept. When ruff is not on PATH it is installed with
-`uv tool install ruff`, or a warning says lint-guard is inactive.
+claude/lint/ruff.toml is always installed to ~/.claude/lint/ruff.toml (a changed copy is backed up first). After
+the run only the 5 newest ~/.claude/backups/bundle-* directories are kept. When ruff, mypy, vulture or pylint
+is not on PATH it is installed with `uv tool install <tool>`, or a warning says what is inactive (lint-guard
+for ruff, quality-gate checks for the others).
 Run it from a normal terminal, not from inside a Claude Code session.
 USAGE
 }
@@ -67,9 +68,7 @@ for d in bin hooks; do
   [ -d "$HERE/claude/$d" ] || continue
   while IFS= read -r -d '' f; do install_file "$f" "$HOME/.claude/$d/${f#"$HERE"/claude/$d/}" 755; done < <(find "$HERE/claude/$d" -type f -print0)
 done
-if [ -f "$HERE/claude/lint/ruff.toml" ] && [ ! -e "$HOME/.claude/lint/ruff.toml" ]; then
-  install_file "$HERE/claude/lint/ruff.toml" "$HOME/.claude/lint/ruff.toml"
-fi
+[ ! -f "$HERE/claude/lint/ruff.toml" ] || install_file "$HERE/claude/lint/ruff.toml" "$HOME/.claude/lint/ruff.toml"
 install_file "$HERE/claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/codex_worker.py" 755
 install_file "$HERE/claude/mcp/codex-worker/codex_worker_test.py" "$HOME/.claude/mcp/codex-worker/codex_worker_test.py"
 install_file "$HERE/claude/mcp/codex-worker/requirements.txt" "$HOME/.claude/mcp/codex-worker/requirements.txt"
@@ -153,16 +152,15 @@ if [ ! -x "$VENV/bin/python" ] || ! cmp -s "$REQ" "$VENV/.installed-requirements
 fi
 "$VENV/bin/python" -c "import mcp" || { echo "venv is missing the mcp package"; exit 1; }
 
-RUFF_WARNING="WARNING: ruff is not installed, lint-guard is inactive (uv tool install ruff)"
-if ! command -v ruff >/dev/null; then
-  HAVE_UV=0
-  command -v uv >/dev/null && HAVE_UV=1
-  if [ "$HAVE_UV" = 1 ]; then uv tool install ruff || true; fi
-  if ! command -v ruff >/dev/null; then
-    echo "$RUFF_WARNING"
-    if [ "$HAVE_UV" = 1 ]; then echo "uv tool bin directory (add it to PATH): $(uv tool dir --bin)"; fi
-  fi
-fi
+ensure_tool() {
+  local tool=$1 consequence=$2
+  if ! command -v "$tool" >/dev/null && command -v uv >/dev/null; then uv tool install "$tool" || true; fi
+  if command -v "$tool" >/dev/null; then return 0; fi
+  echo "WARNING: $tool is not installed, $consequence (uv tool install $tool)"
+  if command -v uv >/dev/null; then echo "uv tool bin directory (add it to PATH): $(uv tool dir --bin)"; fi
+}
+ensure_tool ruff "lint-guard is inactive"
+for tool in mypy vulture pylint; do ensure_tool "$tool" "quality-gate skips its checks"; done
 
 SETTINGS=$HOME/.claude/settings.json
 RENDERED_SETTINGS=$(mktemp)
@@ -257,5 +255,7 @@ echo '  - ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker
 echo "  - bash ~/.claude/bin/verify-test.sh"
 echo "  - bash ~/.claude/bin/review-checkpoint-test.sh"
 echo "  - bash ~/.claude/bin/feature-worktree-test.sh"
+echo "  - bash ~/.claude/bin/quality-gate-test.sh"
+echo "  - ~/.claude/bin/quality-gate          -> type, dead-code and duplicate findings on the lines you changed"
 echo "  - ~/.claude/bin/repo-facts            -> toolchain facts of the current repo (also the SessionStart hook)"
 echo "  - claude login / codex login if this machine is fresh; set autoMode.environment for this machine's repos"

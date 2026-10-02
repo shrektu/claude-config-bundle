@@ -29,5 +29,10 @@ list, so anything left here comes back as a finding.
    pathlib, `satisfies`, discriminated unions, readonly); early returns over nesting; no abstraction,
    option or layer the plan does not need; no defensive code for states the types rule out; deleting
    beats adding. lint-guard enforces the mechanical part (ruff UP/FURB/SIM/C4/PERF/RET, complexity 10).
-9. Hygiene: code written with Edit/Write only (never Bash heredoc, sed or a script writing files), no
+9. Design: dependencies point inward — domain logic imports no framework, DB or I/O, which stay at the
+   edges; input is validated once at the boundary and converted to typed models; one responsibility per
+   module and function; data immutable by default; errors explicit — no bare or blind `except`, no
+   silent fallback, fail fast; a shared helper only on the third repetition; no global mutable state.
+   `quality-gate` (verify) reports type errors, dead code and duplicates on changed lines.
+10. Hygiene: code written with Edit/Write only (never Bash heredoc, sed or a script writing files), no
    stray debug output, temp files or untracked leftovers, nothing outside the plan's `repos`.

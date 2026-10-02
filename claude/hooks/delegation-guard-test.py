@@ -4,16 +4,20 @@ import json, os, subprocess, sys, tempfile, time
 
 hook = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                           "delegation-guard.py")
+QUALITY_LINE = "Quality: ~/.claude/bin/verify -- 'cd /home/user/project && ~/.claude/bin/quality-gate'\n"
 PLAN = ("# Plan: fix the parser\n\n"
         "## task\nFix the parser.\n\n"
         "## test_plan\n- unit — test_parse_empty — raises — accepts today\n\n"
         "## acceptance_criteria\n- the matrix passes\n\n"
-        "## commands\nUnit: ~/.claude/bin/verify -- 'cd /home/user/project && pytest -q'\n\n"
+        "## commands\nUnit: ~/.claude/bin/verify -- 'cd /home/user/project && pytest -q'\n"
+        f"{QUALITY_LINE}\n"
         "## repos\nYou may only touch /home/user/project; you may not touch anything else.\n")
+NO_QUALITY = PLAN.replace(QUALITY_LINE, "")
 PLAN_MARKERS = {
     "acceptance_criteria": ("## acceptance_criteria\n- the matrix passes\n", ""),
     "test_plan": ("## test_plan\n- unit — test_parse_empty — raises — accepts today\n", ""),
     "verify --": ("~/.claude/bin/verify -- ", "run "),
+    "quality-gate": (QUALITY_LINE, ""),
     "repo boundary": ("You may only touch /home/user/project; you may not touch anything else.\n", ""),
 }
 
@@ -132,6 +136,10 @@ with tempfile.TemporaryDirectory() as base:
     expect("developer plan without test_plan heading",
            {"subagent_type": "developer", "prompt": developer_prompt(no_test_heading)}, True)
     heading_cases = {
+        "quality-gate only mentioned in the task": NO_QUALITY.replace("Fix the parser.", "Run quality-gate."),
+        "Quality line outside commands": NO_QUALITY.replace("else.\n", f"else.\n{QUALITY_LINE}"),
+        "Quality line that runs something else": PLAN.replace("quality-gate", "ruff check ."),
+        "quality-gate on a line not starting with Quality": PLAN.replace("Quality: ", "Gate: "),
         "empty acceptance section": PLAN.replace("## acceptance_criteria\n- the matrix passes\n",
                                                  "## acceptance_criteria\n\n"),
         "empty test_plan section": PLAN.replace("## test_plan\n- unit — test_parse_empty — raises — accepts today\n",

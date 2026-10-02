@@ -1,0 +1,554 @@
+#!/usr/bin/env python3
+"""Reports type errors, dead code and duplicates, but only on the lines a change touched."""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from pathlib import Path
+
+TIMEOUT_ENV = "QUALITY_TOOL_TIMEOUT_S"
+DEFAULT_TOOL_TIMEOUT_S = 120
+MAX_LISTED = 40
+EXIT_CLEAN = 0
+EXIT_FINDINGS = 1
+EXIT_FAILED = 2
+
+ORIGIN_HEAD = "refs/remotes/origin/HEAD"
+FALLBACK_BASE = "HEAD"
+PYTHON_SUFFIX = ".py"
+TYPESCRIPT_SUFFIXES = (".ts", ".tsx")
+CHECKED_SUFFIXES = (PYTHON_SUFFIX, *TYPESCRIPT_SUFFIXES)
+NULL_DEVICE = "/dev/null"
+DIFF_HEADER = "diff --git"
+NEW_FILE_PREFIX = "+++ "
+NEW_FILE_PATH_OFFSET = len("+++ b/")
+
+HUNK = re.compile(r"^@@ -\S+ \+(?P<start>\d+)(?:,(?P<count>\d+))? @@")
+MYPY_ROW = re.compile(r"^(?P<path>.+?):(?P<line>\d+):\d+: (?P<level>error|warning|note): (?P<message>.*)$")
+VULTURE_ROW = re.compile(r"^(?P<path>.+?):(?P<line>\d+): (?P<message>.*)$")
+TSC_ROW = re.compile(r"^(?P<path>.+?)\((?P<line>\d+),\d+\): error (?P<message>TS\d+: .*)$")
+CLONE_SIDE = re.compile(r"^==(?P<module>\S+):\[(?P<start>\d+):(?P<end>\d+)\]$", re.MULTILINE)
+REPORTED_LEVELS = frozenset({"error", "warning"})
+ERROR_LEVEL = "error"
+
+PYPROJECT = "pyproject.toml"
+PYRIGHT_CONFIG_FILE = "pyrightconfig.json"
+PYRIGHT_TABLE = "[tool.pyright"
+MYPY_CONFIG_FILES = ("mypy.ini", ".mypy.ini")
+MYPY_TABLE = "[tool.mypy"
+MYPY_CONFIG_ARGS = ("--no-error-summary", "--show-column-numbers")
+MYPY_STRICT_ARGS = (*MYPY_CONFIG_ARGS, "--strict", "--ignore-missing-imports")
+MYPY_OK = frozenset({0, 1})
+MYPY_ISSUE_CODES = frozenset({1})
+PYRIGHT_OK = frozenset({0, 1})
+VULTURE_MIN_CONFIDENCE = "60"
+VULTURE_IGNORED_DECORATORS = ",".join((
+    "@*.get", "@*.post", "@*.put", "@*.patch", "@*.delete", "@*.head", "@*.options", "@*.route",
+    "@*.websocket", "@*.on_event", "@*.middleware", "@*.exception_handler", "@*.fixture", "@pytest.fixture",
+    "@*.tool", "@*.command", "@*.callback", "@*.validator", "@*.field_validator", "@*.model_validator",
+    "@field_validator", "@model_validator", "@validator", "@*.setter", "@property", "@cached_property",
+    "@*.task",
+))
+VULTURE_IGNORED_NAMES = ",".join((
+    "test_*", "Test*", "setUp", "tearDown", "setUpClass", "tearDownClass", "model_config", "Config",
+))
+VULTURE_ARGS = (
+    "--min-confidence", VULTURE_MIN_CONFIDENCE,
+    "--ignore-decorators", VULTURE_IGNORED_DECORATORS,
+    "--ignore-names", VULTURE_IGNORED_NAMES,
+)
+MAX_CONTEXT_FILES = 3000
+VULTURE_OK = frozenset({0, 3})
+VULTURE_ISSUE_CODES = frozenset({3})
+PYLINT_ARGS = ("--disable=all", "--enable=duplicate-code", "--min-similarity-lines=6", "--output-format=json")
+PYLINT_CRASH_BITS = 33
+PYLINT_OK = frozenset(code for code in range(64) if not code & PYLINT_CRASH_BITS)
+DUPLICATE_CODE_ID = "R0801"
+
+NODE_BIN = Path("node_modules") / ".bin"
+TSCONFIG = "tsconfig.json"
+TSCONFIG_GLOB = "tsconfig*.json"
+TSC_ARGS = ("--noEmit", "--pretty", "false")
+TSC_OK = frozenset({0, 1, 2})
+TSC_ISSUE_CODES = frozenset({1, 2})
+JSCPD_ARGS = ("--min-tokens", "50", "--reporters", "json", "--silent", "--gitignore")
+JSCPD_REPORT = "jscpd-report.json"
+JSCPD_OK = frozenset({0})
+
+NOT_A_REPOSITORY = "not inside a git repository"
+BAD_BASE = "git could not diff against the base"
+UNPARSEABLE = "unparseable output"
+TIMEOUT_REASON = "timeout"
+INSTALL_HINT = "uv tool install {tool}"
+TSC_INSTALL_HINT = "npm install --save-dev typescript"
+SKIPPED_LINE = "skipped: {tool} (install: {hint})"
+FAILED_LINE = "failed: {tool} ({reason})"
+MORE_LINE = "… {count} more"
+SUMMARY_LINE = "quality-gate: {count} findings"
+DUPLICATE_MESSAGE = "duplicate-code: lines {first}-{last} repeat {others}"
+JSCPD_MESSAGE = "duplicate of {name}:{start}-{end}"
+PARSE_ERRORS = (ValueError, KeyError, TypeError, IndexError)
+
+
+class ToolUnavailableError(Exception):
+    """A tool the check needs is not installed."""
+
+    def __init__(self, tool: str, hint: str) -> None:
+        super().__init__(tool)
+        self.tool = tool
+        self.hint = hint
+
+
+class ToolFailureError(Exception):
+    """A tool timed out, crashed or printed something the gate cannot read."""
+
+    def __init__(self, tool: str, reason: str) -> None:
+        super().__init__(tool)
+        self.tool = tool
+        self.reason = reason
+
+
+class GateError(Exception):
+    """The change itself could not be determined."""
+
+
+class TypeChecker(Enum):
+    PYRIGHT = auto()
+    MYPY_CONFIG = auto()
+    MYPY_STRICT = auto()
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class Finding:
+    path: str
+    line: int
+    tool: str
+    message: str
+
+    def render(self) -> str:
+        return f"{self.path}:{self.line} {self.tool}: {self.message}"
+
+
+@dataclass(frozen=True, slots=True)
+class TypePlan:
+    checker: TypeChecker
+    directory: Path
+    binary: str = ""
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class TypescriptProject:
+    tsc: Path
+    config: Path
+
+
+@dataclass(frozen=True, slots=True)
+class Change:
+    root: Path
+    lines: dict[str, frozenset[int]]
+
+    def files(self, suffixes: tuple[str, ...]) -> list[str]:
+        return sorted(name for name in self.lines if name.endswith(suffixes))
+
+    def keep(self, findings: Iterable[Finding]) -> list[Finding]:
+        return [item for item in findings if item.line in self.lines.get(item.path, frozenset())]
+
+    def first_touched(self, path: str, start: int, end: int) -> int | None:
+        return min((line for line in self.lines.get(path, frozenset()) if start <= line <= end), default=None)
+
+
+@dataclass(slots=True)
+class Report:
+    findings: set[Finding] = field(default_factory=set)
+    notes: dict[str, None] = field(default_factory=dict)
+    failed: bool = False
+
+    def skip(self, tool: str, hint: str) -> None:
+        self.notes[SKIPPED_LINE.format(tool=tool, hint=hint)] = None
+
+    def attempt(self, run: Callable[..., Iterable[Finding]], *args: object) -> None:
+        try:
+            self.findings.update(run(*args))
+        except ToolUnavailableError as error:
+            self.skip(error.tool, error.hint)
+        except ToolFailureError as error:
+            self.notes[FAILED_LINE.format(tool=error.tool, reason=error.reason)] = None
+            self.failed = True
+
+
+def git(directory: Path, *args: str) -> str | None:
+    done = subprocess.run(
+        ["git", "-c", "core.quotepath=off", *args],
+        cwd=directory, capture_output=True, text=True, errors="replace", check=False,
+    )
+    return done.stdout if done.returncode == 0 else None
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def repository_root() -> Path:
+    top = git(Path.cwd(), "rev-parse", "--show-toplevel")
+    if top is None:
+        raise GateError(NOT_A_REPOSITORY)
+    return Path(top.strip())
+
+
+def default_base(root: Path) -> str:
+    origin = git(root, "symbolic-ref", "-q", ORIGIN_HEAD)
+    merge_base = git(root, "merge-base", FALLBACK_BASE, origin.strip()) if origin else None
+    return merge_base.strip() if merge_base else FALLBACK_BASE
+
+
+def diff_lines(root: Path, base: str) -> dict[str, set[int]]:
+    diff = git(root, "diff", "-U0", "--no-color", "--no-renames", "--no-ext-diff", base)
+    if diff is None:
+        raise GateError(BAD_BASE)
+    touched: dict[str, set[int]] = defaultdict(set)
+    current: str | None = None
+    in_header = False
+    for row in diff.splitlines():
+        if row.startswith(DIFF_HEADER):
+            in_header = True
+        elif in_header and row.startswith(NEW_FILE_PREFIX):
+            deleted = row[len(NEW_FILE_PREFIX):] == NULL_DEVICE
+            current = None if deleted else row[NEW_FILE_PATH_OFFSET:].rstrip("\t")
+        elif hunk := HUNK.match(row):
+            in_header = False
+            start = int(hunk["start"])
+            if current is not None:
+                touched[current].update(range(start, start + int(hunk["count"] or 1)))
+    return touched
+
+
+def untracked_lines(root: Path) -> dict[str, set[int]]:
+    listing = git(root, "ls-files", "--others", "--exclude-standard", "-z") or ""
+    names = [name for name in listing.split("\0") if name.endswith(CHECKED_SUFFIXES)]
+    return {name: set(range(1, len(read_text(root / name).splitlines()) + 1)) for name in names}
+
+
+def collect_change(root: Path, base: str) -> Change:
+    touched = diff_lines(root, base) | untracked_lines(root)
+    return Change(root, {
+        name: frozenset(rows) for name, rows in touched.items()
+        if rows and name.endswith(CHECKED_SUFFIXES) and (root / name).is_file()
+    })
+
+
+def tool_timeout() -> float:
+    return float(os.environ.get(TIMEOUT_ENV, DEFAULT_TOOL_TIMEOUT_S))
+
+
+def last_line(text: str) -> str:
+    rows = [row.strip() for row in text.splitlines() if row.strip()]
+    return rows[-1] if rows else ""
+
+
+def locate(tool: str) -> str:
+    binary = shutil.which(tool)
+    if binary is None:
+        raise ToolUnavailableError(tool, INSTALL_HINT.format(tool=tool))
+    return binary
+
+
+def invoke(
+    tool: str, argv: Sequence[str], cwd: Path, ok_codes: frozenset[int],
+) -> subprocess.CompletedProcess[str]:
+    try:
+        done = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, errors="replace",
+            timeout=tool_timeout(), check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ToolFailureError(tool, TIMEOUT_REASON) from error
+    except OSError as error:
+        raise ToolFailureError(tool, str(error)) from error
+    if done.returncode not in ok_codes:
+        reason = last_line(done.stderr) or last_line(done.stdout) or f"exit {done.returncode}"
+        raise ToolFailureError(tool, reason)
+    return done
+
+
+def matched_rows(
+    tool: str, done: subprocess.CompletedProcess[str], pattern: re.Pattern[str], issue_codes: frozenset[int],
+) -> list[re.Match[str]]:
+    rows = [match for row in done.stdout.splitlines() if (match := pattern.match(row))]
+    if not rows and (done.stdout.strip() or done.returncode in issue_codes):
+        raise ToolFailureError(tool, last_line(done.stderr) or UNPARSEABLE)
+    return rows
+
+
+def safely[Result](tool: str, build: Callable[[], Result]) -> Result:
+    try:
+        return build()
+    except PARSE_ERRORS as error:
+        raise ToolFailureError(tool, UNPARSEABLE) from error
+
+
+def root_relative(root: Path, base: Path, name: str) -> str:
+    full = Path(os.path.normpath(base / name))
+    try:
+        return full.relative_to(root).as_posix()
+    except ValueError:
+        return name
+
+
+def findings_from(change: Change, directory: Path, tool: str, rows: Iterable[re.Match[str]]) -> list[Finding]:
+    return change.keep(
+        Finding(root_relative(change.root, directory, row["path"]), int(row["line"]), tool, row["message"])
+        for row in rows if row.groupdict().get("level", ERROR_LEVEL) in REPORTED_LEVELS
+    )
+
+
+def directories_up(root: Path, path: str | Path) -> Iterator[Path]:
+    directory = (root / path).parent
+    while True:
+        yield directory
+        if directory == root:
+            return
+        directory = directory.parent
+
+
+def has_pyright_config(directory: Path) -> bool:
+    return (directory / PYRIGHT_CONFIG_FILE).is_file() or PYRIGHT_TABLE in read_text(directory / PYPROJECT)
+
+
+def has_mypy_config(directory: Path) -> bool:
+    return any((directory / name).is_file() for name in MYPY_CONFIG_FILES) or MYPY_TABLE in read_text(
+        directory / PYPROJECT)
+
+
+def pyright_binary(root: Path, name: str) -> str | None:
+    local = node_binary(root, name, "pyright")
+    return str(local) if local else shutil.which("pyright")
+
+
+def type_plan(root: Path, name: str) -> TypePlan:
+    for directory in directories_up(root, name):
+        if has_pyright_config(directory) and (binary := pyright_binary(root, name)):
+            return TypePlan(TypeChecker.PYRIGHT, directory, binary)
+        if has_mypy_config(directory):
+            return TypePlan(TypeChecker.MYPY_CONFIG, directory)
+    return TypePlan(TypeChecker.MYPY_STRICT, root)
+
+
+def relative_arguments(change: Change, plan: TypePlan, files: Sequence[str]) -> list[str]:
+    return [os.path.relpath(change.root / name, plan.directory) for name in files]
+
+
+def run_mypy(change: Change, plan: TypePlan, files: Sequence[str]) -> list[Finding]:
+    binary = locate("mypy")
+    args = MYPY_STRICT_ARGS if plan.checker is TypeChecker.MYPY_STRICT else MYPY_CONFIG_ARGS
+    done = invoke("mypy", [binary, *args, *relative_arguments(change, plan, files)], plan.directory, MYPY_OK)
+    rows = matched_rows("mypy", done, MYPY_ROW, MYPY_ISSUE_CODES)
+    return findings_from(change, plan.directory, "mypy", rows)
+
+
+def pyright_findings(change: Change, plan: TypePlan, stdout: str) -> list[Finding]:
+    diagnostics = json.loads(stdout)["generalDiagnostics"]
+    return change.keep(
+        Finding(
+            root_relative(change.root, plan.directory, item["file"]),
+            item["range"]["start"]["line"] + 1, "pyright", item["message"],
+        )
+        for item in diagnostics if item["severity"] == ERROR_LEVEL
+    )
+
+
+def run_pyright(change: Change, plan: TypePlan, files: Sequence[str]) -> list[Finding]:
+    argv = [plan.binary, "--outputjson", *relative_arguments(change, plan, files)]
+    done = invoke("pyright", argv, plan.directory, PYRIGHT_OK)
+    return safely("pyright", lambda: pyright_findings(change, plan, done.stdout))
+
+
+def run_type_plan(change: Change, plan: TypePlan, files: Sequence[str]) -> list[Finding]:
+    if plan.checker is TypeChecker.PYRIGHT:
+        return run_pyright(change, plan, files)
+    return run_mypy(change, plan, files)
+
+
+def python_scope(change: Change, files: Sequence[str]) -> list[str]:
+    listing = git(change.root, "ls-files", "-z", "--", f"*{PYTHON_SUFFIX}") or ""
+    tracked = [name for name in listing.split("\0") if name and (change.root / name).is_file()]
+    if len(tracked) > MAX_CONTEXT_FILES:
+        tops = {top_directory(name) for name in files}
+        tracked = [name for name in tracked if top_directory(name) in tops]
+    return sorted(set(files) | set(tracked))
+
+
+def run_vulture(change: Change, scope: Sequence[str]) -> list[Finding]:
+    binary = locate("vulture")
+    done = invoke("vulture", [binary, *VULTURE_ARGS, *scope], change.root, VULTURE_OK)
+    rows = matched_rows("vulture", done, VULTURE_ROW, VULTURE_ISSUE_CODES)
+    return findings_from(change, change.root, "vulture", rows)
+
+
+def top_directory(name: str) -> str:
+    return name.split("/", 1)[0] if "/" in name else ""
+
+
+def dotted(path: str) -> str:
+    return path.removesuffix(PYTHON_SUFFIX).removesuffix("/__init__").replace("/", ".")
+
+
+def paths_of(module: str, scope: Iterable[str]) -> list[str]:
+    return [path for path in scope if dotted(path) == module or dotted(path).endswith(f".{module}")]
+
+
+def clone_findings(change: Change, scope: Sequence[str], stdout: str) -> set[Finding]:
+    found: set[Finding] = set()
+    for entry in json.loads(stdout):
+        if entry["message-id"] != DUPLICATE_CODE_ID:
+            continue
+        sides = [
+            (side["module"], int(side["start"]) + 1, int(side["end"]))
+            for side in CLONE_SIDE.finditer(entry["message"])
+        ]
+        for module, first, last in sides:
+            others = ", ".join(other for other, _, _ in sides if other != module)
+            for path in paths_of(module, scope):
+                line = change.first_touched(path, first, last)
+                if line is not None:
+                    message = DUPLICATE_MESSAGE.format(first=first, last=last, others=others)
+                    found.add(Finding(path, line, "pylint", message))
+    return found
+
+
+def run_duplicates(change: Change, scope: Sequence[str]) -> set[Finding]:
+    binary = locate("pylint")
+    done = invoke("pylint", [binary, *PYLINT_ARGS, *scope], change.root, PYLINT_OK)
+    return safely("pylint", lambda: clone_findings(change, scope, done.stdout))
+
+
+def tsconfig_in(directory: Path) -> Path | None:
+    default = directory / TSCONFIG
+    if default.is_file():
+        return default
+    return next(iter(sorted(directory.glob(TSCONFIG_GLOB))), None)
+
+
+def node_binary(root: Path, start: Path | str, tool: str) -> Path | None:
+    return next(
+        (candidate for directory in directories_up(root, start)
+         if (candidate := directory / NODE_BIN / tool).is_file()),
+        None,
+    )
+
+
+def typescript_project(root: Path, name: str) -> TypescriptProject | None:
+    config = next(
+        (found for directory in directories_up(root, name) if (found := tsconfig_in(directory))), None,
+    )
+    if config is None:
+        return None
+    tsc = node_binary(root, config, "tsc")
+    return TypescriptProject(tsc, config) if tsc else None
+
+
+def run_tsc(change: Change, project: TypescriptProject) -> list[Finding]:
+    argv = [str(project.tsc), *TSC_ARGS, "-p", str(project.config)]
+    done = invoke("tsc", argv, project.config.parent, TSC_OK)
+    rows = matched_rows("tsc", done, TSC_ROW, TSC_ISSUE_CODES)
+    return findings_from(change, project.config.parent, "tsc", rows)
+
+
+def jscpd_findings(change: Change, report: Path) -> list[Finding]:
+    found: list[Finding] = []
+    for clone in json.loads(read_text(report))["duplicates"]:
+        first, second = clone["firstFile"], clone["secondFile"]
+        for this, other in ((first, second), (second, first)):
+            path = root_relative(change.root, change.root, this["name"])
+            line = change.first_touched(path, int(this["start"]), int(this["end"]))
+            if line is not None:
+                message = JSCPD_MESSAGE.format(name=other["name"], start=other["start"], end=other["end"])
+                found.append(Finding(path, line, "jscpd", message))
+    return found
+
+
+def run_jscpd(change: Change, binary: Path) -> list[Finding]:
+    package = binary.parents[2]
+    with tempfile.TemporaryDirectory() as output:
+        target = os.path.relpath(package, change.root)
+        invoke("jscpd", [str(binary), *JSCPD_ARGS, "--output", output, target], change.root, JSCPD_OK)
+        report = Path(output) / JSCPD_REPORT
+        return safely("jscpd", lambda: jscpd_findings(change, report))
+
+
+def check_python(report: Report, change: Change, files: Sequence[str]) -> None:
+    groups: dict[TypePlan, list[str]] = defaultdict(list)
+    for name in files:
+        groups[type_plan(change.root, name)].append(name)
+    for plan, names in groups.items():
+        report.attempt(run_type_plan, change, plan, names)
+    scope = python_scope(change, files)
+    report.attempt(run_vulture, change, scope)
+    report.attempt(run_duplicates, change, scope)
+
+
+def check_typescript(report: Report, change: Change, files: Sequence[str]) -> None:
+    projects = {typescript_project(change.root, name) for name in files}
+    if None in projects:
+        report.skip("tsc", TSC_INSTALL_HINT)
+    for project in sorted(item for item in projects if item):
+        report.attempt(run_tsc, change, project)
+    clone_finders = {node_binary(change.root, name, "jscpd") for name in files} - {None}
+    for binary in sorted(item for item in clone_finders if item):
+        report.attempt(run_jscpd, change, binary)
+
+
+def run_checks(report: Report, change: Change) -> None:
+    python_files = change.files((PYTHON_SUFFIX,))
+    if python_files:
+        check_python(report, change, python_files)
+    typescript_files = change.files(TYPESCRIPT_SUFFIXES)
+    if typescript_files:
+        check_typescript(report, change, typescript_files)
+
+
+def emit(text: str) -> None:
+    sys.stdout.write(f"{text}\n")
+
+
+def render(report: Report) -> int:
+    ordered = sorted(report.findings)
+    for item in ordered[:MAX_LISTED]:
+        emit(item.render())
+    if len(ordered) > MAX_LISTED:
+        emit(MORE_LINE.format(count=len(ordered) - MAX_LISTED))
+    for note in report.notes:
+        emit(note)
+    emit(SUMMARY_LINE.format(count=len(ordered)))
+    if report.failed:
+        return EXIT_FAILED
+    return EXIT_FINDINGS if ordered else EXIT_CLEAN
+
+
+def main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Type, dead-code and duplicate checks on changed lines.")
+    parser.add_argument("--base", help="git ref to diff against (default: merge-base with origin/HEAD)")
+    arguments = parser.parse_args(argv)
+    try:
+        root = repository_root()
+        change = collect_change(root, arguments.base or default_base(root))
+    except GateError as error:
+        sys.stderr.write(f"quality-gate: {error}\n")
+        return EXIT_FAILED
+    report = Report()
+    run_checks(report, change)
+    return render(report)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

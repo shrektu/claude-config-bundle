@@ -33,8 +33,9 @@ Architect, planner, final tester. One prompt → plan → sol plan review → `d
 2. Plan review: `codex-runner` mode=plan → sol. One pass: fix the plan for each real line, drop the
    unreal ones with a reason. No second plan review.
 3. Develop: `~/.claude/bin/feature-worktree new <repo> feature/<topic> <base>` (base: develop for tasks,
-   master for hotfixes, else the default) → the worktree all paths of the plan point at; `review-checkpoint save` there → START SHA; load `delegate`, spawn `developer`
-   with `plan_file:` (delegation-guard enforces the contract). Supervise at milestones; SendMessage
+   master for hotfixes, else the default) → the worktree all plan paths point at; `review-checkpoint
+   save` there → START SHA; load `delegate`, spawn `developer` with `plan_file:` (delegation-guard
+   enforces the contract). Supervise at milestones; SendMessage
    the moment it drifts.
 4. Code review: `review-checkpoint save` → round SHA; `codex-runner` mode=code `base=<START>` → sol, in
    the SAME batch as your own verify runs; review the diff yourself meanwhile (`review` skill).
@@ -45,8 +46,8 @@ Architect, planner, final tester. One prompt → plan → sol plan review → `d
    `base=<last round SHA>` + `recheck=<those findings>`.
 7. Test gate, yours: rerun unit + integration through verify, then use the feature the way it is
    really used (run the app — `run` skill, browser, CLI, device). Unit tests never replace a real run.
-8. Repeat 5–7 until sol has no real `H:` line on the last checkpoint and every test is green. 3 rounds without
-   progress on one finding → STOP, **Zablokowane**; never declare it done to end the loop.
+8. Repeat 5–7 until sol has no real `H:` line on the last checkpoint and every test is green. 3 rounds
+   without progress on one finding → STOP, **Zablokowane**; never declare it done to end the loop.
 9. Commit on the work branch (`commit` skill), open the PR, report one status; after the merge
    `feature-worktree done`.
 
@@ -101,6 +102,8 @@ commit invalidates the prior review. PR description on request: `pr-description`
   denies every edit that adds a comment, lint-guard every edit that adds a ruff/eslint violation (repo
   config first, else the strict global ruff.toml). Code is written with Edit/Write only; bash-write-guard
   denies Bash writes of code files inside a repo.
+- Design is decided in every plan (dependency direction, boundaries, error policy — `delegate`
+  template); `quality-gate` checks types, dead code and duplicates on changed lines through verify.
 - Raw dicts: as few as possible. Data with a known shape lives in a typed model (dataclass, Pydantic,
   TypedDict, NamedTuple, enum); a raw dict only for genuinely dynamic keys at a JSON boundary, converted
   immediately.
@@ -111,6 +114,6 @@ commit invalidates the prior review. PR description on request: `pr-description`
 ## Skills
 
 Load before acting: `tdd` (writing the test_plan; preloaded in developer), `delegate` (plan template,
-developer and codex-runner prompts), `review` (adjudication, test gate, rounds, report), `quality-bar` (the checklist you and the developer
-share),
-`commit` (committing), `pr-description` (on request), `repo-standards` (pinned-version idioms).
+developer and codex-runner prompts), `review` (adjudication, test gate, rounds, report), `quality-bar`
+(the checklist you and the developer share), `commit` (committing), `pr-description` (on request),
+`repo-standards` (pinned-version idioms).

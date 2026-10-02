@@ -25,7 +25,9 @@ CODEX_AGENTS_MD = REPO / "codex" / "AGENTS.md"
 README = REPO / "README.md"
 BIN_DIR = REPO / "claude" / "bin"
 USAGE_REPORT = BIN_DIR / "usage-report"
-FEATURE_WORKTREE_FILES = ("feature-worktree", "feature-worktree-test.sh")
+FEATURE_WORKTREE_FILES = (
+    "feature-worktree", "feature-worktree-test.sh", "quality-gate", "quality-gate-test.sh",
+)
 EN_DASH = chr(0x2013)
 STEP_MINUTES = f"2{EN_DASH}5 minutes"
 VERIFY_STEP_LINE = re.compile(r"(?m)^\s*\d+\.\s.*verify:")
@@ -62,8 +64,9 @@ SHARED_HOOK_MODULES = ("shell_words.py", "code_files.py", "edit_texts.py")
 RUFF_CONFIG = REPO / "claude" / "lint" / "ruff.toml"
 RUFF_SELECTED_FAMILIES = (
     "E", "F", "W", "I", "UP", "B", "SIM", "C4", "PERF", "RET", "PIE", "FURB", "PTH", "ARG", "ERA", "RUF",
-    "PL", "C90",
+    "PL", "C90", "TRY", "BLE", "S", "N", "DTZ", "T20", "FBT",
 )
+RUFF_GLOBAL_IGNORES = ("S603", "S607")
 RUFF_TEST_GLOBS = ("**/tests/**", "**/test_*.py", "**/*_test.py", "**/*-test.py", "**/conftest.py")
 RUFF_TEST_IGNORES = ("PLR2004", "ARG", "S101", "PLR0913")
 RUFF_TARGET_VERSION = "py312"
@@ -256,6 +259,8 @@ def check_ruff_config() -> None:
     check(length == RUFF_LINE_LENGTH, f"ruff line-length is {length!r}")
     selected = lint.get("select", [])
     check(set(selected) == set(RUFF_SELECTED_FAMILIES), f"ruff select is {selected!r}")
+    global_ignores = lint.get("ignore", [])
+    check(set(global_ignores) == set(RUFF_GLOBAL_IGNORES), f"ruff global ignore is {global_ignores!r}")
     max_args = lint.get("pylint", {}).get("max-args")
     check(max_args == RUFF_MAX_ARGS, f"ruff pylint max-args is {max_args!r}")
     complexity = lint.get("mccabe", {}).get("max-complexity")

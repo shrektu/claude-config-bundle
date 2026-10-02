@@ -4,8 +4,9 @@ line-length = 110
 [lint]
 select = [
     "E", "F", "W", "I", "UP", "B", "SIM", "C4", "PERF", "RET", "PIE", "FURB", "PTH", "ARG", "ERA", "RUF",
-    "PL", "C90",
+    "PL", "C90", "TRY", "BLE", "S", "N", "DTZ", "T20", "FBT",
 ]
+ignore = ["S603", "S607"]
 
 [lint.per-file-ignores]
 "**/tests/**" = ["PLR2004", "ARG", "S101", "PLR0913"]

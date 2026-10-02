@@ -33,13 +33,16 @@ run_install() { env -i HOME="$1" PATH="${4:-$FAKEBIN:$SYSBIN}" USER="${USER:-tes
 
 mkdir -p "$FAKEBIN" "$SYSBIN" "$UVBIN" "$RUFFBIN"
 for f in /usr/bin/* /bin/*; do
-  case ${f##*/} in uv|uvx|ruff) continue ;; esac
+  case ${f##*/} in uv|uvx|ruff|mypy|vulture|pylint) continue ;; esac
   ln -sf "$f" "$SYSBIN/${f##*/}"
 done
-printf '#!/bin/sh\ncase "$*" in\n  "tool dir --bin") echo "%s/uv-tool-bin" ;;\n  *) echo "$*" > "%s/uv-called" ;;\nesac\n' \
+printf '#!/bin/sh\ncase "$*" in\n  "tool dir --bin") echo "%s/uv-tool-bin" ;;\n  *) echo "$*" >> "%s/uv-called" ;;\nesac\n' \
   "$UVBIN" "$UVBIN" > "$UVBIN/uv"
-printf '#!/bin/sh\necho "ruff 0.0.0-test"\n' > "$RUFFBIN/ruff"
-chmod 755 "$UVBIN/uv" "$RUFFBIN/ruff"
+for tool in ruff mypy vulture pylint; do
+  printf '#!/bin/sh\necho "%s 0.0.0-test"\n' "$tool" > "$RUFFBIN/$tool"
+  chmod 755 "$RUFFBIN/$tool"
+done
+chmod 755 "$UVBIN/uv"
 printf '#!/bin/sh\necho "codex-cli 0.0.0-test"\n' > "$FAKEBIN/codex"
 chmod 755 "$FAKEBIN/codex"
 
@@ -101,7 +104,9 @@ check_file "$H1/.claude/bundle/retire.json"
 check_file "$H1/.claude/bundle/install.sh"
 check_file "$H1/.codex/AGENTS.md"
 check_file "$H1/.claude/bin/repo-facts"
-for tool in feature-worktree feature-worktree-test.sh; do check_exec "$H1/.claude/bin/$tool"; done
+for tool in feature-worktree feature-worktree-test.sh quality-gate quality-gate-test.sh; do
+  check_exec "$H1/.claude/bin/$tool"
+done
 check_file "$H1/.claude/hooks/git-policy.py"
 check_file "$H1/.claude/hooks/delegation-guard.py"
 check_file "$H1/.claude/hooks/subagent-verify-check.py"
@@ -117,7 +122,11 @@ check_file "$H1/.claude/hooks/lint-guard-test.py"
 check_file "$H1/.claude/hooks/bash-write-guard.py"
 check_file "$H1/.claude/hooks/bash-write-guard-test.py"
 check_file "$H1/.claude/mcp/codex-worker/codex_worker_test.py"
-check_grep "$H1/.claude/lint/ruff.toml" "$CUSTOM_RUFF" "install overwrote an existing ~/.claude/lint/ruff.toml"
+CHECKS=$((CHECKS + 1))
+cmp -s "$ROOT/claude/lint/ruff.toml" "$H1/.claude/lint/ruff.toml" || fail "install kept an older ~/.claude/lint/ruff.toml"
+CHECKS=$((CHECKS + 1))
+grep -qF -- "$CUSTOM_RUFF" "$H1"/.claude/backups/bundle-2*/.claude/lint/ruff.toml 2>/dev/null \
+  || fail "the replaced ruff.toml was not backed up"
 for entry in $RETIRED_HOME_ENTRIES prompts; do
   check_gone "$H1/.claude/$entry"
   CHECKS=$((CHECKS + 1))
@@ -240,7 +249,9 @@ check "installed export.sh exit status (see $WORK/export.log)" $?
 check_file "$EXPORTED/retire.json"
 check_file "$EXPORTED/claude/hooks/git-policy.py"
 check_file "$EXPORTED/claude/bin/repo-facts"
-for tool in feature-worktree feature-worktree-test.sh; do check_exec "$EXPORTED/claude/bin/$tool"; done
+for tool in feature-worktree feature-worktree-test.sh quality-gate quality-gate-test.sh; do
+  check_exec "$EXPORTED/claude/bin/$tool"
+done
 check_file "$EXPORTED/claude/hooks/tdd-guard.py"
 check_file "$EXPORTED/claude/hooks/shell_words.py"
 check_file "$EXPORTED/claude/hooks/comment-guard.py"
@@ -278,18 +289,24 @@ mkdir -p "$WORK/home-uv" "$WORK/home-none" "$WORK/home-ruff"
 for home in home-uv home-none home-ruff; do stub_venv "$WORK/$home"; done
 run_install "$WORK/home-uv" "$ROOT/install.sh" "$WORK/install-uv.log" "$UVBIN:$FAKEBIN:$SYSBIN"
 check "install without ruff but with uv, exit status" $?
-check_grep "$UVBIN/uv-called" "tool install ruff" "uv was not asked to install ruff"
+for tool in ruff mypy vulture pylint; do
+  check_grep "$UVBIN/uv-called" "tool install $tool" "uv was not asked to install $tool"
+  check_grep "$WORK/install-uv.log" "$tool is not installed" "no warning although $tool is still off PATH after uv"
+done
 check_grep "$WORK/install-uv.log" "lint-guard is inactive" "no warning although ruff is still off PATH after uv"
 check_grep "$WORK/install-uv.log" "$UVBIN/uv-tool-bin" "warning does not say where uv put ruff"
 rm -f "$UVBIN/uv-called"
 run_install "$WORK/home-none" "$ROOT/install.sh" "$WORK/install-none.log"
 check "install without ruff and uv, exit status" $?
 check_grep "$WORK/install-none.log" "lint-guard is inactive" "no warning that lint-guard is inactive"
+for tool in mypy vulture pylint; do
+  check_grep "$WORK/install-none.log" "$tool is not installed" "no warning that $tool is missing"
+done
 run_install "$WORK/home-ruff" "$ROOT/install.sh" "$WORK/install-ruff.log" "$RUFFBIN:$UVBIN:$FAKEBIN:$SYSBIN"
 check "install with ruff present, exit status" $?
 check_gone "$UVBIN/uv-called"
 CHECKS=$((CHECKS + 1))
-if grep -q "lint-guard is inactive" "$WORK/install-ruff.log"; then fail "warned about ruff although it is installed"; fi
+if grep -q "is not installed" "$WORK/install-ruff.log"; then fail "warned about a tool that is installed"; fi
 
 echo "checks: $CHECKS, FAILURES: $FAILURES"
 if [ "$FAILURES" != 0 ]; then

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Iterator
 from typing import Callable, NamedTuple
 
 DEVELOPER = "developer"
@@ -11,6 +12,8 @@ CODEX_RUNNER = "codex-runner"
 REVIEW_MODES = ("plan", "code")
 ACCEPTANCE_HEADING_RE = re.compile(r"(?i)^##[ \t]+acceptance_criteria[ \t]*$")
 TEST_PLAN_HEADING_RE = re.compile(r"(?i)^##[ \t]+test_plan[ \t]*$")
+COMMANDS_HEADING_RE = re.compile(r"(?i)^##[ \t]+commands[ \t]*$")
+QUALITY_LINE_RE = re.compile(r"^[ \t\-*]*Quality:.*quality-gate")
 SECTION_END_RE = re.compile(r"^#{1,2}[ \t]")
 FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
 VERIFY_MARKER = "verify --"
@@ -30,7 +33,7 @@ class Requirement(NamedTuple):
     present: Callable
 
 
-def unfenced_lines(text):
+def unfenced_lines(text: str) -> Iterator[str]:
     fenced = False
     for line in text.splitlines():
         if FENCE_RE.match(line):
@@ -40,16 +43,23 @@ def unfenced_lines(text):
             yield line
 
 
-def has_filled_section(plan, heading_re):
+def section_lines(plan: str, heading_re: re.Pattern[str]) -> Iterator[str]:
     inside = False
     for line in unfenced_lines(plan):
         if inside and SECTION_END_RE.match(line):
             inside = False
         if heading_re.match(line):
             inside = True
-        elif inside and line.strip():
-            return True
-    return False
+        elif inside:
+            yield line
+
+
+def has_filled_section(plan: str, heading_re: re.Pattern[str]) -> bool:
+    return any(line.strip() for line in section_lines(plan, heading_re))
+
+
+def has_quality_gate_line(plan: str) -> bool:
+    return any(QUALITY_LINE_RE.match(line) for line in section_lines(plan, COMMANDS_HEADING_RE))
 
 
 def _has_any(text, markers):
@@ -64,6 +74,9 @@ PLAN_REQUIREMENTS = (
     Requirement("a filled `## test_plan` section in the plan file (outside code fences), listing the tests to "
                 "write red first",
                 lambda plan: has_filled_section(plan, TEST_PLAN_HEADING_RE)),
+    Requirement("a `Quality:` line in the plan's `## commands` section that runs `quality-gate` through "
+                "verify (outside code fences)",
+                has_quality_gate_line),
 )
 REQUIREMENTS = (
     Requirement("the test commands as `~/.claude/bin/verify -- <command>` (the plan or prompt must contain "
