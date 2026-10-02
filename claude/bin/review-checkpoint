@@ -1,36 +1,51 @@
 #!/usr/bin/env bash
 usage() {
   cat <<'USAGE'
-usage: review-checkpoint save          -> prints a SHA snapshotting the tracked working tree (HEAD when clean)
-       review-checkpoint stat <SHA>    -> files changed since that snapshot + untracked files
-       review-checkpoint diff <SHA>    -> the same plus the patch
+usage: review-checkpoint save          -> prints a SHA snapshotting the whole working tree, new files included
+       review-checkpoint stat <SHA>    -> files changed since that snapshot (new files as additions)
+       review-checkpoint diff <SHA>    -> the same plus the patch; files new before the snapshot show only later hunks
        review-checkpoint size          -> change size vs HEAD (staged + unstaged + untracked) for the review gate
-Snapshots come from `git stash create`: worktree, index content and refs stay as they are (git may refresh
-index stat data). The snapshot is an unreachable commit, kept until `git gc` prunes it (2 weeks by default).
+save/stat/diff run `git add -A` into a temporary copy of the index, so the real index, the worktree and refs
+stay untouched and .gitignore'd files stay out. The snapshot is an unreachable commit, kept until `git gc`
+prunes it (2 weeks by default). Older `git stash create` checkpoints keep working.
 USAGE
 }
 set -euo pipefail
+CHECKPOINT_MESSAGE=review-checkpoint
 cmd=${1:-}
+
+snapshot_index() {
+  local real
+  real=$(git rev-parse --path-format=absolute --git-path index)
+  SNAPSHOT_DIR=$(mktemp -d)
+  trap 'rm -rf "$SNAPSHOT_DIR"' EXIT
+  export GIT_INDEX_FILE=$SNAPSHOT_DIR/index
+  if [ -f "$real" ]; then cp "$real" "$GIT_INDEX_FILE"; fi
+  git add -A
+}
+
 case "$cmd" in
   save)
     git rev-parse --is-inside-work-tree >/dev/null
-    sha=$(git stash create)
-    [ -n "$sha" ] || sha=$(git rev-parse HEAD)
-    echo "$sha" ;;
+    cd "$(git rev-parse --show-toplevel)"
+    snapshot_index
+    tree=$(git write-tree)
+    parent=()
+    if head=$(git rev-parse -q --verify HEAD); then parent=(-p "$head"); fi
+    GIT_AUTHOR_NAME=$CHECKPOINT_MESSAGE GIT_AUTHOR_EMAIL=$CHECKPOINT_MESSAGE@localhost \
+      GIT_COMMITTER_NAME=$CHECKPOINT_MESSAGE GIT_COMMITTER_EMAIL=$CHECKPOINT_MESSAGE@localhost \
+      git commit-tree --no-gpg-sign "$tree" "${parent[@]}" -m "$CHECKPOINT_MESSAGE" ;;
   stat|diff)
     sha=${2:-}
     [ -n "$sha" ] || { usage >&2; exit 64; }
     git cat-file -e "$sha^{commit}" 2>/dev/null || { echo "review-checkpoint: unknown checkpoint $sha" >&2; exit 2; }
+    cd "$(git rev-parse --show-toplevel)"
+    snapshot_index
     echo "## changed since checkpoint ${sha:0:12}"
-    git --no-pager diff --stat "$sha"
-    untracked=$(git -c core.quotePath=false ls-files --others --exclude-standard)
-    if [ -n "$untracked" ]; then
-      echo "## untracked files (not in the patch, read them explicitly)"
-      echo "$untracked"
-    fi
+    git --no-pager diff --cached --stat "$sha"
     if [ "$cmd" = diff ]; then
       echo "## patch"
-      git --no-pager diff "$sha"
+      git --no-pager diff --cached "$sha"
     fi ;;
   size)
     git rev-parse --is-inside-work-tree >/dev/null

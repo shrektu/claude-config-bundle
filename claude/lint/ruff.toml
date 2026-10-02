@@ -1,0 +1,21 @@
+target-version = "py312"
+line-length = 110
+
+[lint]
+select = [
+    "E", "F", "W", "I", "UP", "B", "SIM", "C4", "PERF", "RET", "PIE", "FURB", "PTH", "ARG", "ERA", "RUF",
+    "PL", "C90",
+]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["PLR2004", "ARG", "S101", "PLR0913"]
+"**/test_*.py" = ["PLR2004", "ARG", "S101", "PLR0913"]
+"**/*_test.py" = ["PLR2004", "ARG", "S101", "PLR0913"]
+"**/*-test.py" = ["PLR2004", "ARG", "S101", "PLR0913"]
+"**/conftest.py" = ["PLR2004", "ARG", "S101", "PLR0913"]
+
+[lint.pylint]
+max-args = 6
+
+[lint.mccabe]
+max-complexity = 10

@@ -1,6 +1,6 @@
 ---
 name: repo-standards
-description: Jak pisać kod pasujący do wersji przypiętych w repo, a nie do pamięci modelu: najpierw `~/.claude/bin/repo-facts`, potem zainstalowane źródło paczki jako wyrocznia API (tylko gdy installed == locked), sync przy MISMATCH, grep w wyroczni zamiast zgadywania sygnatur, listy "current idiom / legacy do odrzucenia" dla Pythona, FastAPI, SQLAlchemy 2.0, Pydantic v2, Alembic, React 19, TypeScript 5.x, Vite, Vitest, Playwright, C11/CMake, PlatformIO, Rusta i Go, oraz polityka deprecation warnings. Preładowana w agentach implementer; orchestrator ładuje ją dla zadań klasy S i przy review idiomów.
+description: Jak pisać kod pasujący do wersji przypiętych w repo, a nie do pamięci modelu: najpierw `~/.claude/bin/repo-facts`, potem zainstalowane źródło paczki jako wyrocznia API (tylko gdy installed == locked), sync przy MISMATCH, grep w wyroczni zamiast zgadywania sygnatur, listy "current idiom / legacy do odrzucenia" dla Pythona, FastAPI, SQLAlchemy 2.0, Pydantic v2, Alembic, React 19, TypeScript 5.x, Vite, Vitest, Playwright, C11/CMake, PlatformIO, Rusta i Go, oraz polityka deprecation warnings. Preładowana w agencie developer; Claude ładuje ją na szybkiej ścieżce i przy review idiomów.
 ---
 
 ## 1. Facts before code

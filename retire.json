@@ -5,7 +5,15 @@
     "skills/orchestrate",
     "agents/sonnet-worker.md",
     "agents/claude-reviewer.md",
-    "agents/haiku-worker.md"
+    "agents/haiku-worker.md",
+    "agents/implementer.md",
+    "agents/implementer-hard.md",
+    "agents/implementer-opus.md",
+    "agents/commander-opus.md",
+    "audit-2026-09-12",
+    "prompts",
+    "settings.json.bak-manual",
+    "settings.json.bak-manual2"
   ],
   "settings": {
     "env": [
@@ -14,7 +22,11 @@
     "permissions.allow": [
       "mcp__codex__*",
       "Agent(haiku-worker)",
-      "Agent(claude-reviewer)"
+      "Agent(claude-reviewer)",
+      "Agent(implementer)",
+      "Agent(implementer-hard)",
+      "Agent(implementer-opus)",
+      "Agent(commander-opus)"
     ]
   }
 }

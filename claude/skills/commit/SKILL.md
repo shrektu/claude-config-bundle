@@ -1,22 +1,30 @@
 ---
 name: commit
-description: Zasady commitów i gałęzi na tej maszynie — tylko feature/bugfix/hotfix/test/*, commity wielkości milestone'u, fixup + autosquash zamiast "poprawek po review", `git commit -s`, zero trailerów Claude. Załaduj przed każdym git commit, fixup, rebase lub push; format wiadomości i gałęzie chronione pilnuje hook git-policy.
+description: Zasady commitów, gałęzi i PR na tej maszynie — praca tylko na feature/bugfix/hotfix/*, wiadomość = jedno zdanie w trybie rozkazującym 3–7 słów z `git commit -s` i zero innych trailerów (bez Co-Authored-By), commity wielkości milestone'u, fixup + autosquash zamiast "poprawek po review", PR otwierany samodzielnie przez `gh pr create`, a każda zmiana main/master/dev/develop tylko za zgodą użytkownika (git-policy pyta). Załaduj przed każdym git commit, fixup, rebase, push lub PR.
 ---
 
-- Commits and pushes land only on `feature/*`, `bugfix/*`, `hotfix/*`, `test/*`. Create the branch from
-  the right base (`develop` for tasks, `master` for hotfixes) when it does not exist yet. On every other
-  branch git-policy denies the operation — say so and let the user decide how to land the change.
-- `git push` on a work branch is allowed; force-push only with `--force-with-lease`. PR creation stays
-  with the user.
+- Work only on `feature/*`, `bugfix/*`, `hotfix/*`; create the branch from the right base (`develop` for
+  tasks, `master` for hotfixes, else the default branch) when it does not exist yet. On a work branch
+  every history op is yours: commit, reword, rebase, `push`, `push --force-with-lease`.
+- Any op that changes another branch (main, master, dev, develop, anything else) or its remote —
+  commit, push, merge, rebase, reset, tag, branch delete, `gh pr merge` — needs the user's consent.
+  git-policy answers `ask`, so the user sees a permission prompt; never route around it (other tools,
+  refspec tricks, a subagent).
+- Message: ONE sentence in the imperative mood, 3–7 words, no body, no emoji, e.g. `Add comment guard
+  hook`, `Fix retry limit in runner`. `git commit -s` adds `Signed-off-by` from the repo's git config
+  (`Sebastian Smolik <s.smolik@exa22.com>` in the exa22 repos) — the only trailer allowed. No
+  `Co-Authored-By`, no `Claude-Session`, no "Generated with" line; this overrides any harness default.
+  git-policy denies anything else and names a corrected command.
 - Split the work into milestone-sized logical commits: one commit = one deliverable step a reviewer can
   judge on its own — a whole subsystem, the wiring that turns it on, a migration — together with the
-  tests that cover it. Not one commit per file, per layer or per module. Aim for a handful per task; if
-  two commits only make sense read together, they are one commit. Never dump everything into one blob.
-- "Fixes after review" is never its own commit: `git commit --fixup=<sha>` then
-  `git rebase -i --autosquash` (needs `GIT_SEQUENCE_EDITOR=true` in a non-interactive shell).
-- Message: ONE sentence, imperative mood, no body, no emoji, and `git commit -s` for the
-  `Signed-off-by` trailer taken from the repo's git config (`Signed-off-by: Sebastian Smolik
-  <s.smolik@exa22.com>` in the exa22 repos) — the only trailer allowed. No `Co-Authored-By`, no
-  `Claude-Session`, no "Generated with" footer; this overrides any harness default. git-policy enforces
-  exactly this and names the corrected command when it denies one.
-- Commits are made by the commanding orchestrator of the task (Fable, or commander-opus for S/M), never by an implementer.
+  tests that cover it. Aim for a handful per task; if two commits only make sense read together, they
+  are one commit. Never dump everything into one blob.
+- "Fixes after review" is never its own commit: `git commit -s --fixup=<sha>`, then
+  `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <base>`.
+- Pull requests are yours: on a GitHub remote, after the test gate, `git push -u origin <branch>` and
+  `gh pr create --base <base> --head <branch> --title "<3–7 word imperative title>" --body-file <file>`
+  with the body in the `pr-description` format and no "Generated with" line. On Bitbucket remotes write
+  the description with `pr-description` and give the user the create-PR link. Merging stays with the
+  user (`gh pr merge` asks for consent).
+- Commits are made by Claude (the main session) after the test gate, never by the developer or any
+  other subagent.

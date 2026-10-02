@@ -3,7 +3,7 @@ usage() {
   cat <<'USAGE'
 usage: export.sh [OUT_DIR]      (default: ~/claude-config-bundle; also writes OUT_DIR.tar.gz)
 Packs the portable Claude Code + Codex setup of this machine: CLAUDE.md, settings.json (without autoMode),
-agents, skills, prompts, templates, bin, hooks, the codex-worker MCP server, statusline, Codex AGENTS.md and the
+agents, skills, prompts, templates, bin, hooks, lint (ruff.toml), the codex-worker MCP server, statusline, Codex AGENTS.md and the
 codex-worker entries for ~/.claude.json and ~/.codex/config.toml, plus retire.json so the retirement
 list travels with the bundle. Paths are replaced by __HOME__ and
 __CODEX_BIN__ so install.sh can render them on any machine. Credentials, sessions, memory and caches stay out.
@@ -17,11 +17,12 @@ CODEX_BIN=$(command -v codex || true)
 mkdir -p "$OUT"
 find "$OUT" -mindepth 1 -maxdepth 1 ! -name .git ! -name .gitignore -exec rm -rf {} +
 mkdir -p "$OUT/claude/mcp/codex-worker" "$OUT/codex"
-for d in agents skills prompts templates bin hooks; do
+for d in agents skills prompts templates bin hooks lint; do
   [ -d "$HOME/.claude/$d" ] && cp -a "$HOME/.claude/$d" "$OUT/claude/"
 done
 cp "$HOME/.claude/CLAUDE.md" "$HOME/.claude/statusline-command.sh" "$OUT/claude/"
-cp "$HOME/.claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/requirements.txt" "$OUT/claude/mcp/codex-worker/"
+cp "$HOME/.claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/codex_worker_test.py" \
+  "$HOME/.claude/mcp/codex-worker/requirements.txt" "$OUT/claude/mcp/codex-worker/"
 cp "$HOME/.codex/AGENTS.md" "$OUT/codex/AGENTS.md"
 python3 - "$HOME/.claude/settings.json" "$OUT/claude/settings.json" <<'PY'
 import json, sys

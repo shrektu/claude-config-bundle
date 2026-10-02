@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""PreToolUse(Agent|Task) hook: an implementer may only be spawned with a complete delegation prompt."""
+"""PreToolUse(Agent|Task) hook: developer and codex-runner may only be spawned against a complete plan file."""
 import json
+import os
 import re
 import sys
 from typing import Callable, NamedTuple
 
-IMPLEMENTER_TYPES = ("implementer", "implementer-hard", "implementer-opus", "commander-opus")
-ACCEPTANCE_MARKERS = ("acceptance_criteria", "acceptance criteria")
+DEVELOPER = "developer"
+CODEX_RUNNER = "codex-runner"
+REVIEW_MODES = ("plan", "code")
+ACCEPTANCE_HEADING_RE = re.compile(r"(?i)^##[ \t]+acceptance_criteria[ \t]*$")
+TEST_PLAN_HEADING_RE = re.compile(r"(?i)^##[ \t]+test_plan[ \t]*$")
+SECTION_END_RE = re.compile(r"^#{1,2}[ \t]")
+FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
 VERIFY_MARKER = "verify --"
-GIT_SAFETY_MARKER = "Never revert or discard changes you did not make"
 REPO_BOUNDARY_MARKERS = ("may not touch", "only touch", "must not touch", "do not modify anything under")
 ABSOLUTE_PATH_RE = re.compile(r"(^|[\s`'\"(\[=])/[A-Za-z0-9_./-]+")
-
-GIT_SAFETY_LINE = (GIT_SAFETY_MARKER + " (checkout/restore/stash/reset/clean are blocked by a hook); "
-                   "if you think a revert is needed, stop and report.")
+PLAN_FILE_RE = re.compile(r"(?m)^[ \t\-*]*plan_file:[ \t]*(.*?)[ \t]*$")
+MODE_RE = re.compile(r"(?m)^[ \t\-*]*mode:[ \t]*(.*?)[ \t]*$")
+PROJECT_PATH_RE = re.compile(r"(?m)^[ \t\-*]*project_path:[ \t]*(.*?)[ \t]*$")
+EMPTY_EXEMPT_RE = re.compile(r"(?m)^[ \t\-*]*tdd_exempt:[ \t]*$")
+VALUE_QUOTES = "`'\""
+MAX_PLAN_BYTES = 1000000
 SUBAGENT_KEYS = ("subagent_type", "agent_type")
 
 
@@ -22,27 +30,55 @@ class Requirement(NamedTuple):
     present: Callable
 
 
+def unfenced_lines(text):
+    fenced = False
+    for line in text.splitlines():
+        if FENCE_RE.match(line):
+            fenced = not fenced
+            continue
+        if not fenced:
+            yield line
+
+
+def has_filled_section(plan, heading_re):
+    inside = False
+    for line in unfenced_lines(plan):
+        if inside and SECTION_END_RE.match(line):
+            inside = False
+        if heading_re.match(line):
+            inside = True
+        elif inside and line.strip():
+            return True
+    return False
+
+
 def _has_any(text, markers):
     lowered = text.lower()
     return any(marker.lower() in lowered for marker in markers)
 
 
+PLAN_REQUIREMENTS = (
+    Requirement("a filled `## acceptance_criteria` section in the plan file (outside code fences), saying what "
+                "must be true when the task is done",
+                lambda plan: has_filled_section(plan, ACCEPTANCE_HEADING_RE)),
+    Requirement("a filled `## test_plan` section in the plan file (outside code fences), listing the tests to "
+                "write red first",
+                lambda plan: has_filled_section(plan, TEST_PLAN_HEADING_RE)),
+)
 REQUIREMENTS = (
-    Requirement("an `acceptance_criteria:` section saying what must be true when the task is done",
-                lambda text: _has_any(text, ACCEPTANCE_MARKERS)),
-    Requirement("the test command to run as `~/.claude/bin/verify -- <command>` (the prompt must contain "
+    Requirement("the test commands as `~/.claude/bin/verify -- <command>` (the plan or prompt must contain "
                 "`verify --`)",
                 lambda text: VERIFY_MARKER in text.lower()),
     Requirement("at least one absolute path, so the agent does not guess where the code lives",
                 lambda text: bool(ABSOLUTE_PATH_RE.search(text))),
-    Requirement(f'the git-safety line: "{GIT_SAFETY_LINE}"',
-                lambda text: GIT_SAFETY_MARKER.lower() in text.lower()),
-    Requirement('the repo boundary, e.g. "Repos: you may only touch <paths>; you may not touch <paths>"',
+    Requirement('the repo boundary, e.g. "You may only touch <paths>; you may not touch <paths>"',
                 lambda text: _has_any(text, REPO_BOUNDARY_MARKERS)),
 )
 
+PLAN_FILE_HINT = "a `plan_file: <absolute path to an existing plan file>` line"
+PROJECT_PATH_HINT = "a `project_path: <absolute path to an existing project directory>` line"
 BARE_MODEL_REASON = ("a bare `model` without `subagent_type` loses the agent contract and its reasoning effort. "
-                     "Spawn implementer / implementer-hard / implementer-opus instead (see the `delegate` skill).")
+                     f"Spawn `{DEVELOPER}` instead (see the `delegate` skill).")
 
 
 def deny(reason):
@@ -64,6 +100,56 @@ def subagent_type(tool_input):
     return None
 
 
+def field(pattern, prompt):
+    match = pattern.search(prompt)
+    return match.group(1).strip(VALUE_QUOTES) if match else ""
+
+
+def plan_path(prompt):
+    path = field(PLAN_FILE_RE, prompt)
+    return path if os.path.isabs(path) and os.path.isfile(path) else None
+
+
+def read_plan(path):
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read(MAX_PLAN_BYTES)
+
+
+def deny_missing(agent, missing):
+    items = "".join(f"\n  - {hint}" for hint in missing)
+    deny(f"the prompt for `{agent}` is missing:{items}\nAdd them (the `delegate` skill has the template) and "
+         f"spawn it again.")
+
+
+def check_developer(prompt):
+    path = plan_path(prompt)
+    if path is None:
+        deny_missing(DEVELOPER, [PLAN_FILE_HINT])
+    plan = read_plan(path)
+    missing = [req.hint for req in PLAN_REQUIREMENTS if not req.present(plan)]
+    missing += [req.hint for req in REQUIREMENTS if not req.present(prompt + "\n" + plan)]
+    if EMPTY_EXEMPT_RE.search(prompt):
+        missing.append("a reason after `tdd_exempt:` (or drop the line)")
+    if missing:
+        deny_missing(DEVELOPER, missing)
+
+
+def check_codex_runner(prompt):
+    missing = []
+    if field(MODE_RE, prompt) not in REVIEW_MODES:
+        missing.append(f"a `mode: {'|'.join(REVIEW_MODES)}` line")
+    if plan_path(prompt) is None:
+        missing.append(PLAN_FILE_HINT)
+    project = field(PROJECT_PATH_RE, prompt)
+    if not (os.path.isabs(project) and os.path.isdir(project)):
+        missing.append(PROJECT_PATH_HINT)
+    if missing:
+        deny_missing(CODEX_RUNNER, missing)
+
+
+CHECKS = {DEVELOPER: check_developer, CODEX_RUNNER: check_codex_runner}
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -78,16 +164,11 @@ def main():
             if isinstance(model, str) and model.strip():
                 deny(BARE_MODEL_REASON)
             return
-        if agent not in IMPLEMENTER_TYPES:
-            return
+        check = CHECKS.get(agent)
         prompt = tool_input.get("prompt")
-        if not isinstance(prompt, str):
+        if check is None or not isinstance(prompt, str):
             return
-        missing = [req.hint for req in REQUIREMENTS if not req.present(prompt)]
-        if missing:
-            items = "".join(f"\n  - {hint}" for hint in missing)
-            deny(f"the prompt for `{agent}` is missing:{items}\nAdd them (the `delegate` skill has the "
-                 f"template) and spawn it again.")
+        check(prompt)
     except SystemExit:
         raise
     except Exception:
