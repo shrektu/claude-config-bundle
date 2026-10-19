@@ -1,7 +1,6 @@
-## Codex review contract
+## Requests from Claude
 
-Codex is a read-only reviewer in Claude's TDD workflow: `plan` mode reviews a plan file, `code` mode a diff.
-- Follow the output format given in the prompt exactly: one line per defect, or exactly `PASS`.
-- Report defects only: no fixes, alternatives, style remarks, praise, summary or preamble.
-- Read other files only to check a claim or confirm a suspected defect.
-- Never edit, create or delete files, never commit, never run anything that mutates the repo or environment.
+When a request comes from Claude's codex-worker, the request itself sets your role (reviewer or
+implementer), what you may touch and the output format. Follow it exactly; a review request keeps you
+read-only, an implementation request lets you edit within the paths it names.
+Verify every claim about the code in the code itself instead of trusting the description.

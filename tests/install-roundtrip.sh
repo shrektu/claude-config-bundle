@@ -55,12 +55,12 @@ stub_venv() {
 }
 
 mkdir -p "$H1/.claude/prompts" "$H1/.claude/skills/orchestrate" "$H1/.claude/agents" "$H2"
-RETIRED_AGENTS="implementer implementer-hard implementer-opus commander-opus"
+RETIRED_AGENTS="implementer-hard implementer-opus commander-opus developer"
 for f in prompts/haiku-task.md prompts/codex-review.md skills/orchestrate/SKILL.md \
          agents/sonnet-worker.md agents/claude-reviewer.md agents/haiku-worker.md; do
   echo "old content" > "$H1/.claude/$f"
 done
-for a in $RETIRED_AGENTS; do echo "old agent" > "$H1/.claude/agents/$a.md"; done
+for a in implementer $RETIRED_AGENTS; do echo "old agent" > "$H1/.claude/agents/$a.md"; done
 cat > "$H1/.claude/settings.json" <<'JSON'
 {
   "env": { "MAX_MCP_OUTPUT_TOKENS": "1000000", "LOCAL_ONLY": "keep-me" },
@@ -86,6 +86,14 @@ echo "{}" > "$H1/.claude/settings.json.bak-manual"
 echo "{}" > "$H1/.claude/settings.json.bak-manual2"
 CUSTOM_RUFF='line-length = 77'
 echo "$CUSTOM_RUFF" > "$H1/.claude/lint/ruff.toml"
+RETIRED_HOME_FILES="bin/feature-worktree bin/feature-worktree-test.sh bin/quality-gate bin/quality-gate-test.sh \
+  bin/review-checkpoint-test.sh hooks/bash-write-guard.py hooks/bash-write-guard-test.py hooks/code_files.py \
+  hooks/edit_texts.py hooks/lint-guard.py hooks/lint-guard-test.py hooks/shell_words.py \
+  mcp/codex-worker/codex_worker_test.py skills/quality-bar/SKILL.md skills/tdd/SKILL.md"
+for f in $RETIRED_HOME_FILES; do
+  mkdir -p "$(dirname "$H1/.claude/$f")"
+  echo "retired content" > "$H1/.claude/$f"
+done
 FAKE_BACKUPS="20200101-000001 20200101-000002 20200101-000003 20200101-000004 20200101-000005 20200101-000006 20200101-000007"
 for stamp in $FAKE_BACKUPS; do mkdir -p "$H1/.claude/backups/bundle-$stamp"; done
 stub_venv "$H1"
@@ -104,29 +112,31 @@ check_file "$H1/.claude/bundle/retire.json"
 check_file "$H1/.claude/bundle/install.sh"
 check_file "$H1/.codex/AGENTS.md"
 check_file "$H1/.claude/bin/repo-facts"
-for tool in feature-worktree feature-worktree-test.sh quality-gate quality-gate-test.sh; do
+for tool in ai-review-gate habits lint-strict review-checkpoint usage-report verify; do
   check_exec "$H1/.claude/bin/$tool"
+done
+check_file "$H1/.claude/agents/implementer.md"
+CHECKS=$((CHECKS + 1))
+if grep -qF "old agent" "$H1/.claude/agents/implementer.md"; then fail "implementer.md was not replaced by the bundle version"; fi
+for hook in git-guard verify-guard read-guard codex-gate standards-gate autofix-on-edit context-guard session-start-marker; do
+  check_file "$H1/.claude/hooks/$hook.py"
 done
 check_file "$H1/.claude/hooks/git-policy.py"
 check_file "$H1/.claude/hooks/delegation-guard.py"
 check_file "$H1/.claude/hooks/subagent-verify-check.py"
 check_file "$H1/.claude/hooks/tdd-guard.py"
 check_file "$H1/.claude/hooks/tdd-guard-test.py"
-check_file "$H1/.claude/hooks/shell_words.py"
 check_file "$H1/.claude/hooks/comment-guard.py"
 check_file "$H1/.claude/hooks/comment-guard-test.py"
-check_file "$H1/.claude/hooks/code_files.py"
-check_file "$H1/.claude/hooks/edit_texts.py"
-check_file "$H1/.claude/hooks/lint-guard.py"
-check_file "$H1/.claude/hooks/lint-guard-test.py"
-check_file "$H1/.claude/hooks/bash-write-guard.py"
-check_file "$H1/.claude/hooks/bash-write-guard-test.py"
-check_file "$H1/.claude/mcp/codex-worker/codex_worker_test.py"
-CHECKS=$((CHECKS + 1))
-cmp -s "$ROOT/claude/lint/ruff.toml" "$H1/.claude/lint/ruff.toml" || fail "install kept an older ~/.claude/lint/ruff.toml"
+for f in $RETIRED_HOME_FILES; do
+  check_gone "$H1/.claude/$f"
+  CHECKS=$((CHECKS + 1))
+  compgen -G "$H1/.claude/backups/bundle-2*/.claude/$f" >/dev/null || fail "no backup of retired $f"
+done
+check_gone "$H1/.claude/lint"
 CHECKS=$((CHECKS + 1))
 grep -qF -- "$CUSTOM_RUFF" "$H1"/.claude/backups/bundle-2*/.claude/lint/ruff.toml 2>/dev/null \
-  || fail "the replaced ruff.toml was not backed up"
+  || fail "the retired ruff.toml was not backed up"
 for entry in $RETIRED_HOME_ENTRIES prompts; do
   check_gone "$H1/.claude/$entry"
   CHECKS=$((CHECKS + 1))
@@ -139,16 +149,14 @@ check_gone "$H1/.claude/backups/bundle-20200101-000001"
 check_gone "$H1/.claude/backups/bundle-20200101-000003"
 check_file "$H1/.claude/backups/bundle-20200101-000007"
 check_file "$H1/.claude/backups/unrelated"
-check_file "$H1/.claude/agents/developer.md"
-check_file "$H1/.claude/skills/tdd/SKILL.md"
 for a in $RETIRED_AGENTS; do
   check_gone "$H1/.claude/agents/$a.md"
   CHECKS=$((CHECKS + 1))
   compgen -G "$H1/.claude/backups/bundle-*/.claude/agents/$a.md" >/dev/null || fail "no backup of retired agents/$a.md"
 done
 CHECKS=$((CHECKS + 1))
-AGENTS_LEFT=$(cd "$H1/.claude/agents" && ls | sort | tr '\n' ' ')
-[ "$AGENTS_LEFT" = "codex-runner.md developer.md " ] || fail "agents left after install: $AGENTS_LEFT"
+AGENTS_LEFT=$(cd "$H1/.claude/agents" && ls | LC_ALL=C sort | tr '\n' ' ')
+[ "$AGENTS_LEFT" = "codex-runner.md implementer-strong.md implementer.md writer.md " ] || fail "agents left after install: $AGENTS_LEFT"
 check_grep "$WORK/install1.log" "for t in tdd-guard " "install log: post-install hint runs the tdd-guard matrix"
 check_grep "$WORK/install1.log" " comment-guard " "install log: post-install hint runs the comment-guard matrix"
 check_grep "$WORK/install1.log" "codex_worker_test.py" "install log: post-install hint names the worker test"
@@ -173,67 +181,69 @@ check_grep "$WORK/install1.log" "retired: $H1/.claude/skills/orchestrate" "insta
 check_grep "$WORK/install1.log" "retired settings entries" "install log: retirement of stale settings"
 
 CHECKS=$((CHECKS + 1))
-python3 - "$H1/.claude/settings.json" <<'PY' || fail "settings.json content"
-import json, sys
+python3 - "$H1/.claude/settings.json" "$ROOT/claude/settings.json" "$H1" <<'PY' || fail "settings.json content"
+import json, re, sys
 settings = json.load(open(sys.argv[1]))
+bundle = json.load(open(sys.argv[2]))
+home = sys.argv[3]
 problems = []
-if settings.get("model") != "claude-opus-5-5":
+if settings.get("model") != "opus[1m]":
     problems.append(f"model={settings.get('model')!r}")
-if settings.get("modelSettings", {}).get("claude-opus-5-5", {}).get("effortLevel") != "high":
-    problems.append("modelSettings.claude-opus-5-5 effort missing")
 if settings.get("effortLevel") != "high":
     problems.append(f"effortLevel={settings.get('effortLevel')!r}")
 if settings.get("bashOutputMaxChars") != 12000:
     problems.append("bashOutputMaxChars missing")
-for model, config in settings.get("modelSettings", {}).items():
-    if config.get("effortLevel") != "high":
-        problems.append(f"modelSettings.{model}={config}")
+if settings.get("modelSettings") != bundle["modelSettings"]:
+    problems.append(f"modelSettings={settings.get('modelSettings')}")
 env = settings.get("env", {})
 if "MAX_MCP_OUTPUT_TOKENS" in env:
     problems.append("env.MAX_MCP_OUTPUT_TOKENS still set")
 if env.get("LOCAL_ONLY") != "keep-me":
     problems.append("local env entry lost")
 allow = settings.get("permissions", {}).get("allow", [])
-for stale in ("mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)", "Agent(implementer)",
+for stale in ("mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)",
               "Agent(implementer-hard)", "Agent(implementer-opus)", "Agent(commander-opus)"):
     if stale in allow:
         problems.append(f"stale allow {stale}")
-for wanted in ("Agent(developer)", "Agent(codex-runner)", "Bash(ls*)", "mcp__codex-worker__*"):
+for wanted in ("Agent(implementer)", "Agent(implementer-strong)", "Agent(codex-runner)", "Bash(ls*)",
+               "mcp__codex-worker__*"):
     if wanted not in allow:
         problems.append(f"missing allow {wanted}")
 if settings.get("autoMode", {}).get("environment") != "local":
     problems.append("autoMode lost")
 hooks = settings.get("hooks", {})
-for event in ("PreToolUse", "SessionStart", "SubagentStop"):
-    if not hooks.get(event):
-        problems.append(f"hook event {event} missing")
-groups = {(event, entry.get("matcher")): entry for event, entries in hooks.items() for entry in entries}
-expected = [("PreToolUse", "Bash"), ("PreToolUse", "Read"), ("PreToolUse", "Agent|Task"),
-            ("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"),
-            ("SessionStart", "startup|resume|clear|compact"), ("SubagentStop", None)]
-for key in expected:
-    if key not in groups:
-        problems.append(f"hook group {key} missing")
-if len(groups) != len(expected) + 1:
-    problems.append(f"{len(groups)} hook groups, wanted {len(expected) + 1} (bundle groups + the local Grep one)")
-if ("PreToolUse", "Grep") not in groups:
+wanted_count = 1
+for event, entries in bundle["hooks"].items():
+    wanted_count += len(entries)
+    for entry in entries:
+        rendered = json.loads(json.dumps(entry).replace("__HOME__", home))
+        if rendered not in hooks.get(event, []):
+            problems.append(f"hook entry missing: {event} {entry.get('matcher')}")
+if sum(len(entries) for entries in hooks.values()) != wanted_count:
+    problems.append("hook entry count differs from bundle entries plus the local Grep one")
+if not any(e.get("matcher") == "Grep" for e in hooks.get("PreToolUse", [])):
     problems.append("local-only Grep matcher dropped")
-bash_group = groups.get(("PreToolUse", "Bash"), {}).get("hooks", [])
-if len(bash_group) != 4:
-    problems.append(f"Bash group has {len(bash_group)} hook commands, wanted 4")
-names = [h.get("command", "").rsplit("/", 1)[-1] for h in bash_group]
-if names != ["git-guard.py", "verify-guard.py", "git-policy.py", "bash-write-guard.py"]:
-    problems.append(f"Bash hook order {names}")
-tdd_group = groups.get(("PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"), {}).get("hooks", [])
-if [h.get("command", "").rsplit("/", 1)[-1] for h in tdd_group] != ["tdd-guard.py", "comment-guard.py", "lint-guard.py"]:
-    problems.append(f"Edit|Write group {tdd_group}")
-if settings.get("autoCompactWindow") != "200k":
-    problems.append(f"autoCompactWindow={settings.get('autoCompactWindow')!r}")
-if any("/old/path/git-guard.py" in h.get("command", "") for h in bash_group):
+if any("/old/path/git-guard.py" in h.get("command", "") for e in hooks.get("PreToolUse", []) for h in e["hooks"]):
     problems.append("old union-style Bash hook still registered")
 for problem in problems:
     print("  settings problem:", problem)
 sys.exit(1 if problems else 0)
+PY
+
+CHECKS=$((CHECKS + 1))
+python3 - "$H1/.claude/settings.json" "$H1" <<'PY' || fail "a hook command references a file that does not exist"
+import json, os, re, sys
+settings = json.load(open(sys.argv[1]))
+home = sys.argv[2]
+pattern = re.compile(re.escape(home) + r"/\.claude/[^\s'\";)]+")
+missing = []
+for entries in settings["hooks"].values():
+    for entry in entries:
+        for hook in entry["hooks"]:
+            missing += [p for p in pattern.findall(hook["command"]) if not os.path.exists(p)]
+for path in missing:
+    print("  hook references missing file:", path)
+sys.exit(1 if missing else 0)
 PY
 
 run_install "$H1" "$ROOT/install.sh" "$WORK/install2.log"
@@ -249,18 +259,13 @@ check "installed export.sh exit status (see $WORK/export.log)" $?
 check_file "$EXPORTED/retire.json"
 check_file "$EXPORTED/claude/hooks/git-policy.py"
 check_file "$EXPORTED/claude/bin/repo-facts"
-for tool in feature-worktree feature-worktree-test.sh quality-gate quality-gate-test.sh; do
+for tool in ai-review-gate habits lint-strict review-checkpoint verify; do
   check_exec "$EXPORTED/claude/bin/$tool"
 done
 check_file "$EXPORTED/claude/hooks/tdd-guard.py"
-check_file "$EXPORTED/claude/hooks/shell_words.py"
 check_file "$EXPORTED/claude/hooks/comment-guard.py"
-check_file "$EXPORTED/claude/hooks/code_files.py"
-check_file "$EXPORTED/claude/hooks/edit_texts.py"
-check_file "$EXPORTED/claude/hooks/lint-guard.py"
-check_file "$EXPORTED/claude/hooks/bash-write-guard.py"
-check_file "$EXPORTED/claude/lint/ruff.toml"
-check_file "$EXPORTED/claude/mcp/codex-worker/codex_worker_test.py"
+check_gone "$EXPORTED/claude/lint"
+check_gone "$EXPORTED/claude/mcp/codex-worker/codex_worker_test.py"
 check_file "$EXPORTED/manifest.txt"
 CHECKS=$((CHECKS + 1))
 if grep -q "\./\.git/" "$EXPORTED/manifest.txt"; then fail "manifest lists .git entries"; fi
@@ -282,12 +287,9 @@ while IFS= read -r -d '' file; do
   check_file "$H2/.claude/$rel"
 done < <(find "$EXPORTED/claude" -path '*/__pycache__' -prune -o -type f ! -name '*.pyc' -print0)
 check_file "$H2/.claude/templates/rules-standards.md"
-check_file "$H2/.claude/lint/ruff.toml"
-check_file "$H2/.claude/hooks/lint-guard.py"
 check_file "$H2/.claude/hooks/git-policy.py"
 check_file "$H2/.claude/bundle/retire.json"
 check_file "$H2/.claude/hooks/tdd-guard.py"
-check_file "$H2/.claude/mcp/codex-worker/codex_worker_test.py"
 check_grep "$H2/.claude/settings.json" "$H2/.claude/hooks/delegation-guard.py" "second home: rendered path"
 
 mkdir -p "$WORK/home-uv" "$WORK/home-none" "$WORK/home-ruff"

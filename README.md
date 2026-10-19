@@ -9,9 +9,9 @@ Two scripts keep the setup identical on every machine.
 
 ## Moving it
 
-Preferred: keep the exported directory in a private git repository.
+Preferred: keep the exported directory in a git repository.
 
-The repository already exists: `git@github.com:shrektu/claude-config-bundle.git` (private). To publish
+The repository already exists: `git@github.com:shrektu/claude-config-bundle.git`. To publish
 changes made on this machine:
 
 ```bash
@@ -31,78 +31,93 @@ Alternative without git: copy the tarball (scp, USB, cloud drive), `tar -xzf`, r
 After changing anything in `~/.claude` on either machine, run `export.sh` there, commit, push, and
 `install.sh` on the other one. The repository is the source of truth; last export wins.
 
-## Workflow v3 in one screen
+## Workflow in one screen
 
-One TDD pipeline. Claude (the main session, Opus 5.5) writes a plan file (task, architecture, test_plan,
-acceptance_criteria, commands, repos, risks) → `codex-runner` gets gpt-6-sol/high to list plan defects
-→ Claude fixes the plan → `developer` (Sonnet 5.5, effort medium) implements it test-first: red through
-`verify`, green, refactor → `codex-runner` gets gpt-6-sol/high to list code defects → Claude reproduces
-each finding, sends the real ones back as one fix round, and runs the unit and integration tests itself.
-After a fix round sol re-reviews only the checkpoint diff plus the earlier findings. Fast path: a change of
-≤ ~20 lines in ≤ 2 files outside any risk area is done by Claude directly, still test-first, without
-Codex reviews or the developer. The relay passes only paths and SHAs; the codex-worker MCP server builds the
-prompt and returns `PASS` or one `H:`/`L:` line per defect (H = real defect, L = minor; L never opens a
-fix round) under a token header.
+One orchestrator session plans, delegates, reviews and commits; everything else is a specialist.
 
-Hooks (`claude/hooks/`, registered in `settings.json`): `git-guard.py` (destructive git),
-`git-policy.py` (branch rule + commit message format), `verify-guard.py` (bare test/lint/build),
-`read-guard.py` (whole-file reads), `delegation-guard.py` (developer and codex-runner need a complete
-plan file), `tdd-guard.py` (the developer edits production code only after a test edit and a
-`VERIFY FAIL`), `comment-guard.py` (no edit may add a comment to code; directives and one-line
-docstrings pass; `--scan [--raw] FILE…` lists findings), `subagent-verify-check.py` (the developer must
-verify after its last edit), `lint-guard.py` (an edit may not add a ruff violation, or an eslint one where
-the repo has an eslint config; the repo's own config wins, else `~/.claude/lint/ruff.toml`; it fails open),
-`bash-write-guard.py` (a Bash command may not write a code file inside a git work tree), plus `repo-facts`
-as the SessionStart context. `shell_words.py` is their shared command parser, `code_files.py` their shared
-code-file and comment-syntax map, `edit_texts.py` their shared before/after texts of an edit. Each hook
-ships with a `*-test.py` matrix; the worker ships with `codex_worker_test.py`.
+- Orchestrator (the main session, Opus 5.5): classifies the task, writes a short plan (objective,
+  constraints, files, reuse, tests, risks, failure modes, open questions), delegates, reviews every round
+  itself, runs the end tests and commits.
+- `implementer` (Claude Sonnet 5.5, effort medium): edits files, runs tests through `verify`, fixes its own
+  failures. It makes no architecture decisions.
+- `implementer-strong` (Codex gpt-6.1-sol, effort medium, through `codex_implement`): one escalation attempt
+  after three fix rounds without progress.
+- `writer` (Sonnet 5.5, read-only): drafts the prose the orchestrator publishes (PR descriptions,
+  ticket comments, longer replies).
+- `codex-runner` (gpt-6.1-sol, reasoning effort high): the plan gate critiques every M/L/XL plan before the
+  implementer starts; the code gate reviews the diff for bugs before every commit. Its findings are input
+  to the orchestrator's adjudication, never orders.
 
-Skills (`claude/skills/`): `tdd` (red → green → refactor, test_plan design, `tdd_exempt:`), `delegate`
-(plan-file template, developer and codex-runner prompts), `review` (checklist, finding adjudication, test
-gate, rounds, final report), `repo-standards` (pinned versions, the API oracle, current-vs-legacy idioms),
-`commit`, `pr-description`. The developer preloads `tdd` and `repo-standards`.
+Task classes: S (about 30 lines, at most 2 files, no risk area), M, L (architecture-level, several modules
+or more than about 300 lines), XL (any risk area: migration, concurrency, protocol, public API, auth,
+data deletion). The TDD ladder grows with the class: S one red test then the fix; M acceptance, implementation,
+unit, edge cases, refactor under green; L adds integration-level acceptance tests against fakes; XL adds a
+migration or protocol scenario and a verify run after the refactor. Every phase starts with a failing test run
+through `verify`.
 
-CLIs (`claude/bin/`): `verify` (runs checks, keeps the log on disk, prints the summary),
-`review-checkpoint` (incremental review diffs, new files included, via a temporary index), `repo-facts` (toolchain and pinned-version facts),
-`usage-report` (token/context baseline from the local transcripts), `feature-worktree` (`new` / `done` / `list`:
-one git worktree per feature branch next to the repo; `done` removes only work that has landed on its base),
-`quality-gate` (types via the repo's own pyright/mypy/tsc config or `mypy --strict`, dead code via vulture and
-duplicates via pylint/jscpd, reported only on the lines a change touched; tested by `quality-gate-test.sh`;
-install.sh installs mypy, vulture and pylint with `uv tool install` like ruff).
+`verify` (`claude/bin/verify`) runs every test, lint and build, keeps the full log on disk and prints a
+summary. It runs inside a systemd user scope (MemoryMax 6G, swap 1G, CPUQuota 600%, CPUWeight 30, nice 10);
+`VERIFY_MEMORY_MAX`, `VERIFY_SWAP_MAX`, `VERIFY_CPU_QUOTA`, `VERIFY_CPU_WEIGHT` and `VERIFY_NICE` override
+the limits and `VERIFY_NO_LIMITS=1` disables them.
+
+Hooks (`claude/hooks/`, registered in `settings.json`): `git-guard` (destructive git), `git-policy` (branch
+rule and commit message format), `verify-guard` (bare test, lint and build commands), `read-guard` (whole-file
+reads), `delegation-guard` (a delegation must carry its required fields), `tdd-guard` (production edits only
+after a red run), `comment-guard` (no comments in code), `standards-gate` (lint on every commit and at
+subagent stop), `subagent-verify-check` (an implementer must verify after its last edit), `codex-gate`,
+`autofix-on-edit`, `context-guard`, `session-start-marker` and `payload-probe`; `repo-facts` is the
+SessionStart context. Each hook ships with a `*-test.py` matrix.
+
+Skills (`claude/skills/`): `task` (a ticket from start to an open PR), `epik` (a whole epic), `qa` (end-to-end
+scenarios), `delegate` (spawn prompts and escalation), `review` (a review round and the final report),
+`rownolegle` (independent milestones in parallel worktrees), `commit`, `pr-description`, `bb` (Bitbucket
+review) and `repo-standards` (pinned versions and idioms).
+
+CLIs (`claude/bin/`): `verify`, `review-checkpoint` (incremental review diffs), `repo-facts` (toolchain and
+pinned-version facts), `lint-strict` (the commit-gate linters), `habits` (rules learned from reviews),
+`ai-review-gate`, `usage-report` (token and context baseline from local transcripts) and `bb-sweep`.
 
 ## What travels
 
-CLAUDE.md, settings.json (workflow keys, permissions, hooks, output caps), `agents/`, `skills/`,
-`templates/` (the `.claude/rules/standards.md` template for projects), `bin/` (verify,
-review-checkpoint, repo-facts, usage-report, feature-worktree, quality-gate), `hooks/` (git-guard, git-policy, verify-guard, read-guard,
-delegation-guard, tdd-guard, comment-guard, lint-guard, bash-write-guard, subagent-verify-check, shell_words,
-code_files, edit_texts + their test matrices), `lint/ruff.toml` (the global ruff config; install.sh replaces it and backs up
-a changed copy), `retire.json` (what install.sh removes
-from an older home), the codex-worker MCP server with its unit test and its registration for Claude and Codex, the
-statusline script, Codex `AGENTS.md`.
+CLAUDE.md, settings.json (workflow keys, permissions, hooks, output caps), `agents/`, `skills/`, `templates/`,
+`bin/`, `hooks/` (with their test matrices), `retire.json` (what install.sh removes from an older home),
+the codex-worker MCP server with its registration for Claude and Codex (the worker's unit test only when
+it exists on the exporting machine), the statusline script, Codex `AGENTS.md`.
 
 ## After installing
 
-Code review runs on gpt-6-sol, which needs codex-cli 0.157.1 or newer: an older CLI makes the API answer
-"The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account". Check `codex --version`.
+Code review runs on gpt-6.1-sol, which needs a recent codex-cli. Check `codex --version`.
 
 ```bash
-for h in tdd-guard comment-guard lint-guard bash-write-guard git-guard git-policy verify-guard read-guard delegation-guard subagent-verify-check; do
+for h in autofix-on-edit codex-gate comment-guard context-guard delegation-guard git-guard git-policy payload-probe read-guard repo-facts standards-gate subagent-verify-check tdd-guard verify-guard; do
   python3 ~/.claude/hooks/$h-test.py || echo "FAILED: $h"
 done
-~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py
-bash ~/.claude/bin/review-checkpoint-test.sh
-bash ~/.claude/bin/feature-worktree-test.sh
-bash ~/.claude/bin/quality-gate-test.sh
+bash ~/.claude/bin/verify-test.sh
 ~/.claude/bin/repo-facts                  # inside a repo: versions, locked vs installed
 ~/.claude/bin/usage-report --days 30      # token/context baseline
 ```
 
 install.sh keeps the 5 newest `~/.claude/backups/bundle-*` directories and removes older ones.
-`settings.json` sets `autoCompactWindow` to `200k`.
 
 ## What stays local on purpose
 
 Logins (`claude login`, `codex login`), `settings.json` → `env` and `autoMode` (machine-specific repo
 descriptions), the rest of `~/.codex/config.toml` (partly managed by the ChatGPT desktop app),
 Claude auto-memory (`~/.claude/projects/<path>/memory`, keyed by the project path), sessions, caches.
+
+## Private content
+
+When the exported directory goes to a public repository, three optional files placed next to `export.sh`
+keep company-specific content out. They are never exported themselves.
+
+- `exclude.local` — one path per line, relative to the export directory (for example
+  `claude/skills/acme-internal`). Empty lines and lines starting with `#` are ignored. Absolute paths and
+  paths containing `..` abort the export with exit 2.
+- `scrub.local.sed` — a `sed -E` script applied to every exported text file (for example
+  `s/acmecorp/example/g`).
+- `leak-check.local` — one extended regex per line (for example `acme(corp)?\.example\.com`). It is
+  checked case-insensitively against everything exported, binaries and `manifest.txt` included. Any hit
+  prints the `file:line` matches, writes no manifest and no tarball, and exits 3.
+
+Independent of these files, `*.bak*` files, `.pytest_cache`, `.ruff_cache`, `__pycache__` and
+`claude/skills/synced` are never exported.

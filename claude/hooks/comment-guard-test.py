@@ -1,277 +1,603 @@
-#!/usr/bin/env python3
-"""Regression matrix for comment-guard.py (the sibling file by default; pass another path as argv[1])."""
-import json, os, subprocess, sys, tempfile, time
+from __future__ import annotations
 
-hook = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                          "comment-guard.py")
-REASON_MARK = "comment-guard: no comments in code"
-DEVELOPER = "developer"
-MAIN_SESSION = None
-PY_KERNEL = {"kernelspec": {"name": "python3", "language": "python", "display_name": "Python 3"},
-             "language_info": {"name": "python"}}
-R_KERNEL = {"kernelspec": {"name": "ir", "language": "R", "display_name": "R"}, "language_info": {"name": "R"}}
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+Proc = subprocess.CompletedProcess[str]
+Case = tuple[str, str, str, str, str]
+
+HOOK = (
+    Path(sys.argv[1])
+    if __name__ == "__main__" and len(sys.argv) > 1
+    else Path(__file__).resolve().parent / "comment-guard.py"
+)
+DOC_LIMIT = 72
+GARBAGE_INPUTS = (
+    "",
+    "null",
+    "[]",
+    "{",
+    '{"tool_name": 42}',
+    '{"tool_name": "Edit"}',
+    (
+        '{"tool_name": "Edit", "tool_input": {"file_path": "a.py", '
+        '"new_string": 7}}'
+    ),
+)
+HATCH = {"CLAUDE_COMMENT_GUARD": "off"}
+WORK = tempfile.TemporaryDirectory()
+
+DENY: list[Case] = [
+    ("Edit", "a.py", "# load the device groups\nx = 1", "", "python comment"),
+    ("Edit", "a.cpp", "// still guarded\nint x;", "", "c++ stays in scope"),
+    ("Edit", "a.py", "x = 1  # default timeout", "", "python trailing"),
+    (
+        "Edit",
+        "App.tsx",
+        "// ── Load device groups ──────────\nconst a = 1;",
+        "",
+        "tsx banner",
+    ),
+    ("Edit", "a.ts", "const a = 1; // narrate", "", "ts trailing comment"),
+    (
+        "Edit",
+        "a.ts",
+        "/* multi\n * line\n */\nconst a = 1;",
+        "",
+        "ts block comment",
+    ),
+    (
+        "Write",
+        "a.go",
+        "package main\n// why\nfunc main() {}",
+        "",
+        "Write is checked too",
+    ),
+    ("Edit", "a.sql", "-- pick the rows\nSELECT 1;", "", "sql comment"),
+    ("Edit", "a.py", "# step one\n# step two\nx = 1", "", "several comments"),
+    (
+        "Edit",
+        "a.py",
+        "x = 1  # new note",
+        "y = 2  # old note",
+        "a different trailing comment",
+    ),
+]
+ALLOW: list[Case] = [
+    ("Edit", "a.py", "x = 1", "", "plain code"),
+    (
+        "Edit",
+        "a.py",
+        'def f():\n    """Do it."""',
+        "",
+        "docstring is not a comment",
+    ),
+    ("Edit", "a.py", "url = 'https://x/y'", "", "url inside a string"),
+    (
+        "Edit",
+        "a.ts",
+        'const u = "https://example.com//path";',
+        "",
+        "double slash inside a string",
+    ),
+    ("Edit", "a.py", "x = 1  # noqa: E501", "", "noqa directive"),
+    (
+        "Edit",
+        "a.py",
+        "# type: ignore[arg-type]\nx = 1",
+        "",
+        "type ignore directive",
+    ),
+    (
+        "Edit",
+        "a.ts",
+        "// eslint-disable-next-line no-console\nconsole.log(1);",
+        "",
+        "eslint directive",
+    ),
+    (
+        "Edit",
+        "a.ts",
+        "// @ts-expect-error legacy shape\nconst a = f();",
+        "",
+        "ts-expect-error directive",
+    ),
+    ("Edit", "a.sh", "#!/usr/bin/env bash\nset -e", "", "shebang"),
+    (
+        "Edit",
+        "a.c",
+        "#include <stdio.h>\n#pragma once",
+        "",
+        "preprocessor is not a comment",
+    ),
+    (
+        "Edit",
+        "a.c",
+        "// SPI needs 2 dummy bytes before the reply\nint x;",
+        "",
+        "C sources are out of scope",
+    ),
+    (
+        "Edit",
+        "regs.h",
+        "#ifndef REGS_H\n#define REGS_H\n#endif /* REGS_H */",
+        "",
+        "include guard in a header",
+    ),
+    (
+        "Edit",
+        "regs.h",
+        (
+            "/* 0x2A: status register, bit 3 latches until read */\n"
+            "#define STATUS 0x2A"
+        ),
+        "",
+        "register documentation in a header",
+    ),
+    (
+        "Edit",
+        "a.py",
+        "# kept from before\nx = 2",
+        "# kept from before\nx = 1",
+        "comment already in the file",
+    ),
+    ("Edit", "a.md", "# Heading\ntext", "", "markdown is not code"),
+    ("Edit", "a.json", '{"a": 1}', "", "json untouched"),
+    ("Edit", "a.txt", "# not code", "", "unknown extension untouched"),
+    ("Write", "a.py", "", "", "empty content"),
+]
+BASH_DENY = [
+    (
+        "cat > src/api.ts <<'EOF'\n// narrate the call\nconst a = 1;\nEOF",
+        "heredoc into a code file",
+    ),
+    (
+        "cd /repo && cat >> src/a.py << 'EOF'\n# appended note\nx = 1\nEOF",
+        "appending heredoc",
+    ),
+    ("tee src/a.py <<EOF\n# note\nx = 1\nEOF", "tee heredoc"),
+    (
+        (
+            "cat > a.ts <<'EOF'\nconst a = 1;\nEOF\n"
+            "cat > b.py <<'PY'\n# second heredoc\nx = 1\nPY"
+        ),
+        "second heredoc in one command",
+    ),
+]
+BASH_ALLOW = [
+    ("cat > src/api.ts <<'EOF'\nconst a = 1;\nEOF", "clean heredoc"),
+    (
+        "python3 - <<'PY'\n# a script, not a written file\nprint(1)\nPY",
+        "heredoc with no file target",
+    ),
+    (
+        (
+            "cat > firmware/regs.h <<'EOF'\n"
+            "/* 0x2A status */\n#define S 0x2A\nEOF"
+        ),
+        "C header stays exempt",
+    ),
+    ("cat > notes.md <<'EOF'\n# Heading\nEOF", "markdown is not code"),
+    ("~/.claude/bin/verify -- 'pytest -q'", "an ordinary command"),
+    ("sed -i 's|//old|/new|' src/a.ts", "sed is not parsed"),
+    ("grep -n '# TODO' src/a.py", "reading a comment is not writing one"),
+]
 
 
-def run(payload, raw=None):
-    done = subprocess.run(["python3", hook], input=raw if raw is not None else json.dumps(payload),
-                          capture_output=True, text=True, timeout=10)
-    return done.returncode, done.stdout.strip(), done.stderr.strip()
+def launch(payload: str, env: dict[str, str] | None = None) -> Proc:
+    """Run the hook with the raw stdin text."""
+    return subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=payload,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **(env or {})},
+        check=False,
+    )
 
 
-bad = 0
-checks = 0
-slowest = 0.0
+def run(
+    tool: str,
+    path: str,
+    new: str,
+    old: str = "",
+    env: dict[str, str] | None = None,
+) -> Proc:
+    """Run the hook on an Edit or Write payload."""
+    tool_input = {"file_path": path}
+    if tool == "Write":
+        tool_input["content"] = new
+    else:
+        tool_input["new_string"] = new
+        tool_input["old_string"] = old
+    payload = {"tool_name": tool, "tool_input": tool_input}
+    return launch(json.dumps(payload), env)
 
 
-def expect(label, payload, denied, needles=()):
-    global bad, checks, slowest
-    checks += 1
-    t0 = time.time()
-    rc, out, err = run(payload)
-    slowest = max(slowest, time.time() - t0)
-    ok = rc == 0 and not err and (('"deny"' in out and REASON_MARK in out) if denied else out == "")
-    if ok and denied:
-        reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
-        missing = [needle for needle in needles if needle not in reason]
-        if missing:
-            ok = False
-            print(f"DENY MISSING [{label}] needles={missing} reason={reason[:300]!r}")
-            bad += 1
-            return
-    if not ok:
-        bad += 1
-        kind = "DENY MISS" if denied else "ALLOW FP "
-        print(f"{kind} [{label}] rc={rc} out={out[:200]!r} err={err[-300:]!r}")
+def run_bash(command: str, env: dict[str, str] | None = None) -> Proc:
+    """Run the hook on a Bash payload."""
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    return launch(json.dumps(payload), env)
 
 
-def notebook(cells, metadata=PY_KERNEL):
-    return json.dumps({"nbformat": 4, "nbformat_minor": 5, "metadata": metadata, "cells": [
-        {"cell_type": kind, "id": cell_id, "metadata": {}, "source": source,
-         **({"outputs": [], "execution_count": None} if kind == "code" else {})}
-        for cell_id, kind, source in cells]}, indent=1)
-
-
-with tempfile.TemporaryDirectory() as base:
-    def put(name, text):
-        path = os.path.join(base, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        return path
-
-    def payload(tool, data, agent_type=MAIN_SESSION):
-        body = {"hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": tool, "tool_input": data,
-                "cwd": base}
-        if agent_type is not None:
-            body["agent_type"] = agent_type
-        return body
-
-    def write(label, name, content, denied, existing=None, needles=(), agent_type=MAIN_SESSION):
-        path = os.path.join(base, "w", name)
-        if existing is not None:
-            put(os.path.join("w", name), existing)
-        elif os.path.exists(path):
-            os.remove(path)
-        expect(f"Write {label}", payload("Write", {"file_path": path, "content": content}, agent_type),
-               denied, needles)
-
-    def edit(label, name, before, old, new, denied, replace_all=False, needles=(), agent_type=MAIN_SESSION):
-        path = put(os.path.join("e", name), before)
-        data = {"file_path": path, "old_string": old, "new_string": new}
-        if replace_all:
-            data["replace_all"] = True
-        expect(f"Edit {label}", payload("Edit", data, agent_type), denied, needles)
-
-    def multi(label, name, before, edits, denied):
-        path = put(os.path.join("m", name), before)
-        expect(f"MultiEdit {label}", payload("MultiEdit", {"file_path": path, "edits": [
-            {"old_string": old, "new_string": new} for old, new in edits]}), denied)
-
-    def notebook_edit(label, cells, data, denied, metadata=PY_KERNEL):
-        path = put(os.path.join("nb", "n.ipynb"), notebook(cells, metadata))
-        expect(f"NotebookEdit {label}", payload("NotebookEdit", {"notebook_path": path, **data}), denied)
-
-    for agent in (MAIN_SESSION, DEVELOPER):
-        edit(f"adds # x to .py (agent {agent})", "a.py", "a = 1\nb = 2\n", "b = 2", "b = 2  # x", True,
-             needles=("L2:", "# x", "description="), agent_type=agent)
-    write("new .py with a comment", "new.py", "# x\nprint(1)\n", True, needles=("L1:",))
-    write("// x in .ts", "a.ts", "const a = 1;\n// x\n", True)
-    write("/* x */ in .c", "a.c", "int a = 1; /* x */\n", True)
-    write("multi-line /** */ in .ts", "doc.ts", "/**\n * Adds.\n * More.\n */\nexport const a = 1;\n", True)
-    write("two /// lines in .rs", "doc.rs", "/// Adds.\n/// More.\npub fn a() {}\n", True)
-    write("# x in .sh", "a.sh", "echo hi\n# x\n", True)
-    write("-- x in .sql", "a.sql", "SELECT 1; -- x\n", True)
-    write("<!-- x --> in .vue", "A.vue", "<template>\n  <!-- x -->\n  <div/>\n</template>\n", True)
-    write("multi-line docstring", "doc.py", 'def f():\n    """Adds.\n\n    More.\n    """\n    return 1\n', True)
-    write("multi-line class docstring", "cls.py", 'class A:\n    """Adds.\n    More."""\n', True)
-    write("multi-line module docstring", "mod.py", '"""Adds.\nMore.\n"""\nx = 1\n', True)
-    write("bash shebang file comment", "tool", "#!/usr/bin/env bash\necho hi\n# x\n", True)
-    write("python shebang file comment", "pytool", "#!/usr/bin/env python3\nprint(1)\n# x\n", True)
-    write("python shebang file tokenized as python", "pytool2",
-          "#!/usr/bin/env python3\ns = '''\n# not a comment\n'''\n", False)
-    write("broken python still denies", "broken.py", "def f(:\n    x = 1  # x\n", True)
-    write("unterminated python still denies", "broken2.py", "s = (1,\n# x\n", True)
-    write("`// x` inside ${} of a template", "tpl.ts", "const s = `a ${f() // x\n} b`;\n", True)
-    write("ruby x = 1# y", "a.rb", "x = 1# y\n", True)
-    write("php # x", "a.php", "<?php\n$a = 1; # x\n", True)
-    write("lua -- x", "a.lua", "local a = 1 -- x\n", True)
-    write("lua --[[ x ]]", "b.lua", "local a = 1 --[[ x ]]\n", True)
-    write("go // x", "a.go", "package a\n\nvar s = 1 // x\n", True)
-    write("elixir # x", "a.ex", "x = 1 # y\n", True)
-    write("comment after rust lifetimes", "life.rs", "fn f<'a>(s: &'a str) -> &'a str { s } // x\n", True)
-    write("same comment added twice", "twice.py", "a = 1  # x\nb = 2  # x\n", True, existing="a = 1  # x\nb = 2\n")
-    write("reason lists at most three", "many.py", "a = 1  # one\nb = 2  # two\nc = 3  # three\nd = 4  # four\n",
-          True, needles=("L1:", "L2:", "L3:"))
-
-    edit("replace_all adds a comment at every match", "ra.py", "s = 1\ns = 1\n", "s = 1", "s = 1  # x", True,
-         replace_all=True)
-    edit("adds another copy of an existing comment", "copy.py", "a = 1  # x\n", "a = 1  # x",
-         "a = 1  # x\nb = 2  # x", True)
-    multi("second edit adds a comment", "m.py", "a = 1\nb = 2\n", [("a = 1", "a = 3"), ("b = 2", "b = 2  # x")],
-          True)
-    multi("edits without comments", "m2.py", "a = 1\nb = 2\n", [("a = 1", "a = 3"), ("b = 2", "b = 4")], False)
-
-    notebook_edit("code cell # x", [("c1", "code", "x = 1\n")],
-                  {"cell_id": "c1", "new_source": "x = 1  # x", "edit_mode": "replace"}, True)
-    notebook_edit("insert code cell # x", [("c1", "code", "x = 1\n")],
-                  {"cell_id": "c1", "new_source": "# x\ny = 2", "cell_type": "code", "edit_mode": "insert"}, True)
-    notebook_edit("delete cell", [("c1", "code", "x = 1  # x\n")],
-                  {"cell_id": "c1", "new_source": "", "edit_mode": "delete"}, False)
-    notebook_edit("markdown cell # Title", [("m1", "markdown", "Intro")],
-                  {"cell_id": "m1", "new_source": "# Title", "cell_type": "markdown", "edit_mode": "replace"}, False)
-    notebook_edit("existing markdown cell replaced", [("m1", "markdown", "Intro")],
-                  {"cell_id": "m1", "new_source": "# Title", "edit_mode": "replace"}, False)
-    notebook_edit("R kernel", [("c1", "code", "x <- 1\n")],
-                  {"cell_id": "c1", "new_source": "x <- 1  # x", "edit_mode": "replace"}, False, R_KERNEL)
-    notebook_edit("cell keeps its comment", [("c1", "code", "x = 1  # x\n")],
-                  {"cell_id": "c1", "new_source": "x = 2  # x", "edit_mode": "replace"}, False)
-
-    write("ipynb new code cell # x", "w.ipynb", notebook([("c1", "code", "x = 1\n"), ("c2", "code", "# x\ny = 2\n")]),
-          True, existing=notebook([("c1", "code", "x = 1\n")]))
-    write("ipynb markdown heading", "w2.ipynb", notebook([("c1", "code", "x = 1\n"), ("m1", "markdown", "# T")]),
-          False, existing=notebook([("c1", "code", "x = 1\n")]))
-    write("ipynb R kernel", "w3.ipynb", notebook([("c1", "code", "x <- 1  # x\n")], R_KERNEL), False)
-    write("ipynb invalid json", "w4.ipynb", "{not json # x", False)
-
-    write("regex classes and escapes in .ts", "re.ts",
-          "function f(s) {\n  if (typeof /x\\/\\//.test(s)) return /[//]/;\n  return s;\n}\n", False)
-    write("regex literal and division in .ts", "div.ts",
-          "const r = s.replace(/\\/\\//g, '');\nconst q = a / b / c;\nconst u = \"http://x\";\n", False)
-    write("template literal containing //", "tl.ts", "const u = `http://${host}/a//b`;\nconst v = `//`;\n", False)
-    write("strings with # and // in .py", "s.py",
-          "s = \"#\"\nu = \"http://x\"\nt = '//'\nf = Field(description=\"a # b\")\n", False)
-    write("strings with # and // in .ts", "s.ts", "const s = \"#\";\nconst u = \"http://x\";\nconst t = '//';\n",
-          False)
-    write("strings and raw strings in .go", "s.go",
-          "package a\n\nvar s = \"#\"\nvar u = \"http://x\"\nvar r = `a\n// b\n`\nvar c = '/'\n", False)
-    write("shell heredoc", "h.sh", "cat <<EOF\n# line\nEOF\ncat <<-'END'\n\t# other\n\tEND\necho done\n", False)
-    write("shell $# and ${#arr[@]}", "n.sh", "echo $#\nn=${#arr[@]}\necho \"a # b\" 'c # d'\n", False)
-    write("c++ raw string", "r.cpp", "auto s = R\"(a \" // x)\";\nauto t = R\"d(\n// y\n)d\";\n", False)
-    write("c# verbatim string", "v.cs", "var p = @\"C:\\\"; var u = \"http://x\";\n", False)
-    write("c# raw string", "raw.cs", "var j = \"\"\"\n// x\n\"\"\";\n", False)
-    write("kotlin text block", "k.kt", "val s = \"\"\"\n// x\n\"\"\"\n", False)
-    write("java text block", "J.java", "String s = \"\"\"\n// x\n\"\"\";\n", False)
-    write("dart raw and triple strings", "d.dart", "var a = r'\\';\nvar b = '''\n// x\n''';\nvar u = 'http://x';\n",
-          False)
-    write("rust derive and lifetime", "l.rs",
-          "#[derive(Debug)]\nstruct S<'a> { s: &'a str }\nconst U: &str = \"http://x\";\nconst C: char = '/';\n",
-          False)
-    write("rust raw strings", "raw.rs", "const A: &str = r\"a // b\";\nconst B: &str = r#\"c \" // d\"#;\n", False)
-    write("#include and #define in .c", "i.c", "#include <stdio.h>\n#define X 1\nint a = X;\n", False)
-    write("one-line docstring", "one.py", 'def f():\n    """Adds one."""\n    return 1\n', False)
-    write("one-line /** x */", "one.ts", "/** Adds one. */\nexport const a = 1;\n", False)
-    write("single ///", "one.rs", "/// Adds one.\npub fn a() {}\n", False)
-    write("shebang", "sheb.py", "#!/usr/bin/env python3\nprint(1)\n", False)
-    write("coding cookie", "cook.py", "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\nprint(1)\n", False)
-    write("vue html and script strings", "B.vue",
-          "<template>\n  <a href=\"http://x\">Don't</a>\n</template>\n<script setup lang=\"ts\">\n"
-          "const u = \"http://x\"\n</script>\n", False)
-    write("keeps existing comments", "keep.py", "a = 1  # x\nb = 3\n", False, existing="a = 1  # x\nb = 2\n")
-    for name, text in (("R.md", "# Heading\n"), ("c.json", "{\"a\": \"# x\"}\n"), ("c.yaml", "# x\na: 1\n"),
-                       ("c.toml", "# x\na = 1\n"), ("plain", "# x\n")):
-        write(f"non-code {name}", name, text, False)
-
-    edit("elsewhere in a commented file", "else.py", "a = 1  # x\n# y\nb = 2\n", "b = 2", "b = 3", False)
-    edit("comment moved unchanged", "mv.py", "a = 1  # x\nb = 2\n", "a = 1  # x\nb = 2", "a = 1\nb = 2  # x", False)
-    edit("comments removed", "rm.py", "a = 1  # x\n# y\n", "a = 1  # x\n# y\n", "a = 1\n", False)
-    edit("old_string not found", "nf.py", "a = 1\n", "zzz", "zzz  # x", False)
-    expect("Edit missing file", payload("Edit", {"file_path": os.path.join(base, "absent", "gone.py"),
-                                                 "old_string": "zzz", "new_string": "# x"}), False)
-
-    edit("shebang removed and comment added", "script", "#!/usr/bin/env bash\necho hi\n",
-         "#!/usr/bin/env bash\necho hi", "echo hi\n# x", True)
-    edit("syntax fix in a file with a multi-line docstring", "fix.py",
-         'def f(:\n    """Adds.\n\n    More.\n    """\n    return 1\n', "def f(:", "def f():", False)
-    edit("multi-line docstring added to a parsing file", "adddoc.py", "def f():\n    return 1\n",
-         "def f():\n", 'def f():\n    """Adds.\n    More.\n    """\n', True)
-    edit("syntax fix plus a new multi-line docstring", "fixdoc.py", "def f(:\n    return 1\n",
-         "def f(:\n", 'def f():\n    """Adds.\n    More.\n    """\n', True)
-    write("one-line /*! x */ in .ts", "bang.ts", "/*! TODO */\nexport const a = 1;\n", True)
-    write("webpack-like prose comment", "wp.js", "/* webpackMigration notes */\nexport const a = 1;\n", True)
-    write("css string with /* */ in vue style", "S.vue",
-          "<template><div/></template>\n<style>\n.a::before { content: \"/* x */\"; }\n.b { content: '/* y */'; }\n"
-          "</style>\n", False)
-    write("css comment in vue style", "T.vue", "<template><div/></template>\n<style>\n/* x */\n.a { color: red; }\n"
-          "</style>\n", True)
-    write("one-line /*! x */ in .rs", "inner.rs", "/*! Crate docs. */\npub fn a() {}\n", False)
-    write("multi-line /*! */ in .rs", "inner2.rs", "/*!\n Crate docs.\n More.\n*/\npub fn a() {}\n", True)
-
-    directives = {
-        "rb": ["# frozen_string_literal: true", "# encoding: utf-8", "x = 1 # rubocop:disable Style/Foo"],
-        "swift": ["// swiftlint:disable line_length"],
-        "js": ["import(/* webpackPrefetch: true */ \"./x\");", "import(/* webpackPreload: true */ \"./x\");",
-               "import(/* webpackMode: \"lazy\" */ \"./x\");"],
-        "py": ["x = f()  # type: ignore[attr-defined]", "import os  # noqa: F401", "x = 1  # pragma: no cover",
-               "# fmt: off", "x = 1  # pylint: disable=invalid-name", "# mypy: ignore-errors", "# pyright: basic",
-               "# ruff: noqa: E501", "# isort: skip_file"],
-        "ts": ["// eslint-disable-next-line no-console", "/* eslint-disable */", "// eslint-enable",
-               "// @ts-ignore", "// @ts-expect-error", "// @ts-nocheck", "// @ts-check", "// prettier-ignore",
-               "// biome-ignore lint/style/useConst: legacy", "/* istanbul ignore next */", "/* c8 ignore next */",
-               "/* v8 ignore next */", "/** @vitest-environment jsdom */", "/** @jest-environment jsdom */",
-               "import(/* @vite-ignore */ path);", "import(/* webpackChunkName: \"x\" */ \"./x\");",
-               "/// <reference types=\"vite/client\" />"],
-        "go": ["//go:build linux", "//go:generate stringer -type=X", "//go:embed static", "// +build linux",
-               "f() //nolint:errcheck"],
-        "cpp": ["f(); // NOLINT", "// NOLINTNEXTLINE(bugprone-x)", "// clang-format off", "// clang-format on",
-                "#include <a.h> // IWYU pragma: keep"],
-        "sh": ["# shellcheck disable=SC2086"],
+def run_edit(
+    path: Path,
+    old: str,
+    new: str,
+    replace_all: bool = False,
+    env: dict[str, str] | None = None,
+) -> Proc:
+    """Run the hook on an Edit payload for a file that exists."""
+    tool_input: dict[str, object] = {
+        "file_path": str(path),
+        "old_string": old,
+        "new_string": new,
     }
-    for suffix, lines in directives.items():
-        for number, line in enumerate(lines):
-            write(f"directive {line!r}", f"dir{number}.{suffix}", line + "\n", False)
-    write("stacked reference directives", "refs.ts",
-          "/// <reference types=\"vite/client\" />\n/// <reference path=\"./x.d.ts\" />\n", False)
+    if replace_all:
+        tool_input["replace_all"] = True
+    payload = {"tool_name": "Edit", "tool_input": tool_input}
+    return launch(json.dumps(payload), env)
 
-    garbage = [
-        "", "not json", "null", "[]", "5",
-        json.dumps({"tool_name": "Edit"}),
-        json.dumps({"tool_name": "Edit", "tool_input": None}),
-        json.dumps({"tool_name": "Edit", "tool_input": {"file_path": 42}}),
-        json.dumps({"tool_name": "Edit", "tool_input": {"file_path": "/x.py", "old_string": 1, "new_string": 2}}),
-        json.dumps({"tool_name": "MultiEdit", "tool_input": {"file_path": "/x.py", "edits": "nope"}}),
-        json.dumps({"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/nope.ipynb",
-                                                                "new_source": "# x", "cell_id": "c1"}}),
-        json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo '# x' >> a.py"}}),
+
+def denies(proc: Proc) -> bool:
+    """Tell whether the hook output is a comment-guard deny."""
+    if '"deny"' not in proc.stdout:
+        return False
+    block = json.loads(proc.stdout)["hookSpecificOutput"]
+    return (
+        block.get("hookEventName") == "PreToolUse"
+        and block.get("permissionDecision") == "deny"
+        and "comment-guard" in block.get("permissionDecisionReason", "")
+    )
+
+
+def is_silent(proc: Proc) -> bool:
+    """Tell whether the hook allowed the call without any output."""
+    return (
+        proc.returncode == 0
+        and proc.stdout.strip() == ""
+        and proc.stderr == ""
+    )
+
+
+def reason_of(proc: Proc) -> str:
+    """Return the deny reason of a hook result."""
+    return str(
+        json.loads(proc.stdout)["hookSpecificOutput"][
+            "permissionDecisionReason"
+        ],
+    )
+
+
+def path_in_work(name: str, text: str | None = None) -> Path:
+    """Return a path in the scratch directory, creating the file if given."""
+    path = Path(WORK.name) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+    return path
+
+
+def docstring_of(length: int) -> str:
+    """Return a one-line docstring literal of the given text length."""
+    return '"""' + "x" * (length - 1) + '."""'
+
+
+def edit_adding_docstring(
+    doc_source: str,
+    name: str = "f.py",
+    header: str = "def f():\n    ",
+) -> Proc:
+    """Run an Edit that inserts a docstring into a one-function file."""
+    path = path_in_work(name, header + "pass\n")
+    return run_edit(path, header + "pass", header + doc_source + "\n    pass")
+
+
+def test_denies_module_docstring() -> None:
+    proc = run(
+        "Write",
+        str(path_in_work("new_module.py")),
+        '"""Does a thing."""\nx = 1\n',
+    )
+    assert denies(proc), proc.stdout
+    assert "module docstring" in reason_of(proc)
+
+
+def repo_requiring_module_docstrings(name: str) -> Path:
+    """Return a file path in a git repo whose ruff config selects D."""
+    root = path_in_work(name)
+    (root / ".git").mkdir(parents=True, exist_ok=True)
+    (root / "ruff.toml").write_text(
+        '[lint]\nselect = ["D", "I"]\n', encoding="utf-8"
+    )
+    return root / "pkg" / "mod.py"
+
+
+def test_module_docstring_allowed_when_repo_ruff_requires_it() -> None:
+    target = repo_requiring_module_docstrings("ruffrepo")
+    proc = run("Write", str(target), '"""Does a thing."""\nx = 1\n')
+    assert is_silent(proc), proc.stdout
+
+
+def test_module_docstring_allowed_in_heredoc_when_repo_requires_it() -> None:
+    target = repo_requiring_module_docstrings("ruffheredoc")
+    proc = run_bash(f"cat > {target} <<'EOF'\n" + '"""Module."""\nx = 1\nEOF')
+    assert is_silent(proc), proc.stdout
+
+
+def test_module_docstring_denied_when_repo_ignores_d100() -> None:
+    target = repo_requiring_module_docstrings("ruffignore")
+    (target.parents[1] / "ruff.toml").write_text(
+        '[lint]\nselect = ["D"]\nignore = ["D100"]\n', encoding="utf-8"
+    )
+    proc = run("Write", str(target), '"""Does a thing."""\nx = 1\n')
+    assert denies(proc), proc.stdout
+    assert "module docstring" in reason_of(proc)
+
+
+def test_module_docstring_still_denied_without_repo_config() -> None:
+    root = path_in_work("plainrepo")
+    (root / ".git").mkdir(parents=True, exist_ok=True)
+    proc = run("Write", str(root / "mod.py"), '"""Does a thing."""\nx = 1\n')
+    assert denies(proc), proc.stdout
+    assert "module docstring" in reason_of(proc)
+
+
+def test_denies_multi_sentence_docstring() -> None:
+    proc = edit_adding_docstring('"""Do one. Do two."""')
+    assert denies(proc), proc.stdout
+    assert "one sentence" in reason_of(proc)
+    assert "`f`" in reason_of(proc)
+
+
+def test_denies_multiline_docstring() -> None:
+    proc = edit_adding_docstring('"""Do one.\n\n    More detail.\n    """')
+    assert denies(proc), proc.stdout
+    assert "one line" in reason_of(proc)
+
+
+def test_denies_docstring_over_72() -> None:
+    proc = edit_adding_docstring(docstring_of(DOC_LIMIT + 1))
+    assert denies(proc), proc.stdout
+    assert "72" in reason_of(proc)
+
+
+def test_allows_docstring_at_72() -> None:
+    assert is_silent(edit_adding_docstring(docstring_of(DOC_LIMIT)))
+
+
+def test_allows_carried_legacy_docstring() -> None:
+    legacy = (
+        'def f():\n    """Do one.\n\n    Do two. Do three.\n    """\n'
+        "    return 1\n"
+    )
+    path = path_in_work("legacy.py", legacy)
+    assert is_silent(run_edit(path, "return 1", "return 2"))
+
+
+def test_allows_write_with_short_docstrings() -> None:
+    text = (
+        'class A:\n    """Hold a value."""\n\n'
+        '    def get(self):\n        """Return it."""\n'
+    )
+    proc = run("Write", str(path_in_work("short.py")), text)
+    assert is_silent(proc)
+
+
+def test_ignores_pyi_files() -> None:
+    text = '"""Stub module."""\ndef f() -> int: ...\n'
+    proc = run("Write", str(path_in_work("stub.pyi")), text)
+    assert is_silent(proc)
+
+
+def test_heredoc_module_docstring_denied() -> None:
+    target = path_in_work("viaheredoc.py")
+    proc = run_bash(f"cat > {target} <<'EOF'\n" + '"""Module."""\nx = 1\nEOF')
+    assert denies(proc), proc.stdout
+    assert "module docstring" in reason_of(proc)
+
+
+def test_heredoc_short_docstrings_allowed() -> None:
+    target = path_in_work("okheredoc.py")
+    body = 'def f():\n    """Do it."""\nEOF'
+    assert is_silent(run_bash(f"cat > {target} <<'EOF'\n" + body))
+
+
+def test_abbreviations_are_not_sentence_ends() -> None:
+    doc = '"""Return a value, e.g. an int or i.e. a str."""'
+    assert is_silent(edit_adding_docstring(doc))
+
+
+def test_question_and_exclamation_end_sentences() -> None:
+    assert denies(edit_adding_docstring('"""Is it? Yes."""', name="q.py"))
+    assert denies(edit_adding_docstring('"""Stop! Go."""', name="e.py"))
+
+
+def test_replace_all_judges_every_added_docstring() -> None:
+    path = path_in_work(
+        "many.py",
+        "def a():\n    pass\n\n\ndef b():\n    pass\n",
+    )
+    proc = run_edit(
+        path,
+        "    pass",
+        '    """One. Two."""\n    pass',
+        replace_all=True,
+    )
+    assert denies(proc), proc.stdout
+    assert "`a`" in reason_of(proc)
+    assert "`b`" in reason_of(proc)
+
+
+def test_edit_without_replace_all_touches_first_occurrence_only() -> None:
+    path = path_in_work(
+        "first.py",
+        "def a():\n    pass\n\n\ndef b():\n    pass\n",
+    )
+    proc = run_edit(path, "    pass", '    """One. Two."""\n    pass')
+    assert denies(proc), proc.stdout
+    assert "`a`" in reason_of(proc)
+    assert "`b`" not in reason_of(proc)
+
+
+def test_unreadable_file_skips_docstring_check() -> None:
+    missing = Path(WORK.name) / "absent" / "nothing.py"
+    assert is_silent(run_edit(missing, "x", '"""Two. Sentences."""\nx'))
+
+
+def test_syntax_error_in_new_text_is_not_denied() -> None:
+    path = path_in_work("broken.py", "def f():\n    pass\n")
+    assert is_silent(run_edit(path, "pass", '"""One. Two."""\n    def ('))
+
+
+def test_async_def_is_judged() -> None:
+    proc = edit_adding_docstring(
+        '"""One. Two."""',
+        name="a.py",
+        header="async def f():\n    ",
+    )
+    assert denies(proc), proc.stdout
+
+
+def test_nested_class_is_judged() -> None:
+    path = path_in_work("nested.py", "class A:\n    class B:\n        pass\n")
+    proc = run_edit(path, "        pass", '        """One. Two."""')
+    assert denies(proc), proc.stdout
+    assert "`B`" in reason_of(proc)
+
+
+def test_overload_stubs_without_docstrings_pass() -> None:
+    text = (
+        "from typing import overload\n\n\n"
+        "@overload\ndef f(a: int) -> int: ...\n"
+        "@overload\ndef f(a: str) -> str: ...\n"
+    )
+    assert is_silent(run("Write", str(path_in_work("over.py")), text))
+
+
+def test_docstring_escape_hatch() -> None:
+    path = path_in_work("hatch.py", "def f():\n    pass\n")
+    proc = run_edit(path, "pass", '"""One. Two."""', env=HATCH)
+    assert is_silent(proc)
+
+
+def test_sample_cap_applies_to_docstring_violations() -> None:
+    body = "".join(f"def f{i}():\n    '''One. Two.'''\n" for i in range(6))
+    proc = run("Write", str(path_in_work("capped.py")), body)
+    assert denies(proc), proc.stdout
+    assert "and 2 more" in reason_of(proc)
+
+
+def table_failures() -> int:
+    """Run the Edit and Write tables and return the failure count."""
+    bad = 0
+    for tool, path, new, old, label in DENY:
+        proc = run(tool, path, new, old)
+        if not (proc.returncode == 0 and denies(proc) and proc.stderr == ""):
+            bad += 1
+            print(f"DENY FAIL ({label}): out={proc.stdout[:160]!r}")
+    for tool, path, new, old, label in ALLOW:
+        if not is_silent(run(tool, path, new, old)):
+            bad += 1
+            print(f"ALLOW FAIL ({label})")
+    return bad
+
+
+def payload_failures() -> int:
+    """Run the garbage, escape hatch and sample cap checks."""
+    bad = 0
+    for raw in GARBAGE_INPUTS:
+        if not is_silent(launch(raw)):
+            bad += 1
+            print(f"GARBAGE FAIL {raw!r}")
+    if not is_silent(run("Edit", "a.py", "# narrate\nx = 1", env=HATCH)):
+        bad += 1
+        print("ESCAPE HATCH FAIL")
+    cap = run("Edit", "a.py", "# 1\n# 2\n# 3\n# 4\n# 5\n# 6\nx = 1")
+    if "and 2 more" not in cap.stdout:
+        bad += 1
+        print(f"SAMPLE CAP FAIL: {cap.stdout[:300]!r}")
+    return bad
+
+
+def bash_failures() -> int:
+    """Run the heredoc tables and the shell escape hatch."""
+    bad = 0
+    for command, label in BASH_DENY:
+        proc = run_bash(command)
+        if not (proc.returncode == 0 and denies(proc) and proc.stderr == ""):
+            bad += 1
+            print(f"BASH DENY FAIL ({label}): out={proc.stdout[:160]!r}")
+    for command, label in BASH_ALLOW:
+        if not is_silent(run_bash(command)):
+            bad += 1
+            print(f"BASH ALLOW FAIL ({label})")
+    hatch = "cat > a.py <<'EOF'\n# narrate\nx = 1\nEOF"
+    if not is_silent(run_bash(hatch, env=HATCH)):
+        bad += 1
+        print("BASH HATCH FAIL")
+    return bad
+
+
+def docstring_failures(checks: list[Callable[[], None]]) -> int:
+    """Run the docstring checks and return the failure count."""
+    bad = 0
+    for check in checks:
+        try:
+            check()
+        except AssertionError as error:
+            bad += 1
+            print(f"DOC FAIL {check.__name__}: {error}")
+    return bad
+
+
+def doc_checks() -> list[Callable[[], None]]:
+    """Return every docstring check defined in this file."""
+    return [
+        value
+        for key, value in sorted(globals().items())
+        if key.startswith("test_")
     ]
-    for raw in garbage:
-        checks += 1
-        rc, out, err = run(None, raw)
-        if not (rc == 0 and out == "" and not err):
-            bad += 1
-            print(f"garbage {raw[:60]!r} -> rc={rc} out={out[:80]!r} err={err[-160:]!r}")
 
-    scan_path = put("scan/s.py", "#!/usr/bin/env python3\nx = 1  # noqa\ny = 2  # real\n")
-    for args, wanted, unwanted in (
-            (["--scan"], [f"{scan_path}:3: # real"], [":1:", ":2:"]),
-            (["--scan", "--raw"], [f"{scan_path}:1:", f"{scan_path}:2:", f"{scan_path}:3:"], [])):
-        checks += 1
-        done = subprocess.run(["python3", hook, *args, scan_path], capture_output=True, text=True, timeout=10)
-        lines = done.stdout.splitlines()
-        if done.returncode != 0 or any(not any(line.startswith(w) for line in lines) for w in wanted) \
-                or any(u in done.stdout for u in unwanted):
-            bad += 1
-            print(f"SCAN FAIL {args} -> rc={done.returncode} out={done.stdout[:300]!r} err={done.stderr[-200:]!r}")
 
-print(f"hook: {hook}\nchecks: {checks}, slowest run: {slowest * 1000:.0f} ms, FAILURES: {bad}")
-print(("FAIL " if bad else "PASS ") + f"{checks - bad}/{checks}")
-sys.exit(1 if bad else 0)
+def main() -> int:
+    """Run the matrix, print the summary and return the exit code."""
+    checks = doc_checks()
+    bad = (
+        table_failures()
+        + payload_failures()
+        + bash_failures()
+        + docstring_failures(checks)
+    )
+    docs = len(checks)
+    total = (
+        len(DENY)
+        + len(ALLOW)
+        + len(GARBAGE_INPUTS)
+        + 2
+        + len(BASH_DENY)
+        + len(BASH_ALLOW)
+        + 1
+        + docs
+    )
+    print(f"hook: {HOOK}")
+    print(
+        f"deny: {len(DENY)}, allow: {len(ALLOW)}, "
+        f"garbage: {len(GARBAGE_INPUTS)}, hatch+cap: 2, "
+        f"bash deny: {len(BASH_DENY)}, bash allow: {len(BASH_ALLOW)}, "
+        f"bash hatch: 1, docstring: {docs}",
+    )
+    print(f"{'FAIL' if bad else 'PASS'} {total - bad}/{total}")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+import json
+from datetime import date
+from pathlib import Path
+
+HABITS_FILE = Path.home() / ".claude" / "lessons" / "habits.json"
+BLOCK_START = "=== NAWYKI ==="
+BLOCK_END = "=== KONIEC NAWYKÓW ==="
+HEADER = (
+    "Stan z {day}, {count} reguł. Zakres: [global] — każde repo; [python]/[typescript]/[c] — "
+    "repo z plikami w tym języku; [repo:acme/<nazwa>] — tylko to repo."
+)
+
+
+def habit_line(habit: dict[str, object]) -> str:
+    """Render one habit as a single prompt line."""
+    return f"{habit['id']} [{habit['scope']}] {habit['rule']}"
+
+
+def main() -> None:
+    """Print the NAWYKI block for the Bitbucket sweep routines."""
+    habits = json.loads(HABITS_FILE.read_text())["habits"]
+    ordered = sorted(habits, key=lambda habit: (-int(habit["count"]), str(habit["id"])))
+    lines = [BLOCK_START, HEADER.format(day=date.today().isoformat(), count=len(ordered))]
+    lines.extend(habit_line(habit) for habit in ordered)
+    lines.append(BLOCK_END)
+    print("\n".join(lines))
+
+
+main()

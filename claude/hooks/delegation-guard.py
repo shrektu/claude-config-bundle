@@ -1,30 +1,49 @@
 #!/usr/bin/env python3
-"""PreToolUse(Agent|Task) hook: developer and codex-runner may only be spawned against a complete plan file."""
+"""PreToolUse(Agent|Task) hook: an implementer may only be spawned with a complete delegation prompt."""
+
 import json
-import os
 import re
 import sys
-from collections.abc import Iterator
 from typing import Callable, NamedTuple
 
-DEVELOPER = "developer"
-CODEX_RUNNER = "codex-runner"
-REVIEW_MODES = ("plan", "code")
-ACCEPTANCE_HEADING_RE = re.compile(r"(?i)^##[ \t]+acceptance_criteria[ \t]*$")
-TEST_PLAN_HEADING_RE = re.compile(r"(?i)^##[ \t]+test_plan[ \t]*$")
-COMMANDS_HEADING_RE = re.compile(r"(?i)^##[ \t]+commands[ \t]*$")
-QUALITY_LINE_RE = re.compile(r"^[ \t\-*]*Quality:.*quality-gate")
-SECTION_END_RE = re.compile(r"^#{1,2}[ \t]")
-FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
+IMPLEMENTER_TYPES = ("implementer", "implementer-strong")
+ACCEPTANCE_MARKERS = ("acceptance_criteria", "acceptance criteria")
 VERIFY_MARKER = "verify --"
-REPO_BOUNDARY_MARKERS = ("may not touch", "only touch", "must not touch", "do not modify anything under")
+REPO_BOUNDARY_MARKERS = (
+    "may not touch",
+    "only touch",
+    "must not touch",
+    "do not modify anything under",
+)
+PHASE_MARKERS = ("tdd_phases", "tdd phases")
+SEARCH_AGENT_TYPES = ("Explore", "general-purpose")
+SEARCH_AGENT_MODEL = "sonnet"
+GUARD_PREFIX = "delegation-guard: "
+SEARCH_MODEL_REASON = GUARD_PREFIX + "search agent defaults to sonnet"
+REUSE_LINE_RE = re.compile(r"^\s*reuse\b", re.IGNORECASE | re.MULTILINE)
+FIX_ROUND_LINE_RE = re.compile(r"^\s*findings\b", re.IGNORECASE | re.MULTILINE)
+GIT_SAFETY_MARKER = "Never revert or discard changes you did not make"
+CLASS_MARKERS = (
+    "class\ns",
+    "class\nm",
+    "class\nl",
+    "class\nxl",
+    "class: s",
+    "class: m",
+    "class: l",
+    "class: xl",
+    "class s",
+    "class m",
+    "class l",
+    "class xl",
+)
 ABSOLUTE_PATH_RE = re.compile(r"(^|[\s`'\"(\[=])/[A-Za-z0-9_./-]+")
-PLAN_FILE_RE = re.compile(r"(?m)^[ \t\-*]*plan_file:[ \t]*(.*?)[ \t]*$")
-MODE_RE = re.compile(r"(?m)^[ \t\-*]*mode:[ \t]*(.*?)[ \t]*$")
-PROJECT_PATH_RE = re.compile(r"(?m)^[ \t\-*]*project_path:[ \t]*(.*?)[ \t]*$")
-EMPTY_EXEMPT_RE = re.compile(r"(?m)^[ \t\-*]*tdd_exempt:[ \t]*$")
-VALUE_QUOTES = "`'\""
-MAX_PLAN_BYTES = 1000000
+
+GIT_SAFETY_LINE = (
+    GIT_SAFETY_MARKER
+    + " (checkout/restore/stash/reset/clean are blocked by a hook); "
+    "if you think a revert is needed, stop and report."
+)
 SUBAGENT_KEYS = ("subagent_type", "agent_type")
 
 
@@ -33,76 +52,103 @@ class Requirement(NamedTuple):
     present: Callable
 
 
-def unfenced_lines(text: str) -> Iterator[str]:
-    fenced = False
-    for line in text.splitlines():
-        if FENCE_RE.match(line):
-            fenced = not fenced
-            continue
-        if not fenced:
-            yield line
-
-
-def section_lines(plan: str, heading_re: re.Pattern[str]) -> Iterator[str]:
-    inside = False
-    for line in unfenced_lines(plan):
-        if inside and SECTION_END_RE.match(line):
-            inside = False
-        if heading_re.match(line):
-            inside = True
-        elif inside:
-            yield line
-
-
-def has_filled_section(plan: str, heading_re: re.Pattern[str]) -> bool:
-    return any(line.strip() for line in section_lines(plan, heading_re))
-
-
-def has_quality_gate_line(plan: str) -> bool:
-    return any(QUALITY_LINE_RE.match(line) for line in section_lines(plan, COMMANDS_HEADING_RE))
-
-
-def _has_any(text, markers):
+def _has_any(text: str, markers: tuple[str, ...]) -> bool:
+    """Tell whether the text contains any marker, ignoring case."""
     lowered = text.lower()
     return any(marker.lower() in lowered for marker in markers)
 
 
-PLAN_REQUIREMENTS = (
-    Requirement("a filled `## acceptance_criteria` section in the plan file (outside code fences), saying what "
-                "must be true when the task is done",
-                lambda plan: has_filled_section(plan, ACCEPTANCE_HEADING_RE)),
-    Requirement("a filled `## test_plan` section in the plan file (outside code fences), listing the tests to "
-                "write red first",
-                lambda plan: has_filled_section(plan, TEST_PLAN_HEADING_RE)),
-    Requirement("a `Quality:` line in the plan's `## commands` section that runs `quality-gate` through "
-                "verify (outside code fences)",
-                has_quality_gate_line),
-)
+def _is_fix_round(text: str) -> bool:
+    """Tell whether the prompt has a findings section."""
+    return bool(FIX_ROUND_LINE_RE.search(text))
+
+
+def _is_new_task(text: str) -> bool:
+    """Tell whether the prompt starts a task rather than a fix round."""
+    return _has_any(text, PHASE_MARKERS) and not _is_fix_round(text)
+
+
+def _reuse_requirement_met(text: str) -> bool:
+    """Tell whether the prompt needs no reuse section or has one."""
+    return not _is_new_task(text) or bool(REUSE_LINE_RE.search(text))
+
+
 REQUIREMENTS = (
-    Requirement("the test commands as `~/.claude/bin/verify -- <command>` (the plan or prompt must contain "
-                "`verify --`)",
-                lambda text: VERIFY_MARKER in text.lower()),
-    Requirement("at least one absolute path, so the agent does not guess where the code lives",
-                lambda text: bool(ABSOLUTE_PATH_RE.search(text))),
-    Requirement('the repo boundary, e.g. "You may only touch <paths>; you may not touch <paths>"',
-                lambda text: _has_any(text, REPO_BOUNDARY_MARKERS)),
+    Requirement(
+        "an `acceptance_criteria:` section saying what must be true "
+        "when the task is done",
+        lambda text: _has_any(text, ACCEPTANCE_MARKERS),
+    ),
+    Requirement(
+        "the test command to run as `~/.claude/bin/verify -- <command>` "
+        "(the prompt must contain `verify --`)",
+        lambda text: VERIFY_MARKER in text.lower(),
+    ),
+    Requirement(
+        "at least one absolute path, so the implementer does not guess "
+        "where the code lives",
+        lambda text: bool(ABSOLUTE_PATH_RE.search(text)),
+    ),
+    Requirement(
+        f'the git-safety line: "{GIT_SAFETY_LINE}"',
+        lambda text: GIT_SAFETY_MARKER.lower() in text.lower(),
+    ),
+    Requirement(
+        "the repo boundary, e.g. "
+        '"Repos: you may only touch <paths>; you may not touch <paths>"',
+        lambda text: _has_any(text, REPO_BOUNDARY_MARKERS),
+    ),
+    Requirement(
+        "either a `tdd_phases` section (new task) or a `findings` list "
+        "(fix round) — without them the implementer has no phase ladder "
+        "to work",
+        lambda text: _has_any(text, PHASE_MARKERS) or _is_fix_round(text),
+    ),
+    Requirement(
+        "the task `class` (S, M, L or XL), which sets the TDD ladder "
+        "the implementer works",
+        lambda text: _has_any(text, CLASS_MARKERS) or _is_fix_round(text),
+    ),
+    Requirement(
+        "a `reuse` section: the existing helpers, types, constants and "
+        "components this milestone must use (file:line), or "
+        "`none — searched: <terms>`",
+        _reuse_requirement_met,
+    ),
 )
 
-PLAN_FILE_HINT = "a `plan_file: <absolute path to an existing plan file>` line"
-PROJECT_PATH_HINT = "a `project_path: <absolute path to an existing project directory>` line"
-BARE_MODEL_REASON = ("a bare `model` without `subagent_type` loses the agent contract and its reasoning effort. "
-                     f"Spawn `{DEVELOPER}` instead (see the `delegate` skill).")
+BARE_MODEL_REASON = (
+    "a bare `model` without `subagent_type` loses the agent contract "
+    "and its reasoning effort. Implementation goes to `implementer` "
+    "(Sonnet 5.5, effort medium) instead — see the `delegate` skill."
+)
 
 
-def deny(reason):
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": f"delegation-guard: {reason}",
-        }
-    }))
+def deny(reason: str) -> None:
+    """Print a deny decision and exit."""
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": GUARD_PREFIX + reason,
+                }
+            }
+        )
+    )
     sys.exit(0)
+
+
+def default_search_model(tool_input: dict[str, object]) -> None:
+    """Print an allow decision that sets the search agent's model."""
+    decision = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow",
+        "permissionDecisionReason": SEARCH_MODEL_REASON,
+        "updatedInput": {**tool_input, "model": SEARCH_AGENT_MODEL},
+    }
+    print(json.dumps({"hookSpecificOutput": decision}))
 
 
 def subagent_type(tool_input):
@@ -113,60 +159,14 @@ def subagent_type(tool_input):
     return None
 
 
-def field(pattern, prompt):
-    match = pattern.search(prompt)
-    return match.group(1).strip(VALUE_QUOTES) if match else ""
-
-
-def plan_path(prompt):
-    path = field(PLAN_FILE_RE, prompt)
-    return path if os.path.isabs(path) and os.path.isfile(path) else None
-
-
-def read_plan(path):
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        return handle.read(MAX_PLAN_BYTES)
-
-
-def deny_missing(agent, missing):
-    items = "".join(f"\n  - {hint}" for hint in missing)
-    deny(f"the prompt for `{agent}` is missing:{items}\nAdd them (the `delegate` skill has the template) and "
-         f"spawn it again.")
-
-
-def check_developer(prompt):
-    path = plan_path(prompt)
-    if path is None:
-        deny_missing(DEVELOPER, [PLAN_FILE_HINT])
-    plan = read_plan(path)
-    missing = [req.hint for req in PLAN_REQUIREMENTS if not req.present(plan)]
-    missing += [req.hint for req in REQUIREMENTS if not req.present(prompt + "\n" + plan)]
-    if EMPTY_EXEMPT_RE.search(prompt):
-        missing.append("a reason after `tdd_exempt:` (or drop the line)")
-    if missing:
-        deny_missing(DEVELOPER, missing)
-
-
-def check_codex_runner(prompt):
-    missing = []
-    if field(MODE_RE, prompt) not in REVIEW_MODES:
-        missing.append(f"a `mode: {'|'.join(REVIEW_MODES)}` line")
-    if plan_path(prompt) is None:
-        missing.append(PLAN_FILE_HINT)
-    project = field(PROJECT_PATH_RE, prompt)
-    if not (os.path.isabs(project) and os.path.isdir(project)):
-        missing.append(PROJECT_PATH_HINT)
-    if missing:
-        deny_missing(CODEX_RUNNER, missing)
-
-
-CHECKS = {DEVELOPER: check_developer, CODEX_RUNNER: check_codex_runner}
-
-
 def main():
     try:
         payload = json.load(sys.stdin)
-        if not isinstance(payload, dict) or payload.get("tool_name") not in (None, "Agent", "Task"):
+        if not isinstance(payload, dict) or payload.get("tool_name") not in (
+            None,
+            "Agent",
+            "Task",
+        ):
             return
         tool_input = payload.get("tool_input")
         if not isinstance(tool_input, dict):
@@ -177,11 +177,23 @@ def main():
             if isinstance(model, str) and model.strip():
                 deny(BARE_MODEL_REASON)
             return
-        check = CHECKS.get(agent)
-        prompt = tool_input.get("prompt")
-        if check is None or not isinstance(prompt, str):
+        has_model = isinstance(model, str) and bool(model.strip())
+        if agent in SEARCH_AGENT_TYPES and not has_model:
+            default_search_model(tool_input)
             return
-        check(prompt)
+        if agent not in IMPLEMENTER_TYPES:
+            return
+        prompt = tool_input.get("prompt")
+        if not isinstance(prompt, str):
+            return
+        missing = [req.hint for req in REQUIREMENTS if not req.present(prompt)]
+        if missing:
+            items = "".join(f"\n  - {hint}" for hint in missing)
+            deny(
+                f"the prompt for `{agent}` is missing:{items}\n"
+                "Add them (the `delegate` skill has the template) "
+                "and spawn it again."
+            )
     except SystemExit:
         raise
     except Exception:

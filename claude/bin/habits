@@ -1,0 +1,517 @@
+#!__HOME__/.pyenv/versions/3.14.3/bin/python3
+"""Store short rules learned from reviews and print the relevant ones.
+
+The store is a JSON file (HABITS_FILE, default ~/.claude/lessons/habits.json).
+`list` prints the habits that apply to a repository: global ones, the ones
+for the languages the repository contains and the ones scoped to its origin.
+"""
+
+import argparse
+import dataclasses
+import fcntl
+import json
+import os
+import re
+import sys
+import tempfile
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from enum import IntEnum, StrEnum
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
+
+from git_remote import git_output, origin_slug
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
+STORE_ENV = "HABITS_FILE"
+DEFAULT_STORE = "~/.claude/lessons/habits.json"
+STORE_VERSION = 1
+ENCODING = "utf-8"
+LOCK_SUFFIX = ".lock"
+TEMP_SUFFIX = ".tmp"
+JSON_INDENT = 2
+ID_PREFIX = "H"
+ID_PATTERN = re.compile(r"^H(\d+)$")
+ID_DIGITS = 3
+DEFAULT_MAX_CHARS = 1500
+GLOBAL_SCOPE = "global"
+REPO_SCOPE_PREFIX = "repo:"
+REPO_SCOPE_PATTERN = re.compile(r"^repo:[^/\s]+/[^/\s]+$")
+HEADER = "Nawyki z review ({count}):"
+COUNT_MARK = "\N{MULTIPLICATION SIGN}"
+HABIT_LINE = "{id} [{scope}] {rule} — {why} ({count}" + COUNT_MARK + ")"
+MORE_LINE = "… {count} more: habits list --all"
+ERROR_PREFIX = "habits: "
+NUL = "\0"
+
+
+class Language(StrEnum):
+    """Language scope names."""
+
+    PYTHON = "python"
+    TYPESCRIPT = "typescript"
+    JAVASCRIPT = "javascript"
+    C = "c"
+    CPP = "cpp"
+
+
+LANGUAGE_SCOPES = frozenset(Language)
+SUFFIX_LANGUAGE = {
+    ".py": Language.PYTHON,
+    ".pyi": Language.PYTHON,
+    ".ts": Language.TYPESCRIPT,
+    ".tsx": Language.TYPESCRIPT,
+    ".mts": Language.TYPESCRIPT,
+    ".cts": Language.TYPESCRIPT,
+    ".js": Language.JAVASCRIPT,
+    ".jsx": Language.JAVASCRIPT,
+    ".mjs": Language.JAVASCRIPT,
+    ".cjs": Language.JAVASCRIPT,
+    ".c": Language.C,
+    ".h": Language.C,
+    ".cpp": Language.CPP,
+    ".cc": Language.CPP,
+    ".cxx": Language.CPP,
+    ".hpp": Language.CPP,
+    ".hh": Language.CPP,
+}
+
+
+class ExitCode(IntEnum):
+    """Process exit codes."""
+
+    OK = 0
+    NOT_FOUND = 1
+    USAGE = 2
+
+
+class HabitsError(Exception):
+    """A failure reported to the user with exit code 2."""
+
+
+@dataclass(slots=True)
+class Source:
+    """One review thread a habit was learned from."""
+
+    ref: str
+    reviewer: str
+    date: str
+
+
+@dataclass(slots=True)
+class Habit:
+    """A rule learned from reviews."""
+
+    id: str
+    scope: str
+    rule: str
+    why: str
+    count: int
+    created: str
+    last_seen: str
+    sources: list[Source]
+
+
+@dataclass(slots=True)
+class Store:
+    """The whole habits store."""
+
+    version: int
+    habits: list[Habit]
+
+
+def store_path() -> Path:
+    """Return the store location, honouring the HABITS_FILE override."""
+    return Path(os.environ.get(STORE_ENV) or DEFAULT_STORE).expanduser()
+
+
+def today() -> str:
+    """Return today's local date in ISO format."""
+    return datetime.now(UTC).astimezone().date().isoformat()
+
+
+def iso_date(text: str) -> str:
+    """Validate an ISO date argument and return it normalised."""
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError as error:
+        message = f"invalid date: {text!r}"
+        raise argparse.ArgumentTypeError(message) from error
+
+
+def validate_scope(text: str) -> str:
+    """Return the scope when it is global, a language or repo:<ws>/<slug>."""
+    if text == GLOBAL_SCOPE or text in LANGUAGE_SCOPES:
+        return text
+    if REPO_SCOPE_PATTERN.match(text):
+        return text
+    allowed = ", ".join(sorted({GLOBAL_SCOPE, *LANGUAGE_SCOPES}))
+    message = (
+        f"invalid scope {text!r}: use {allowed} or repo:<workspace>/<slug>"
+    )
+    raise argparse.ArgumentTypeError(message)
+
+
+def _field[T](record: object, key: str, kind: type[T]) -> T:
+    """Return record[key] when record is a mapping and the value is kind."""
+    if not isinstance(record, dict) or key not in record:
+        message = f"missing field {key!r}"
+        raise HabitsError(message)
+    value = record[key]
+    if not isinstance(value, kind) or isinstance(value, bool):
+        message = f"field {key!r} has the wrong type"
+        raise HabitsError(message)
+    return value
+
+
+def source_from_json(record: object) -> Source:
+    """Convert one JSON source record."""
+    return Source(
+        ref=_field(record, "ref", str),
+        reviewer=_field(record, "reviewer", str),
+        date=_field(record, "date", str),
+    )
+
+
+def habit_from_json(record: object) -> Habit:
+    """Convert one JSON habit record."""
+    return Habit(
+        id=_field(record, "id", str),
+        scope=_field(record, "scope", str),
+        rule=_field(record, "rule", str),
+        why=_field(record, "why", str),
+        count=_field(record, "count", int),
+        created=_field(record, "created", str),
+        last_seen=_field(record, "last_seen", str),
+        sources=[
+            source_from_json(item) for item in _field(record, "sources", list)
+        ],
+    )
+
+
+def store_from_text(text: str) -> Store:
+    """Parse the store; an empty file is an empty store."""
+    if not text.strip():
+        return Store(version=STORE_VERSION, habits=[])
+    try:
+        record = json.loads(text)
+    except ValueError as error:
+        message = f"corrupt store: {error}"
+        raise HabitsError(message) from error
+    version = _field(record, "version", int)
+    if version != STORE_VERSION:
+        message = f"unsupported store version {version}"
+        raise HabitsError(message)
+    return Store(
+        version=version,
+        habits=[
+            habit_from_json(item) for item in _field(record, "habits", list)
+        ],
+    )
+
+
+def store_to_text(store: Store) -> str:
+    """Serialise the store as JSON."""
+    record = dataclasses.asdict(store)
+    return json.dumps(record, ensure_ascii=False, indent=JSON_INDENT) + "\n"
+
+
+def read_store(path: Path) -> Store:
+    """Read the store; a missing file is an empty store."""
+    try:
+        text = path.read_text(encoding=ENCODING)
+    except FileNotFoundError:
+        return Store(version=STORE_VERSION, habits=[])
+    except (OSError, UnicodeDecodeError) as error:
+        message = f"cannot read {path}: {error}"
+        raise HabitsError(message) from error
+    try:
+        return store_from_text(text)
+    except HabitsError as error:
+        message = f"{path}: {error}"
+        raise HabitsError(message) from error
+
+
+def write_store(path: Path, store: Store) -> None:
+    """Write the store atomically through a temp file in the same dir."""
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding=ENCODING,
+        dir=path.parent,
+        prefix=path.name,
+        suffix=TEMP_SUFFIX,
+        delete=False,
+    ) as handle:
+        handle.write(store_to_text(store))
+        temp_path = Path(handle.name)
+    temp_path.replace(path)
+
+
+def update_store(change: Callable[[Store], bool]) -> None:
+    """Apply change under the store lock; write only when it returns True."""
+    path = store_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(path.name + LOCK_SUFFIX)
+        with lock_path.open("a", encoding=ENCODING) as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            store = read_store(path)
+            if change(store):
+                write_store(path, store)
+    except OSError as error:
+        message = f"cannot write {path}: {error}"
+        raise HabitsError(message) from error
+
+
+def find_source(store: Store, ref: str) -> Habit | None:
+    """Return the habit that already records ref, if any."""
+    for habit in store.habits:
+        if any(source.ref == ref for source in habit.sources):
+            return habit
+    return None
+
+
+def find_habit(store: Store, habit_id: str) -> Habit:
+    """Return the habit with habit_id or fail."""
+    for habit in store.habits:
+        if habit.id == habit_id:
+            return habit
+    message = f"unknown habit {habit_id}"
+    raise HabitsError(message)
+
+
+def next_habit_id(habits: Iterable[Habit]) -> str:
+    """Allocate the id after the highest numeric one."""
+    numbers = [
+        int(match.group(1))
+        for habit in habits
+        if (match := ID_PATTERN.match(habit.id))
+    ]
+    return f"{ID_PREFIX}{max(numbers, default=0) + 1:0{ID_DIGITS}d}"
+
+
+def cmd_add(args: argparse.Namespace) -> ExitCode:
+    """Add a habit, or report the one that already records the source."""
+    day = args.date or today()
+    source = Source(ref=args.source, reviewer=args.reviewer, date=day)
+    printed: list[str] = []
+
+    def change(store: Store) -> bool:
+        """Append the new habit unless its source is known."""
+        known = find_source(store, args.source)
+        if known is not None:
+            printed.append(known.id)
+            return False
+        habit = Habit(
+            id=next_habit_id(store.habits),
+            scope=args.scope,
+            rule=args.rule,
+            why=args.why,
+            count=1,
+            created=day,
+            last_seen=day,
+            sources=[source],
+        )
+        store.habits.append(habit)
+        printed.append(habit.id)
+        return True
+
+    update_store(change)
+    print(*printed)
+    return ExitCode.OK
+
+
+def cmd_bump(args: argparse.Namespace) -> ExitCode:
+    """Count one more occurrence of a habit."""
+    day = args.date or today()
+
+    def change(store: Store) -> bool:
+        """Record the source on the habit unless it is known."""
+        habit = find_habit(store, args.id)
+        if find_source(store, args.source) is not None:
+            return False
+        habit.count += 1
+        habit.sources.append(
+            Source(ref=args.source, reviewer=args.reviewer, date=day)
+        )
+        habit.last_seen = max(habit.last_seen, day)
+        return True
+
+    update_store(change)
+    return ExitCode.OK
+
+
+def cmd_drop(args: argparse.Namespace) -> ExitCode:
+    """Remove a habit."""
+
+    def change(store: Store) -> bool:
+        """Remove the habit or fail when it is unknown."""
+        store.habits.remove(find_habit(store, args.id))
+        return True
+
+    update_store(change)
+    return ExitCode.OK
+
+
+def cmd_seen(args: argparse.Namespace) -> ExitCode:
+    """Exit 0 when the source ref is recorded on any habit."""
+    store = read_store(store_path())
+    if find_source(store, args.ref) is None:
+        return ExitCode.NOT_FOUND
+    return ExitCode.OK
+
+
+def languages_of(paths: Iterable[str]) -> set[str]:
+    """Return the language scopes of the given file paths."""
+    found: set[str] = set()
+    for name in paths:
+        language = SUFFIX_LANGUAGE.get(PurePosixPath(name).suffix)
+        if language is not None:
+            found.add(language)
+    return found
+
+
+def repo_scopes(start: Path) -> set[str]:
+    """Return the scopes relevant to the git repository containing start."""
+    scopes = {GLOBAL_SCOPE}
+    top = git_output(start, "rev-parse", "--show-toplevel")
+    if top is None:
+        return scopes
+    root = Path(top.strip())
+    listing = git_output(root, "ls-files", "-z") or ""
+    scopes |= languages_of(name for name in listing.split(NUL) if name)
+    slug = origin_slug(root)
+    if slug is not None:
+        scopes.add(f"{REPO_SCOPE_PREFIX}{slug}")
+    return scopes
+
+
+def ordered(habits: Iterable[Habit]) -> list[Habit]:
+    """Sort by count desc, then last_seen desc, then id."""
+    by_id = sorted(habits, key=lambda habit: habit.id)
+    return sorted(
+        by_id,
+        key=lambda habit: (habit.count, habit.last_seen),
+        reverse=True,
+    )
+
+
+def habit_line(habit: Habit) -> str:
+    """Format one habit for the list output."""
+    return HABIT_LINE.format(
+        id=habit.id,
+        scope=habit.scope,
+        rule=habit.rule,
+        why=habit.why,
+        count=habit.count,
+    )
+
+
+def _line_cost(line: str) -> int:
+    """Return the characters a printed line takes, newline included."""
+    return len(line) + 1
+
+
+def render_habits(habits: list[Habit], max_chars: int | None) -> list[str]:
+    """Return the output lines, capped at max_chars with a more line."""
+    if not habits:
+        return []
+    lines = [HEADER.format(count=len(habits))]
+    used = _line_cost(lines[0])
+    for index, habit in enumerate(habits):
+        line = habit_line(habit)
+        left_after = len(habits) - index - 1
+        reserve = (
+            _line_cost(MORE_LINE.format(count=left_after)) if left_after else 0
+        )
+        if max_chars is not None and (
+            used + _line_cost(line) + reserve > max_chars
+        ):
+            lines.append(MORE_LINE.format(count=len(habits) - index))
+            return lines
+        lines.append(line)
+        used += _line_cost(line)
+    return lines
+
+
+def cmd_list(args: argparse.Namespace) -> ExitCode:
+    """Print the habits relevant to a repository."""
+    store = read_store(store_path())
+    if args.all:
+        chosen = store.habits
+        cap = None
+    else:
+        start = Path(args.repo) if args.repo else Path.cwd()
+        scopes = repo_scopes(start)
+        chosen = [habit for habit in store.habits if habit.scope in scopes]
+        cap = args.max_chars
+    lines = render_habits(ordered(chosen), cap)
+    if lines:
+        print("\n".join(lines))
+    return ExitCode.OK
+
+
+def positive_int(text: str) -> int:
+    """Parse a positive integer argument."""
+    try:
+        value = int(text)
+    except ValueError as error:
+        message = f"not a number: {text!r}"
+        raise argparse.ArgumentTypeError(message) from error
+    if value <= 0:
+        message = f"must be positive: {text!r}"
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
+def add_source_options(parser: argparse.ArgumentParser) -> None:
+    """Add the options describing a review source."""
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--reviewer", required=True)
+    parser.add_argument("--date", type=iso_date)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the command line parser."""
+    parser = argparse.ArgumentParser(prog="habits", description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    add = commands.add_parser("add", help="add a habit")
+    add.add_argument("--scope", required=True, type=validate_scope)
+    add.add_argument("--rule", required=True)
+    add.add_argument("--why", required=True)
+    add_source_options(add)
+    add.set_defaults(handler=cmd_add)
+    bump = commands.add_parser("bump", help="count one more occurrence")
+    bump.add_argument("id")
+    add_source_options(bump)
+    bump.set_defaults(handler=cmd_bump)
+    drop = commands.add_parser("drop", help="remove a habit")
+    drop.add_argument("id")
+    drop.set_defaults(handler=cmd_drop)
+    seen = commands.add_parser("seen", help="exit 0 when a ref is recorded")
+    seen.add_argument("ref")
+    seen.set_defaults(handler=cmd_seen)
+    listing = commands.add_parser("list", help="print relevant habits")
+    listing.add_argument("--repo")
+    listing.add_argument("--all", action="store_true")
+    listing.add_argument(
+        "--max-chars", type=positive_int, default=DEFAULT_MAX_CHARS
+    )
+    listing.set_defaults(handler=cmd_list)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    """Run the command line and return the exit code."""
+    args = build_parser().parse_args(argv)
+    try:
+        return args.handler(args)
+    except HabitsError as error:
+        print(f"{ERROR_PREFIX}{error}", file=sys.stderr)
+        return ExitCode.USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

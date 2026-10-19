@@ -6,41 +6,20 @@
       "Bash(git diff*)",
       "Bash(git status*)",
       "Bash(git log*)",
-      "Agent(developer)",
       "Agent(codex-runner)",
-      "mcp__codex-worker__*"
+      "Agent(implementer)",
+      "Agent(implementer-strong)",
+      "mcp__codex-worker__*",
+      "Bash(python3 __HOME__/.claude/hooks/*)",
+      "Edit(/__HOME__/.claude/hooks/**)",
+      "Write(/__HOME__/.claude/hooks/**)"
     ],
     "deny": [
       "Bash(codex *)"
     ],
     "defaultMode": "auto"
   },
-  "model": "claude-opus-5-5",
-  "effortLevel": "high",
-  "statusLine": {
-    "type": "command",
-    "command": "bash __HOME__/.claude/statusline-command.sh"
-  },
-  "modelSettings": {
-    "claude-fable-5": {
-      "effortLevel": "high"
-    },
-    "claude-fable-5-1": {
-      "effortLevel": "high"
-    },
-    "claude-opus-5-5": {
-      "effortLevel": "high"
-    }
-  },
-  "autoCompactWindow": "200k",
-  "skipDangerousModePermissionPrompt": true,
-  "skipWorkflowUsageWarning": true,
-  "theme": "auto",
-  "editorMode": "normal",
-  "tui": "fullscreen",
-  "remoteControlAtStartup": true,
-  "inputNeededNotifEnabled": true,
-  "skipAutoPermissionPrompt": true,
+  "model": "opus[1m]",
   "hooks": {
     "PreToolUse": [
       {
@@ -63,12 +42,23 @@
             "command": "python3 __HOME__/.claude/hooks/git-policy.py",
             "timeout": 10,
             "statusMessage": "git-policy"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/comment-guard.py",
+            "timeout": 10,
+            "statusMessage": "comment-guard"
           },
           {
             "type": "command",
-            "command": "python3 __HOME__/.claude/hooks/bash-write-guard.py",
+            "command": "python3 __HOME__/.claude/hooks/tdd-guard.py",
             "timeout": 10,
-            "statusMessage": "bash-write-guard"
+            "statusMessage": "tdd-guard"
           }
         ]
       },
@@ -95,25 +85,24 @@
         ]
       },
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "mcp__codex-worker__.*",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 __HOME__/.claude/hooks/tdd-guard.py",
+            "command": "python3 __HOME__/.claude/hooks/codex-gate.py",
             "timeout": 10,
-            "statusMessage": "tdd-guard"
-          },
+            "statusMessage": "codex-gate"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
           {
             "type": "command",
-            "command": "python3 __HOME__/.claude/hooks/comment-guard.py",
-            "timeout": 10,
-            "statusMessage": "comment-guard"
-          },
-          {
-            "type": "command",
-            "command": "python3 __HOME__/.claude/hooks/lint-guard.py",
-            "timeout": 10,
-            "statusMessage": "lint-guard"
+            "command": "bash -c 'payload=$(cat); case \"$payload\" in *commit*) printf \"%s\" \"$payload\" | __HOME__/.pyenv/versions/3.14.3/bin/python3 __HOME__/.claude/hooks/standards-gate.py;; esac'",
+            "timeout": 1200,
+            "statusMessage": "standards-gate"
           }
         ]
       }
@@ -129,6 +118,28 @@
             "statusMessage": "repo-facts"
           }
         ]
+      },
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/session-start-marker.py",
+            "timeout": 10,
+            "statusMessage": "session-start-marker"
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.claude/bin/habits list --repo \"$CLAUDE_PROJECT_DIR\"",
+            "timeout": 10,
+            "statusMessage": "habits"
+          }
+        ]
       }
     ],
     "SubagentStop": [
@@ -141,9 +152,93 @@
             "statusMessage": "subagent-verify-check"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__HOME__/.pyenv/versions/3.14.3/bin/python3 __HOME__/.claude/hooks/standards-gate.py",
+            "timeout": 480,
+            "statusMessage": "standards-gate"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/context-guard.py",
+            "timeout": 10,
+            "statusMessage": "context-guard"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/autofix-on-edit.py",
+            "timeout": 40,
+            "statusMessage": "autofix"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/context-guard.py",
+            "timeout": 10,
+            "statusMessage": "context-guard"
+          }
+        ]
       }
     ]
   },
   "bashOutputMaxChars": 12000,
-  "taskOutputMaxChars": 8000
+  "taskOutputMaxChars": 8000,
+  "statusLine": {
+    "type": "command",
+    "command": "bash __HOME__/.claude/statusline-command.sh"
+  },
+  "enabledPlugins": {
+    "pyright-lsp@claude-plugins-official": true,
+    "typescript-lsp@claude-plugins-official": true,
+    "clangd-lsp@claude-plugins-official": true
+  },
+  "extraKnownMarketplaces": {
+    "whatsapp-claude-plugin": {
+      "source": {
+        "source": "github",
+        "repo": "Rich627/whatsapp-claude-plugin"
+      }
+    }
+  },
+  "effortLevel": "high",
+  "modelSettings": {
+    "claude-fable-5": {
+      "effortLevel": "high"
+    },
+    "claude-fable-5-1": {
+      "effortLevel": "high"
+    },
+    "claude-opus-5": {
+      "effortLevel": "xhigh"
+    }
+  },
+  "tui": "fullscreen",
+  "skipDangerousModePermissionPrompt": true,
+  "skipWorkflowUsageWarning": true,
+  "theme": "dark-ansi",
+  "editorMode": "normal",
+  "remoteControlAtStartup": true,
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true,
+  "skipAutoPermissionPrompt": true
 }

@@ -70,7 +70,7 @@ for d in bin hooks; do
 done
 [ ! -f "$HERE/claude/lint/ruff.toml" ] || install_file "$HERE/claude/lint/ruff.toml" "$HOME/.claude/lint/ruff.toml"
 install_file "$HERE/claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/codex_worker.py" 755
-install_file "$HERE/claude/mcp/codex-worker/codex_worker_test.py" "$HOME/.claude/mcp/codex-worker/codex_worker_test.py"
+[ ! -f "$HERE/claude/mcp/codex-worker/codex_worker_test.py" ] || install_file "$HERE/claude/mcp/codex-worker/codex_worker_test.py" "$HOME/.claude/mcp/codex-worker/codex_worker_test.py"
 install_file "$HERE/claude/mcp/codex-worker/requirements.txt" "$HOME/.claude/mcp/codex-worker/requirements.txt"
 printf 'CODEX_BIN=%s\n' "$CODEX_BIN" > "$HOME/.claude/mcp/codex-worker/.env"
 install_file "$HERE/codex/AGENTS.md" "$HOME/.codex/AGENTS.md"

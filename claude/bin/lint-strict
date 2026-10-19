@@ -1,0 +1,5707 @@
+#!__HOME__/.pyenv/versions/3.14.3/bin/python3
+"""Check only the changed lines of a git repository against language norms.
+
+The scope (working tree, index, merge-base or tracked files) decides which
+files and lines count as changed. Each language backend lints those files and
+only the violations located on changed lines are reported.
+
+Python: ruff with every rule and explicit complexity limits, ruff format,
+a docstring on every definition and mypy --strict (LINT_STRICT_MYPY, else
+the repo's .venv mypy, else uvx). JavaScript/TypeScript: the package's
+eslint with typescript-eslint strict, explicit return types and complexity
+limits, prettier, and tsc --noEmit per tsconfig (LINT_STRICT_TSC, else the
+package's tsc). C/C++: clang-tidy with cognitive-complexity and
+function-size limits, clang-format and, in Zephyr, checkpatch. A tool that
+cannot run is listed under "Not checked". Every language also gets the
+built-in magic-number rule: a magic number in a comparison (MAG001), a
+value repeated on three lines (MAG002) and a number in a delay (MAG003).
+The built-in habit rules (HAB<n>) report review habits that can be checked
+mechanically, such as a StrEnum value that repeats its name.
+"""
+
+import argparse
+import ast
+import bisect
+import datetime
+import difflib
+import enum
+import fcntl
+import fnmatch
+import functools
+import hashlib
+import itertools
+import json
+import os
+import re
+import shutil
+import string
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import tomllib
+import uuid
+from collections import Counter
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext, suppress
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, Self
+
+from git_remote import origin_slug
+from habit_rules import (
+    MAX_FILE_LINES,
+    HabitContext,
+    HabitHit,
+    line_count,
+    line_count_hits,
+    python_habit_hits,
+)
+from locale_habits import (
+    LOCALE_DIRS,
+    LocaleDocument,
+    locale_habit_hits,
+    parse_locale,
+    sibling_path,
+)
+from script_habits import script_habit_hits
+from magic_numbers import (
+    REPEAT_LINES,
+    MagicHit,
+    MagicRule,
+    python_magic_hits,
+    token_magic_hits,
+)
+from version_rules import (
+    OBJECT_HAS_OWN_YEAR,
+    PYTHON_EXPLICIT_OVERRIDE_MINOR,
+    FloorResolver,
+    python_version_hits,
+    script_version_hits,
+)
+from source_lexer import (
+    StaticLanguage,
+    parse_python,
+    static_is_test,
+    tokenize_source,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Sequence
+    from contextlib import AbstractContextManager
+
+EXIT_PASS = 0
+EXIT_FAIL = 1
+EXIT_USAGE = 2
+TEXT_ENCODING = "utf-8"
+DECODE_ERRORS = "replace"
+NEWLINE = "\n"
+NUL = "\0"
+DEFAULT_MAX_LINES = 60
+DEFAULT_LINE_LENGTH = 79
+MAX_LINE_LENGTH = 99
+LOG_DIR_ENV = "LINT_STRICT_LOG_DIR"
+RUFF_ENV = "LINT_STRICT_RUFF"
+DEFAULT_LOG_DIR = Path.home() / ".cache" / "claude-lint-strict"
+LOG_TIME_FORMAT = "%Y%m%d-%H%M%S"
+LOG_SUFFIX = ".txt"
+PROGRAM = "lint-strict"
+SUCCESS_VERDICT = "LINT-STRICT PASS"
+FAILURE_VERDICT = "LINT-STRICT FAIL"
+NO_CHANGED_FILES = "No changed files."
+NOT_CHECKED_HEADING = "Not checked:"
+FILE_READ_FAILED = "cannot read the file: {error}"
+SUPPRESSIONS_HEADING = "Suppressions added:"
+NO_TOOLS = "none"
+QUICK_REQUIRES_FIX = "--quick is only valid together with --fix"
+FIX_EXCLUSIVE = "--fix cannot be combined with --base, --staged or --tracked"
+LIST_INDENT = "  "
+
+GIT = "git"
+HEAD = "HEAD"
+MERGE_HEAD = "MERGE_HEAD"
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+PATHSPEC_SEPARATOR = "--"
+LITERAL_PATHSPECS_ENV = "GIT_LITERAL_PATHSPECS"
+LITERAL_PATHSPECS_ON = "1"
+DIFF_FLAGS = ("--no-color", "--no-ext-diff", "--no-textconv", "-M")
+REGULAR_FILE_MODES = frozenset({"100644", "100755"})
+RENAME_OR_COPY = frozenset({"R", "C"})
+DELETED = "D"
+RAW_NEW_MODE_FIELD = 1
+RAW_STATUS_FIELD = -1
+HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+DEFAULT_HUNK_COUNT = 1
+
+PYTHON_SHEBANG = re.compile(r"^#!.*\bpython[0-9.]*\b")
+NODE_SHEBANG = re.compile(r"^#!.*\bnode\b")
+SUPPRESSION_PATTERN = re.compile(
+    r"noqa|type:\s*ignore|eslint-disable|@ts-ignore|@ts-expect-error"
+    r"|NOLINT|pylint:\s*disable",
+    re.IGNORECASE,
+)
+
+TEST_FILE_PATTERNS = ("test_*.py", "*_test.py", "*-test.py", "conftest.py")
+STUB_SUFFIX = ".pyi"
+TEST_DIRECTORIES = frozenset({"tests", "test"})
+
+RUFF_TOOL = "ruff"
+RUFF_NOT_FOUND = "ruff not found (set LINT_STRICT_RUFF or put it on PATH)"
+RUFF_FAILED = "ruff failed"
+RUFF_IGNORED = (
+    "W191",
+    "E111",
+    "E114",
+    "E117",
+    "D206",
+    "D300",
+    "Q000",
+    "Q001",
+    "Q002",
+    "Q003",
+    "COM812",
+    "COM819",
+    "ISC001",
+    "ISC002",
+    "D203",
+    "D213",
+    "D100",
+    "D104",
+    "INP001",
+    "T201",
+    "T203",
+    "S603",
+    "S607",
+    "CPY001",
+    "FAST001",
+)
+RUFF_TYPING_ONLY_IMPORT_RULES = ("TC001", "TC002", "TC003")
+RUFF_TYPING_ONLY_IMPORT_SELECTORS = frozenset(
+    ("ALL", "TC", "TC0", "TC00", *RUFF_TYPING_ONLY_IMPORT_RULES),
+)
+RUFF_SELECT_KEYS = ("select", "extend-select")
+RUFF_IGNORE_KEYS = ("ignore", "extend-ignore")
+RUFF_MODULE_DOCSTRING_SELECTORS = frozenset(("ALL", "D", "D1", "D10", "D100"))
+RUFF_MODULE_DOCSTRING_IGNORES = frozenset(("D", "D1", "D10", "D100"))
+RUFF_ISORT_SECTION = "isort"
+RUFF_CONFIG_FLAG = "--config"
+RUFF_EXTEND_KEY = "extend"
+RUFF_LINT_SECTION = "lint"
+MAX_RUFF_EXTEND_DEPTH = 5
+RUFF_TEST_IGNORED = (
+    "D",
+    "S101",
+    "PLR2004",
+    "ANN201",
+    "SLF001",
+    "FBT001",
+    "FBT002",
+    "FBT003",
+    "INP001",
+    "PLC2701",
+)
+PEP257_CONFIG = 'lint.pydocstyle.convention="pep257"'
+MAX_CYCLOMATIC_COMPLEXITY = 10
+MAX_BRANCHES = 12
+MAX_STATEMENTS = 50
+MAX_RETURNS = 6
+MAX_ARGUMENTS = 5
+MAX_NESTED_BLOCKS = 4
+RUFF_COMPLEXITY_LIMITS = {
+    "lint.mccabe.max-complexity": MAX_CYCLOMATIC_COMPLEXITY,
+    "lint.pylint.max-branches": MAX_BRANCHES,
+    "lint.pylint.max-statements": MAX_STATEMENTS,
+    "lint.pylint.max-returns": MAX_RETURNS,
+    "lint.pylint.max-args": MAX_ARGUMENTS,
+    "lint.pylint.max-nested-blocks": MAX_NESTED_BLOCKS,
+}
+RUFF_CONFIG_OPTION = "--config"
+RUFF_PREVIEW_OPTION = "--preview"
+EXPLICIT_PREVIEW_CONFIG = "lint.explicit-preview-rules=true"
+RUFF_EXTEND_SELECT_OPTION = "--extend-select"
+RUFF_PREVIEW_RULES = ("PLR1702", "PLC2701")
+RUFF_CONFIG_ARGUMENTS = tuple(
+    argument
+    for override in (
+        PEP257_CONFIG,
+        EXPLICIT_PREVIEW_CONFIG,
+        *(f"{key}={value}" for key, value in RUFF_COMPLEXITY_LIMITS.items()),
+    )
+    for argument in (RUFF_CONFIG_OPTION, override)
+)
+RUFF_PREVIEW_ARGUMENTS = (
+    RUFF_PREVIEW_OPTION,
+    RUFF_EXTEND_SELECT_OPTION,
+    ",".join(RUFF_PREVIEW_RULES),
+)
+MYPY_TOOL = "mypy"
+MYPY_ENV = "LINT_STRICT_MYPY"
+UVX_TOOL = "uvx"
+UVX_PYTHON_OPTION = "--python"
+SYSTEM_PYTHON = "python3"
+VENV_PYTHON = Path(".venv") / "bin" / "python"
+MYPY_IMPORT_PROBE = ("-c", "import mypy")
+MYPY_MODULE_ARGUMENTS = ("-m", MYPY_TOOL)
+PYTHON_EXECUTABLE_OPTION = "--python-executable"
+MYPY_OPTIONS = (
+    "--strict",
+    "--show-error-codes",
+    "--show-column-numbers",
+    "--show-absolute-path",
+    "--no-error-summary",
+    "--no-pretty",
+    "--no-color-output",
+    "--hide-error-context",
+)
+MYPY_EXPLICIT_OVERRIDE_OPTIONS = (
+    "--enable-error-code",
+    "explicit-override",
+)
+MYPY_CACHE_OPTION = "--cache-dir"
+MYPY_EXPLICIT_PACKAGE_BASES_OPTION = "--explicit-package-bases"
+MYPY_SHADOW_OPTION = "--shadow-file"
+MYPY_DISABLE_ERROR_CODE_OPTION = "--disable-error-code"
+MYPY_UNFIXABLE_ERROR_CODES = ("import-untyped", "untyped-decorator")
+MYPY_DISABLED_ERROR_OPTIONS = tuple(
+    argument
+    for code in MYPY_UNFIXABLE_ERROR_CODES
+    for argument in (MYPY_DISABLE_ERROR_CODE_OPTION, code)
+)
+MYPY_DUPLICATE_MODULE = "Source file found twice under different module names"
+MYPYPATH_ENV = "MYPYPATH"
+INIT_FILE = "__init__.py"
+SOURCE_DIRECTORY = "src"
+PEP503_SEPARATORS = re.compile(r"[-_.]+")
+MYPY_CACHE_ROOT = Path.home() / ".cache" / "claude-lint-strict-mypy"
+CACHE_KEY_LENGTH = 16
+CACHE_DIR_ENV = "LINT_STRICT_CACHE_DIR"
+DEFAULT_CACHE_ROOT = Path.home() / ".cache" / "claude-lint-strict-cache"
+PRETTIER_CACHE = "prettier"
+TSC_CACHE = "tsc"
+JSCPD_CACHE = "jscpd"
+SLOTS_CACHE = "slots"
+CACHE_SUFFIX = ".json"
+CACHE_TEMP_SUFFIX = ".tmp"
+STDOUT_FIELD = "stdout"
+HEAVY_SLOTS_ENV = "LINT_STRICT_HEAVY_SLOTS"
+HEAVY_SLOTS_DEFAULT = 3
+HEAVY_SLOT_POLL_SECONDS = 0.25
+HEAVY_SLOT_MAX_WAIT_SECONDS = 900.0
+SLOT_FILE_MODE = 0o600
+SLOT_SUFFIX = ".lock"
+CACHE_PRUNE_MARKER = ".pruned"
+CACHE_PRUNE_INTERVAL_SECONDS = 60 * 60
+CACHE_ENTRY_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+CACHE_TEMP_MAX_AGE_SECONDS = 24 * 60 * 60
+IGNORE_FILES = (".prettierignore", ".gitignore")
+IGNORE_ABSENT = "absent"
+IGNORE_PRESENT = "present:"
+MYPY_NOT_FOUND = (
+    "mypy not found (set LINT_STRICT_MYPY, install it in .venv or install uv)"
+)
+MYPY_FAILED = "mypy failed"
+MYPY_RULE_PREFIX = "mypy:"
+MYPY_LINE = re.compile(
+    r"^(?P<path>.+?):(?P<line>\d+):(?:(?P<column>\d+):)? error: "
+    r"(?P<message>.*?)(?:  \[(?P<code>[\w-]+)\])?$",
+)
+RUFF_SYNTAX_RULE = "syntax-error"
+RUFF_DOCSTRING_PREFIX = "D1"
+STDIN_MARKER = "-"
+STDIN_FILENAME_OPTION = "--stdin-filename"
+ERROR_MARKER = "error"
+PYPROJECT = "pyproject.toml"
+RUFF_CONFIG_FILES = ("ruff.toml", ".ruff.toml")
+LINE_LENGTH_KEY = "line-length"
+LINE_LENGTH_SECTIONS = ("ruff", "black")
+REQUIRES_PYTHON_MINOR = re.compile(r"(?:>=|~=|==)\s*3\.(\d+)")
+TARGET_VERSION_PREFIX = "py3"
+PYTHON_VERSION_FILE = ".python-version"
+DOCKERFILE = "Dockerfile"
+PYTHON_VERSION_FILE_MINOR = re.compile(r"^\s*3\.(\d+)")
+DOCKERFILE_PYTHON_MINOR = re.compile(
+    r"^\s*FROM\s+(?:--\S+\s+)*(?:\S+/)?python:3\.(\d+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+VERSION_NUMBER = re.compile(r"(\d+\.\d+(?:\.\d+)*)")
+
+FORMAT_RULE = "FMT"
+FORMAT_MESSAGE = "{tool} would reformat lines {first}-{last}"
+RUFF_FORMAT_TOOL = "ruff format"
+FORMAT_COLUMN = 1
+EQUAL_OPCODE = "equal"
+INSERT_OPCODE = "insert"
+INSERTION_SPAN = 2
+
+DOCSTRING_RULE = "DOC100"
+DOCSTRING_TOOL = "lint-strict"
+DOCSTRING_MESSAGE = "Missing docstring in {kind} `{name}`"
+MODULE_SHAPE_RULE = "DOC101"
+MODULE_SHAPE_MESSAGE = "Module docstring — delete it"
+SHAPE_RULE = "DOC102"
+SHAPE_MESSAGE = (
+    "Docstring must be one line, one sentence, at most 72 characters"
+)
+MAX_DOCSTRING_LENGTH = 72
+SENTENCE_END = re.compile(r"(?<!e\.g)(?<!i\.e)[.!?]\s+\S", re.IGNORECASE)
+MODULE_LINE = 1
+DOCSTRING_COLUMN = 1
+OVERLOAD = "overload"
+
+
+class Language(enum.StrEnum):
+    """A language a changed file is written in."""
+
+    PYTHON = "python"
+    TYPESCRIPT = "ts"
+    JAVASCRIPT = "js"
+    C = "c"
+    CPP = "cpp"
+    LOCALE = "locale"
+
+
+NON_LOCALE_LANGUAGES = frozenset(Language) - {Language.LOCALE}
+LOCALE_SUFFIX = ".json"
+
+
+SUFFIX_LANGUAGES = {
+    ".py": Language.PYTHON,
+    ".pyi": Language.PYTHON,
+    ".ts": Language.TYPESCRIPT,
+    ".tsx": Language.TYPESCRIPT,
+    ".mts": Language.TYPESCRIPT,
+    ".cts": Language.TYPESCRIPT,
+    ".js": Language.JAVASCRIPT,
+    ".jsx": Language.JAVASCRIPT,
+    ".mjs": Language.JAVASCRIPT,
+    ".cjs": Language.JAVASCRIPT,
+    ".c": Language.C,
+    ".h": Language.C,
+    ".cpp": Language.CPP,
+    ".cc": Language.CPP,
+    ".cxx": Language.CPP,
+    ".hpp": Language.CPP,
+    ".hh": Language.CPP,
+}
+
+
+class Mode(enum.StrEnum):
+    """Which changes are linted."""
+
+    WORKTREE = "working tree vs HEAD"
+    BASE = "working tree vs merge-base"
+    STAGED = "staged (index vs HEAD)"
+    TRACKED = "tracked working tree vs HEAD"
+
+
+UNTRACKED_MODES = frozenset({Mode.WORKTREE, Mode.BASE})
+
+
+class TextSource(enum.StrEnum):
+    """Where the linted text of a file is read from."""
+
+    DISK = "disk"
+    INDEX = "index"
+
+
+class GitError(Exception):
+    """A git command failed; the message carries git's explanation."""
+
+
+@dataclass(frozen=True, slots=True)
+class LintTarget:
+    """A changed file, its language and the new-side lines it changed."""
+
+    path: str
+    language: Language
+    changed_lines: frozenset[int]
+    text_source: TextSource
+
+
+@dataclass(frozen=True, slots=True)
+class Violation:
+    """A norm violation located on a changed line."""
+
+    path: str
+    line: int
+    column: int
+    rule: str
+    message: str
+    url: str
+    tool: str
+
+
+@dataclass(frozen=True, slots=True)
+class NotChecked:
+    """A file a tool could not check, with the reason."""
+
+    path: str
+    tool: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedTargets:
+    """The lint targets of a scope and the files skipped."""
+
+    targets: tuple[LintTarget, ...]
+    not_checked: tuple[NotChecked, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Suppression:
+    """An added line that silences a linter."""
+
+    path: str
+    line: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class BackendResult:
+    """What one backend found in its targets and which tools it ran."""
+
+    violations: tuple[Violation, ...] = ()
+    not_checked: tuple[NotChecked, ...] = ()
+    tools: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Report:
+    """The complete outcome of one lint-strict run."""
+
+    mode: Mode
+    tools: tuple[str, ...]
+    target_count: int
+    violations: tuple[Violation, ...]
+    not_checked: tuple[NotChecked, ...]
+    suppressions: tuple[Suppression, ...]
+    fix: FixSummary | None = None
+
+    @property
+    def passed(self) -> bool:
+        """Whether no violation was found."""
+        return not self.violations
+
+
+@dataclass(frozen=True, slots=True)
+class Scope:
+    """The mode, the optional base ref and the pathspecs of a run."""
+
+    mode: Mode
+    base_ref: str | None
+    paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DiffEntry:
+    """One file from a raw git diff listing."""
+
+    status: str
+    path: str
+    old_path: str | None
+    mode: str
+
+
+@dataclass(frozen=True, slots=True)
+class OutputCap:
+    """How many violation lines are printed and where the rest is."""
+
+    max_lines: int
+    log_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class Options:
+    """The parsed command line."""
+
+    repo: Path
+    scope: Scope
+    json: bool
+    max_lines: int
+    fix: bool = False
+    quick: bool = False
+
+
+def decode(data: bytes) -> str:
+    """Decode bytes as UTF-8, replacing undecodable bytes."""
+    return data.decode(TEXT_ENCODING, errors=DECODE_ERRORS)
+
+
+def split_lines(text: str) -> list[str]:
+    """Split text on newlines the way git numbers lines."""
+    lines = text.split(NEWLINE)
+    if lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def run_git(
+    root: Path,
+    *args: str,
+    literal_pathspecs: bool = False,
+) -> str:
+    """Run git in root and return its decoded stdout.
+
+    Raise GitError with git's stderr when git exits non-zero.
+    """
+    environment = (
+        {**os.environ, LITERAL_PATHSPECS_ENV: LITERAL_PATHSPECS_ON}
+        if literal_pathspecs
+        else None
+    )
+    done = subprocess.run(
+        [GIT, *args],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+    if done.returncode != EXIT_PASS:
+        message = decode(done.stderr).strip() or f"git {args[0]} failed"
+        raise GitError(message)
+    return decode(done.stdout)
+
+
+@dataclass(frozen=True, slots=True)
+class Repo:
+    """A git work tree whose files are linted."""
+
+    root: Path
+    diff_arguments: tuple[str, ...] = ()
+    base_ref: str = HEAD
+    literal_pathspecs: bool = False
+    quick: bool = False
+
+    def git(self, *args: str) -> str:
+        """Run git in the work tree and return its stdout."""
+        return run_git(
+            self.root,
+            *args,
+            literal_pathspecs=self.literal_pathspecs,
+        )
+
+    def read_source(self, path: str, source: TextSource) -> str:
+        """Return the text of path from disk or from the index."""
+        if source is TextSource.INDEX:
+            return self.git("show", f":{path}")
+        return decode((self.root / path).read_bytes())
+
+    def read_text(self, target: LintTarget) -> str:
+        """Return the text of a target from its text source."""
+        return self.read_source(target.path, target.text_source)
+
+    def absolute(self, path: str) -> str:
+        """Return the absolute filesystem path of a repo path."""
+        return str(self.root / path)
+
+    def absolute_path(self, path: str) -> Path:
+        """Return the absolute filesystem path of a repo path as a Path."""
+        return self.root / path
+
+    def relative(self, filename: str) -> str:
+        """Return the repo path of an absolute filename a tool printed."""
+        candidate = Path(filename)
+        if candidate.is_relative_to(self.root):
+            return candidate.relative_to(self.root).as_posix()
+        return candidate.resolve().relative_to(self.root.resolve()).as_posix()
+
+
+def open_repo(path: Path) -> Repo:
+    """Return the repository containing path; raise GitError otherwise."""
+    if not path.is_dir():
+        message = f"not a directory: {path}"
+        raise GitError(message)
+    root = run_git(path, "rev-parse", "--show-toplevel").strip()
+    return Repo(Path(root))
+
+
+def has_head(repo: Repo) -> bool:
+    """Tell whether the repository has a HEAD commit."""
+    try:
+        repo.git("rev-parse", "--verify", "--quiet", f"{HEAD}^{{commit}}")
+    except GitError:
+        return False
+    return True
+
+
+def head_or_empty_tree(repo: Repo) -> str:
+    """Return HEAD, or the empty tree in a repository without commits."""
+    return HEAD if has_head(repo) else EMPTY_TREE
+
+
+def base_ref(repo: Repo, scope: Scope) -> str:
+    """Return the revision the changes of the scope are measured from."""
+    if scope.mode is Mode.BASE:
+        return repo.git("merge-base", str(scope.base_ref), HEAD).strip()
+    return head_or_empty_tree(repo)
+
+
+def located_repo(repo: Repo, scope: Scope) -> Repo:
+    """Return the repo with the diff arguments and base of the scope."""
+    base = base_ref(repo, scope)
+    arguments = ("--cached", base) if scope.mode is Mode.STAGED else (base,)
+    return replace(repo, diff_arguments=arguments, base_ref=base)
+
+
+def parse_raw_listing(output: str) -> list[DiffEntry]:
+    """Parse `git diff --raw -z` output into diff entries."""
+    entries: list[DiffEntry] = []
+    tokens = iter(output.split(NUL))
+    for meta in tokens:
+        if not meta:
+            break
+        fields = meta.split()
+        status = fields[RAW_STATUS_FIELD][0]
+        first = next(tokens)
+        old_path, path = (
+            (first, next(tokens))
+            if status in RENAME_OR_COPY
+            else (None, first)
+        )
+        entries.append(
+            DiffEntry(status, path, old_path, fields[RAW_NEW_MODE_FIELD]),
+        )
+    return entries
+
+
+def parse_hunk_lines(patch: str) -> frozenset[int]:
+    """Return the new-side line numbers the hunks of a -U0 patch add."""
+    lines: set[int] = set()
+    for text in patch.splitlines():
+        match = HUNK_HEADER.match(text)
+        if match is None:
+            continue
+        start = int(match.group(1))
+        count = (
+            DEFAULT_HUNK_COUNT
+            if match.group(2) is None
+            else int(match.group(2))
+        )
+        lines.update(range(start, start + count))
+    return frozenset(lines)
+
+
+def language_from(path: str, first_line: str) -> Language | None:
+    """Return the language of a file from its suffix or its shebang."""
+    pure = PurePosixPath(path)
+    suffix = pure.suffix
+    if suffix == LOCALE_SUFFIX:
+        in_locales = LOCALE_DIRS & set(pure.parts[:-1])
+        return Language.LOCALE if in_locales else None
+    if suffix:
+        return SUFFIX_LANGUAGES.get(suffix)
+    if PYTHON_SHEBANG.match(first_line):
+        return Language.PYTHON
+    if NODE_SHEBANG.match(first_line):
+        return Language.JAVASCRIPT
+    return None
+
+
+def first_line_of(repo: Repo, path: str, source: TextSource) -> str:
+    """Return the first line of a file without a suffix, else nothing."""
+    if PurePosixPath(path).suffix:
+        return ""
+    lines = split_lines(repo.read_source(path, source))
+    return lines[0] if lines else ""
+
+
+def listed_changes(
+    repo: Repo,
+    arguments: tuple[str, ...],
+    paths: tuple[str, ...],
+) -> list[DiffEntry]:
+    """List the files the diff arguments change within the pathspecs."""
+    output = repo.git(
+        "diff",
+        *arguments,
+        "--raw",
+        "-z",
+        *DIFF_FLAGS,
+        PATHSPEC_SEPARATOR,
+        *paths,
+    )
+    return parse_raw_listing(output)
+
+
+def changed_lines_of(
+    repo: Repo,
+    entry: DiffEntry,
+    arguments: tuple[str, ...],
+) -> frozenset[int]:
+    """Return the new-side lines one diff entry changes."""
+    names = [name for name in (entry.old_path, entry.path) if name]
+    patch = repo.git(
+        "--literal-pathspecs",
+        "diff",
+        *arguments,
+        "-U0",
+        *DIFF_FLAGS,
+        PATHSPEC_SEPARATOR,
+        *names,
+    )
+    return parse_hunk_lines(patch)
+
+
+def diff_target(
+    repo: Repo,
+    entry: DiffEntry,
+    arguments: tuple[str, ...],
+    source: TextSource,
+) -> LintTarget | None:
+    """Turn a diff entry into a lint target, or None when not lintable."""
+    if entry.status == DELETED or entry.mode not in REGULAR_FILE_MODES:
+        return None
+    first_line = first_line_of(repo, entry.path, source)
+    language = language_from(entry.path, first_line)
+    if language is None:
+        return None
+    changed = changed_lines_of(repo, entry, arguments)
+    if not changed:
+        return None
+    return LintTarget(entry.path, language, changed, source)
+
+
+def unstaged_paths(repo: Repo, paths: tuple[str, ...]) -> frozenset[str]:
+    """Return the paths whose working tree differs from the index."""
+    output = repo.git(
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-ext-diff",
+        PATHSPEC_SEPARATOR,
+        *paths,
+    )
+    return frozenset(name for name in output.split(NUL) if name)
+
+
+def untracked_target(repo: Repo, name: str) -> LintTarget | NotChecked | None:
+    """Return the untracked file as a fully changed target, if lintable."""
+    disk_path = repo.root / name
+    if disk_path.is_symlink() or not disk_path.is_file():
+        return None
+    try:
+        first_line = first_line_of(repo, name, TextSource.DISK)
+        language = language_from(name, first_line)
+        if language is None:
+            return None
+        line_count = len(split_lines(repo.read_source(name, TextSource.DISK)))
+    except OSError as error:
+        reason = FILE_READ_FAILED.format(error=error.strerror or error)
+        return NotChecked(name, PROGRAM, reason)
+    if not line_count:
+        return None
+    changed = frozenset(range(1, line_count + 1))
+    return LintTarget(name, language, changed, TextSource.DISK)
+
+
+def untracked_targets(repo: Repo, paths: tuple[str, ...]) -> CollectedTargets:
+    """Return the untracked, non-ignored targets and the unreadable files."""
+    output = repo.git(
+        "ls-files",
+        "-z",
+        "--others",
+        "--exclude-standard",
+        PATHSPEC_SEPARATOR,
+        *paths,
+    )
+    names = filter(None, output.split(NUL))
+    found = [untracked_target(repo, name) for name in names]
+    return CollectedTargets(
+        tuple(item for item in found if isinstance(item, LintTarget)),
+        tuple(item for item in found if isinstance(item, NotChecked)),
+    )
+
+
+def merged_commit(repo: Repo) -> str | None:
+    """Return the commit an unfinished merge brings in, if any."""
+    try:
+        return repo.git(
+            "rev-parse", "--verify", "--quiet", f"{MERGE_HEAD}^{{commit}}"
+        ).strip()
+    except GitError:
+        return None
+
+
+def written_in_merge(
+    repo: Repo,
+    target: LintTarget,
+    entry: DiffEntry,
+    comparison: tuple[str, ...],
+) -> LintTarget | None:
+    """Keep only the lines the merge result adds over the merged commit."""
+    own = target.changed_lines & changed_lines_of(repo, entry, comparison)
+    return replace(target, changed_lines=own) if own else None
+
+
+def collect_targets(repo: Repo, scope: Scope) -> CollectedTargets:
+    """Return the lint targets the scope selects, sorted by path."""
+    arguments = repo.diff_arguments
+    staged = scope.mode is Mode.STAGED
+    unstaged = unstaged_paths(repo, scope.paths) if staged else frozenset()
+    merged = merged_commit(repo)
+    comparison: tuple[str, ...] | None = None
+    if merged is not None:
+        comparison = (STAGED_ARGUMENT, merged) if staged else (merged,)
+    targets: list[LintTarget] = []
+    for entry in listed_changes(repo, arguments, scope.paths):
+        source = (
+            TextSource.INDEX if entry.path in unstaged else TextSource.DISK
+        )
+        target = diff_target(repo, entry, arguments, source)
+        if target is not None and comparison is not None:
+            target = written_in_merge(repo, target, entry, comparison)
+        if target is not None:
+            targets.append(target)
+    untracked = CollectedTargets(())
+    if scope.mode in UNTRACKED_MODES:
+        untracked = untracked_targets(repo, scope.paths)
+        targets.extend(untracked.targets)
+    return CollectedTargets(
+        tuple(sorted(targets, key=lambda target: target.path)),
+        untracked.not_checked,
+    )
+
+
+def find_suppressions(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+) -> list[Suppression]:
+    """Return the changed lines that add a linter suppression."""
+    found: list[Suppression] = []
+    for target in targets:
+        lines = split_lines(repo.read_text(target))
+        for number in sorted(target.changed_lines):
+            if number > len(lines):
+                continue
+            text = lines[number - 1]
+            if SUPPRESSION_PATTERN.search(text):
+                found.append(Suppression(target.path, number, text.strip()))
+    return found
+
+
+def is_test_file(path: str) -> bool:
+    """Tell whether a repo path is a test file exempt from docstrings."""
+    pure = PurePosixPath(path)
+    if any(
+        fnmatch.fnmatch(pure.name, pattern) for pattern in TEST_FILE_PATTERNS
+    ):
+        return True
+    return bool(TEST_DIRECTORIES.intersection(pure.parts[:-1]))
+
+
+def read_toml(path: Path) -> dict[str, Any]:
+    """Return the parsed TOML file, or an empty table when unusable."""
+    if not path.is_file():
+        return {}
+    try:
+        return tomllib.loads(decode(path.read_bytes()))
+    except tomllib.TOMLDecodeError:
+        return {}
+
+
+def config_directories(root: Path, file: Path) -> Iterator[Path]:
+    """Yield the directories from the file's up to the repo root."""
+    for directory in file.parents:
+        if not directory.is_relative_to(root):
+            return
+        yield directory
+
+
+def line_length_in(directory: Path) -> int | None:
+    """Return the line length a directory's own config files set."""
+    for name in RUFF_CONFIG_FILES:
+        value = read_toml(directory / name).get(LINE_LENGTH_KEY)
+        if isinstance(value, int):
+            return value
+    tools = read_toml(directory / PYPROJECT).get("tool", {})
+    for section in LINE_LENGTH_SECTIONS:
+        settings = tools.get(section, {}) if isinstance(tools, dict) else {}
+        value = settings.get(LINE_LENGTH_KEY)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def ruff_settings_in(directory: Path) -> tuple[Path, dict[str, Any]] | None:
+    """Return a directory's ruff config file and its ruff table."""
+    for name in RUFF_CONFIG_FILES:
+        path = directory / name
+        if path.is_file():
+            return path, read_toml(path)
+    tools = read_toml(directory / PYPROJECT).get("tool", {})
+    settings = tools.get("ruff") if isinstance(tools, dict) else None
+    return (
+        (directory / PYPROJECT, settings)
+        if isinstance(settings, dict)
+        else None
+    )
+
+
+def selected_ruff_rules(
+    settings: dict[str, Any],
+    keys: tuple[str, ...] = RUFF_SELECT_KEYS,
+) -> list[str]:
+    """Return the rule selectors a ruff table lists under the keys."""
+    lint = settings.get(RUFF_LINT_SECTION, {})
+    tables = [settings, lint] if isinstance(lint, dict) else [settings]
+    return [
+        str(rule)
+        for table in tables
+        for key in keys
+        if isinstance(table.get(key), list)
+        for rule in table[key]
+    ]
+
+
+def selects_any(
+    path: Path,
+    settings: dict[str, Any],
+    selectors: frozenset[str],
+    depth: int,
+) -> bool:
+    """Return whether a ruff config, or one it extends, selects any."""
+    if not selectors.isdisjoint(selected_ruff_rules(settings)):
+        return True
+    extended = settings.get(RUFF_EXTEND_KEY)
+    if not isinstance(extended, str) or depth >= MAX_RUFF_EXTEND_DEPTH:
+        return False
+    base = path.parent / extended
+    return selects_any(base, read_toml(base), selectors, depth + 1)
+
+
+def resolve_typing_only_imports(root: Path, file: Path) -> bool:
+    """Return whether the nearest ruff config opts into TC001-003."""
+    for directory in config_directories(root, file):
+        found = ruff_settings_in(directory)
+        if found is not None:
+            return selects_any(*found, RUFF_TYPING_ONLY_IMPORT_SELECTORS, 0)
+    return False
+
+
+def resolve_module_docstrings_required(root: Path, file: Path) -> bool:
+    """Return whether the nearest ruff config requires module docstrings."""
+    for directory in config_directories(root, file):
+        found = ruff_settings_in(directory)
+        if found is None:
+            continue
+        path, settings = found
+        ignored = selected_ruff_rules(settings, RUFF_IGNORE_KEYS)
+        return selects_any(
+            path,
+            settings,
+            RUFF_MODULE_DOCSTRING_SELECTORS,
+            0,
+        ) and RUFF_MODULE_DOCSTRING_IGNORES.isdisjoint(ignored)
+    return False
+
+
+def toml_literal(value: object) -> str | None:
+    """Return the TOML text of a bool, int, str or list of str."""
+    if isinstance(value, bool | int | str):
+        return json.dumps(value)
+    if isinstance(value, list) and all(isinstance(i, str) for i in value):
+        return f"[{', '.join(json.dumps(item) for item in value)}]"
+    return None
+
+
+def resolve_isort_arguments(root: Path, file: Path) -> tuple[str, ...]:
+    """Return the ruff --config flags for the nearest lint.isort table."""
+    for directory in config_directories(root, file):
+        found = ruff_settings_in(directory)
+        if found is None:
+            continue
+        settings = found[1]
+        lint = settings.get(RUFF_LINT_SECTION, {})
+        table = (
+            lint.get(RUFF_ISORT_SECTION) if isinstance(lint, dict) else None
+        ) or settings.get(RUFF_ISORT_SECTION)
+        if not isinstance(table, dict):
+            return ()
+        return tuple(
+            argument
+            for key, value in table.items()
+            if (literal := toml_literal(value)) is not None
+            for argument in (
+                RUFF_CONFIG_FLAG,
+                f"{RUFF_LINT_SECTION}.{RUFF_ISORT_SECTION}.{key}={literal}",
+            )
+        )
+    return ()
+
+
+def resolve_line_length(root: Path, file: Path) -> int:
+    """Return the nearest configured line length capped at 99, else 79."""
+    for directory in config_directories(root, file):
+        configured = line_length_in(directory)
+        if configured is not None:
+            return min(configured, MAX_LINE_LENGTH)
+    return DEFAULT_LINE_LENGTH
+
+
+def requires_python_minor(requirement: str) -> int | None:
+    """Return the minor version of the lower bound of requires-python."""
+    match = REQUIRES_PYTHON_MINOR.search(requirement)
+    return None if match is None else int(match.group(1))
+
+
+def required_minor_in(directory: Path) -> int | None:
+    """Return the requires-python minor a directory's pyproject sets."""
+    project = read_toml(directory / PYPROJECT).get("project", {})
+    requirement = (
+        project.get("requires-python") if isinstance(project, dict) else None
+    )
+    if not isinstance(requirement, str):
+        return None
+    return requires_python_minor(requirement)
+
+
+def pinned_minor_in(directory: Path) -> int | None:
+    """Return the Python minor a directory pins."""
+    try:
+        version = (directory / PYTHON_VERSION_FILE).read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        version = ""
+    if match := PYTHON_VERSION_FILE_MINOR.match(version):
+        return int(match.group(1))
+    try:
+        dockerfile = (directory / DOCKERFILE).read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if match := DOCKERFILE_PYTHON_MINOR.search(dockerfile):
+        return int(match.group(1))
+    return None
+
+
+def resolve_target_version(root: Path, file: Path) -> str:
+    """Return the target from requires-python, a pin, else python3."""
+    directories = list(config_directories(root, file))
+    minor = next(
+        (
+            found
+            for finder in (required_minor_in, pinned_minor_in)
+            for directory in directories
+            if (found := finder(directory)) is not None
+        ),
+        sys.version_info.minor,
+    )
+    return f"{TARGET_VERSION_PREFIX}{minor}"
+
+
+@dataclass(frozen=True, slots=True)
+class PythonStyle:
+    """The line length and target version a Python file is held to."""
+
+    line_length: int
+    target_version: str
+    typing_only_imports: bool = False
+    module_docstrings_required: bool = False
+    isort_arguments: tuple[str, ...] = ()
+
+
+def python_style(repo: Repo, target: LintTarget) -> PythonStyle:
+    """Resolve the style of a target from the configs nearest to it."""
+    file = repo.absolute_path(target.path)
+    return PythonStyle(
+        resolve_line_length(repo.root, file),
+        resolve_target_version(repo.root, file),
+        resolve_typing_only_imports(repo.root, file),
+        resolve_module_docstrings_required(repo.root, file),
+        resolve_isort_arguments(repo.root, file),
+    )
+
+
+def usable_executable(path: Path) -> str | None:
+    """Return path as a string when it is an executable file."""
+    usable = path.is_file() and os.access(path, os.X_OK)
+    return str(path) if usable else None
+
+
+def find_tool(environment: str, name: str) -> str | None:
+    """Return a tool from its environment override, else from PATH."""
+    configured = os.environ.get(environment)
+    if configured:
+        return usable_executable(Path(configured))
+    return shutil.which(name)
+
+
+def tool_version(executable: str, name: str, cwd: Path) -> str:
+    """Return "name version" from the tool's --version output."""
+    return command_version((executable,), name, cwd)
+
+
+def command_version(command: Sequence[str], name: str, cwd: Path) -> str:
+    """Return "name version" from the --version output of a command."""
+    done = run_tool([*command, "--version"], cwd)
+    match = VERSION_NUMBER.search(decode(done.stdout)) if done else None
+    return f"{name} {match.group(1)}" if match else name
+
+
+def run_tool(
+    argv: Sequence[str],
+    cwd: Path,
+    stdin: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes] | None:
+    """Run a tool and return its outcome, or None when it cannot start."""
+    try:
+        return subprocess.run(
+            list(argv),
+            cwd=cwd,
+            env=env,
+            input=None if stdin is None else stdin.encode(TEXT_ENCODING),
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+
+
+@functools.cache
+def resolved_version(executable: str, name: str, cwd: Path) -> str:
+    """Return the tool version, asked once per run."""
+    return tool_version(executable, name, cwd)
+
+
+def cache_directory(name: str) -> Path:
+    """Return a subdirectory of the lint-strict cache root."""
+    configured = os.environ.get(CACHE_DIR_ENV)
+    root = Path(configured) if configured else DEFAULT_CACHE_ROOT
+    return root / name
+
+
+@functools.cache
+def executable_identity(executable: str, cwd: Path) -> str:
+    """Return the raw --version output, which tells prereleases apart."""
+    done = run_tool([executable, "--version"], cwd)
+    if done is None or done.returncode != EXIT_PASS:
+        return ""
+    return decode(done.stdout).strip()
+
+
+def cache_key(*parts: str) -> str:
+    """Return the digest that names a cache entry made from the parts."""
+    return hashlib.sha256(NUL.join(parts).encode(TEXT_ENCODING)).hexdigest()
+
+
+def cache_load(directory: Path, key: str) -> object | None:
+    """Return the JSON of a cache entry, None when absent or corrupt."""
+    try:
+        text = (directory / f"{key}{CACHE_SUFFIX}").read_text(TEXT_ENCODING)
+        document: object = json.loads(text)
+    except (OSError, ValueError, RecursionError):
+        return None
+    with suppress(OSError):
+        os.utime(directory / f"{key}{CACHE_SUFFIX}")
+    return document
+
+
+def is_temporary_entry(name: str) -> bool:
+    """Tell whether a cache file is a temporary one, not a finished entry."""
+    if name.endswith(CACHE_TEMP_SUFFIX):
+        return True
+    return name.endswith(TSC_BUILDINFO_SUFFIX) and name.count(".") > 1
+
+
+def remove_if_stale(entry: Path, now: float) -> None:
+    """Delete a cache file that outlived its age limit; ignore failures."""
+    limit = (
+        CACHE_TEMP_MAX_AGE_SECONDS
+        if is_temporary_entry(entry.name)
+        else CACHE_ENTRY_MAX_AGE_SECONDS
+    )
+    with suppress(OSError):
+        if entry.is_file() and now - entry.stat().st_mtime > limit:
+            entry.unlink(missing_ok=True)
+
+
+def prune_cache(directory: Path) -> None:
+    """Delete stale files of a cache directory, at most once per interval."""
+    now = time.time()
+    marker = directory / CACHE_PRUNE_MARKER
+    with suppress(OSError):
+        if now - marker.stat().st_mtime < CACHE_PRUNE_INTERVAL_SECONDS:
+            return
+    with suppress(OSError):
+        directory.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        for entry in directory.iterdir():
+            if entry.name != CACHE_PRUNE_MARKER:
+                remove_if_stale(entry, now)
+
+
+def cache_store(directory: Path, key: str, document: object) -> None:
+    """Replace a cache entry atomically; a failed write is ignored."""
+    temporary = directory / f"{key}.{uuid.uuid4().hex}{CACHE_TEMP_SUFFIX}"
+    prune_cache(directory)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(document), TEXT_ENCODING)
+        temporary.replace(directory / f"{key}{CACHE_SUFFIX}")
+    except (OSError, TypeError, ValueError):
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+
+def heavy_slot_count() -> int:
+    """Return how many heavy tools may run at once, 0 when unlimited."""
+    configured = os.environ.get(HEAVY_SLOTS_ENV, str(HEAVY_SLOTS_DEFAULT))
+    try:
+        return max(int(configured), 0)
+    except ValueError:
+        return HEAVY_SLOTS_DEFAULT
+
+
+def lock_slot(path: Path) -> int | None:
+    """Lock a slot file and return its descriptor, None when it is taken."""
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR, SLOT_FILE_MODE)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        os.close(descriptor)
+        if isinstance(error, BlockingIOError):
+            return None
+        raise
+    return descriptor
+
+
+def acquire_slot(count: int) -> int | None:
+    """Wait for a free heavy-tool slot, None when the wait runs out."""
+    directory = cache_directory(SLOTS_CACHE)
+    directory.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + HEAVY_SLOT_MAX_WAIT_SECONDS
+    while True:
+        for number in range(count):
+            descriptor = lock_slot(directory / f"{number}{SLOT_SUFFIX}")
+            if descriptor is not None:
+                return descriptor
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(HEAVY_SLOT_POLL_SECONDS)
+
+
+@contextmanager
+def heavy_slot() -> Iterator[None]:
+    """Hold a cross-process heavy-tool slot, run without one on failure."""
+    count = heavy_slot_count()
+    descriptor: int | None = None
+    if count > 0:
+        with suppress(OSError):
+            descriptor = acquire_slot(count)
+    try:
+        yield
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def failure_reason(stderr: bytes, fallback: str) -> str:
+    """Return the most telling line of a tool's stderr."""
+    lines = [line.strip() for line in decode(stderr).splitlines()]
+    errors = [line for line in lines if ERROR_MARKER in line.lower()]
+    meaningful = errors or [line for line in lines if line]
+    return meaningful[0] if meaningful else fallback
+
+
+@dataclass(frozen=True, slots=True)
+class RuffSettings:
+    """The ruff executable and the options every ruff run shares."""
+
+    executable: str
+    version: str
+
+    def check_command(
+        self,
+        style: PythonStyle,
+        *,
+        test_file: bool,
+    ) -> list[str]:
+        """Return the ruff check argv for normal or test files."""
+        ignored = (
+            RUFF_IGNORED
+            + (RUFF_TEST_IGNORED if test_file else ())
+            + (
+                ()
+                if style.typing_only_imports
+                else RUFF_TYPING_ONLY_IMPORT_RULES
+            )
+        )
+        return [
+            self.executable,
+            "check",
+            "--isolated",
+            "--no-cache",
+            "--select",
+            "ALL",
+            "--ignore",
+            ",".join(ignored),
+            *RUFF_CONFIG_ARGUMENTS,
+            *RUFF_PREVIEW_ARGUMENTS,
+            "--line-length",
+            str(style.line_length),
+            "--target-version",
+            style.target_version,
+            "--output-format",
+            "json",
+            *style.isort_arguments,
+        ]
+
+    def format_command(self, style: PythonStyle, filename: str) -> list[str]:
+        """Return the ruff format argv printing the formatted stdin."""
+        return [
+            self.executable,
+            "format",
+            "--isolated",
+            "--no-cache",
+            "--line-length",
+            str(style.line_length),
+            "--target-version",
+            style.target_version,
+            STDIN_FILENAME_OPTION,
+            filename,
+            STDIN_MARKER,
+        ]
+
+
+@dataclass(frozen=True, slots=True)
+class RuffBatch:
+    """Targets checked by one ruff process, from disk or from stdin."""
+
+    targets: tuple[LintTarget, ...]
+    style: PythonStyle
+    test_file: bool
+    stdin: str | None
+
+
+def ruff_batches(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+    styles: dict[str, PythonStyle],
+) -> list[RuffBatch]:
+    """Group disk targets by style and test class; index blobs one each."""
+    groups: dict[tuple[PythonStyle, bool], list[LintTarget]] = {}
+    batches: list[RuffBatch] = []
+    for target in targets:
+        style = styles[target.path]
+        test_file = is_test_file(target.path)
+        if target.text_source is TextSource.INDEX:
+            text = repo.read_text(target)
+            batches.append(RuffBatch((target,), style, test_file, text))
+        else:
+            groups.setdefault((style, test_file), []).append(target)
+    batches.extend(
+        RuffBatch(tuple(group), style, test_file, None)
+        for (style, test_file), group in groups.items()
+    )
+    return batches
+
+
+def violation_from_ruff(item: dict[str, Any], path: str) -> Violation:
+    """Convert one ruff JSON diagnostic into a violation."""
+    location = item.get("location") or {}
+    return Violation(
+        path=path,
+        line=int(location.get("row", MODULE_LINE)),
+        column=int(location.get("column", DOCSTRING_COLUMN)),
+        rule=item.get("code") or RUFF_SYNTAX_RULE,
+        message=str(item.get("message", "")),
+        url=item.get("url") or "",
+        tool=RUFF_TOOL,
+    )
+
+
+def stdin_arguments(filename: str) -> list[str]:
+    """Return the ruff arguments reading one file's text from stdin."""
+    return [STDIN_FILENAME_OPTION, filename, STDIN_MARKER]
+
+
+def ruff_items(
+    done: subprocess.CompletedProcess[bytes] | None,
+) -> list[dict[str, Any]] | None:
+    """Return the JSON diagnostics of a ruff run, None when unreadable."""
+    try:
+        items = json.loads(decode(done.stdout)) if done else None
+    except json.JSONDecodeError:
+        return None
+    return items if isinstance(items, list) else None
+
+
+def run_ruff_batch(
+    settings: RuffSettings,
+    repo: Repo,
+    batch: RuffBatch,
+) -> BackendResult:
+    """Run ruff check on one batch and keep findings on changed lines."""
+    command = settings.check_command(batch.style, test_file=batch.test_file)
+    if batch.stdin is None:
+        command.extend(repo.absolute(t.path) for t in batch.targets)
+    else:
+        command.extend(stdin_arguments(repo.absolute(batch.targets[0].path)))
+    done = run_tool(command, repo.root, batch.stdin)
+    items = ruff_items(done)
+    if items is None:
+        reason = failure_reason(done.stderr, RUFF_FAILED) if done else ""
+        return BackendResult(
+            not_checked=tuple(
+                NotChecked(t.path, RUFF_TOOL, reason or RUFF_FAILED)
+                for t in batch.targets
+            ),
+        )
+    by_path = {target.path: target for target in batch.targets}
+    found = [
+        violation_from_ruff(item, repo.relative(item["filename"]))
+        for item in items
+    ]
+    return BackendResult(
+        violations=tuple(
+            violation
+            for violation in found
+            if violation.path in by_path
+            and violation.line in by_path[violation.path].changed_lines
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Drift:
+    """A formatter change touching changed lines."""
+
+    line: int
+    first: int
+    last: int
+
+
+class Opcode(NamedTuple):
+    """One difflib opcode turning original lines into formatted ones."""
+
+    tag: str
+    start: int
+    end: int
+    new_start: int
+    new_end: int
+
+
+def opcode_lines(opcode: Opcode) -> range:
+    """Return the 1-based original line numbers an opcode covers."""
+    return range(opcode.start + MODULE_LINE, opcode.end + MODULE_LINE)
+
+
+def insertion_anchor(opcode: Opcode) -> int:
+    """Return the original line an insertion is attached to."""
+    return max(opcode.start, MODULE_LINE)
+
+
+def opcode_fully_changed(opcode: Opcode, changed: frozenset[int]) -> bool:
+    """Tell whether every original line an opcode covers is changed."""
+    if opcode.tag == INSERT_OPCODE:
+        return insertion_anchor(opcode) in changed
+    return changed.issuperset(opcode_lines(opcode))
+
+
+def line_opcodes(
+    original: Sequence[str],
+    formatted: Sequence[str],
+) -> list[Opcode]:
+    """Return the difflib opcodes between two lists of lines."""
+    matcher = difflib.SequenceMatcher(
+        a=list(original),
+        b=list(formatted),
+        autojunk=False,
+    )
+    return [Opcode(*opcode) for opcode in matcher.get_opcodes()]
+
+
+def formatting_drift(
+    original: Sequence[str],
+    formatted: Sequence[str],
+    changed: frozenset[int],
+) -> list[Drift]:
+    """Attribute formatter changes to original lines via difflib opcodes.
+
+    A pure insertion is attributed to the lines around the insertion point.
+    """
+    drifts: list[Drift] = []
+    for opcode in line_opcodes(original, formatted):
+        if opcode.tag == EQUAL_OPCODE:
+            continue
+        start = opcode.start
+        affected = (
+            range(start, start + INSERTION_SPAN)
+            if start == opcode.end
+            else opcode_lines(opcode)
+        )
+        hits = [line for line in affected if line in changed]
+        if hits:
+            first = max(affected[0], MODULE_LINE)
+            drifts.append(Drift(hits[0], first, affected[-1]))
+    return drifts
+
+
+def format_findings(
+    settings: RuffSettings,
+    repo: Repo,
+    target: LintTarget,
+    style: PythonStyle,
+) -> list[Violation]:
+    """Return an FMT violation per formatter change on changed lines."""
+    original = repo.read_text(target)
+    done = run_tool(
+        settings.format_command(style, repo.absolute(target.path)),
+        repo.root,
+        original,
+    )
+    if done is None or done.returncode != EXIT_PASS:
+        return []
+    return drift_violations(
+        target,
+        original,
+        decode(done.stdout),
+        RUFF_FORMAT_TOOL,
+    )
+
+
+def drift_violations(
+    target: LintTarget,
+    original: str,
+    formatted: str,
+    formatter: str,
+) -> list[Violation]:
+    """Return an FMT violation per formatter change on changed lines."""
+    drifts = formatting_drift(
+        split_lines(original),
+        split_lines(formatted),
+        target.changed_lines,
+    )
+    return [
+        Violation(
+            path=target.path,
+            line=drift.line,
+            column=FORMAT_COLUMN,
+            rule=FORMAT_RULE,
+            message=FORMAT_MESSAGE.format(
+                tool=formatter,
+                first=drift.first,
+                last=drift.last,
+            ),
+            url="",
+            tool=formatter,
+        )
+        for drift in drifts
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class MissingDocstring:
+    """A class or function without a docstring."""
+
+    line: int
+    message: str
+
+
+DEFINITION_KINDS = {
+    ast.ClassDef: "class",
+    ast.FunctionDef: "function",
+    ast.AsyncFunctionDef: "function",
+}
+DEFINITION_TYPES = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def is_overload(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+) -> bool:
+    """Tell whether a definition is an @overload stub."""
+    for decorator in node.decorator_list:
+        match decorator:
+            case ast.Name(id=name) | ast.Attribute(attr=name):
+                if name == OVERLOAD:
+                    return True
+    return False
+
+
+def missing_docstrings(text: str) -> list[MissingDocstring]:
+    """Return every class or function of the source lacking a docstring."""
+    tree = parse_python(text)
+    if tree is None:
+        return []
+    missing: list[MissingDocstring] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, tuple(DEFINITION_KINDS)):
+            continue
+        if is_overload(node) or ast.get_docstring(node) is not None:
+            continue
+        kind = DEFINITION_KINDS[type(node)]
+        message = DOCSTRING_MESSAGE.format(kind=kind, name=node.name)
+        missing.append(MissingDocstring(node.lineno, message))
+    return missing
+
+
+@dataclass(frozen=True, slots=True, order=True)
+class ShapeProblem:
+    """A docstring that breaks the one-line, one-sentence policy."""
+
+    line: int
+    rule: str
+    message: str
+
+
+def is_one_line_sentence(text: str) -> bool:
+    """Tell whether a cleaned docstring is one short one-line sentence."""
+    return (
+        "\n" not in text
+        and len(text) <= MAX_DOCSTRING_LENGTH
+        and SENTENCE_END.search(text) is None
+    )
+
+
+def badly_shaped_docstrings(text: str) -> list[ShapeProblem]:
+    """Return module docstrings and badly shaped definition docstrings."""
+    tree = parse_python(text)
+    if tree is None:
+        return []
+    problems: list[ShapeProblem] = []
+    if ast.get_docstring(tree) is not None:
+        problems.append(
+            ShapeProblem(
+                tree.body[0].lineno,
+                MODULE_SHAPE_RULE,
+                MODULE_SHAPE_MESSAGE,
+            ),
+        )
+    for node in ast.walk(tree):
+        if not isinstance(node, DEFINITION_TYPES):
+            continue
+        docstring = ast.get_docstring(node)
+        if docstring is None or is_one_line_sentence(docstring):
+            continue
+        problems.append(
+            ShapeProblem(node.body[0].lineno, SHAPE_RULE, SHAPE_MESSAGE),
+        )
+    return sorted(problems)
+
+
+def is_stub_file(path: str) -> bool:
+    """Tell whether a repo path is a type stub, which carries no docstrings."""
+    return PurePosixPath(path).suffix == STUB_SUFFIX
+
+
+def docstring_findings(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+) -> list[Violation]:
+    """Return DOC100 for undocumented definitions on changed lines."""
+    return [
+        Violation(
+            path=target.path,
+            line=missing.line,
+            column=DOCSTRING_COLUMN,
+            rule=DOCSTRING_RULE,
+            message=missing.message,
+            url="",
+            tool=DOCSTRING_TOOL,
+        )
+        for target in targets
+        if not is_test_file(target.path) and not is_stub_file(target.path)
+        for missing in missing_docstrings(repo.read_text(target))
+        if missing.line in target.changed_lines
+    ]
+
+
+def docstring_shape_findings(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+) -> list[Violation]:
+    """Return DOC101 and DOC102 for docstrings on changed lines."""
+    return [
+        Violation(
+            path=target.path,
+            line=problem.line,
+            column=DOCSTRING_COLUMN,
+            rule=problem.rule,
+            message=problem.message,
+            url="",
+            tool=DOCSTRING_TOOL,
+        )
+        for target in targets
+        if not is_stub_file(target.path)
+        for problem in badly_shaped_docstrings(repo.read_text(target))
+        if problem.line in target.changed_lines
+        and not (
+            problem.rule == MODULE_SHAPE_RULE
+            and python_style(repo, target).module_docstrings_required
+        )
+    ]
+
+
+def without_ruff_duplicates(
+    documentation: Sequence[Violation],
+    ruff_found: Sequence[Violation],
+) -> list[Violation]:
+    """Drop DOC100 findings ruff already reported as D1xx."""
+    reported = {
+        (violation.path, violation.line)
+        for violation in ruff_found
+        if violation.rule.startswith(RUFF_DOCSTRING_PREFIX)
+    }
+    return [
+        violation
+        for violation in documentation
+        if (violation.path, violation.line) not in reported
+    ]
+
+
+def merge_results(results: Sequence[BackendResult]) -> BackendResult:
+    """Concatenate backend results into one."""
+    return BackendResult(
+        violations=tuple(v for result in results for v in result.violations),
+        not_checked=tuple(n for result in results for n in result.not_checked),
+        tools=tuple(t for result in results for t in result.tools),
+    )
+
+
+class Backend(Protocol):
+    """A linter for some languages, run on the targets of those languages."""
+
+    @property
+    def name(self) -> str:
+        """Return the backend name."""
+        ...
+
+    @property
+    def languages(self) -> frozenset[Language]:
+        """Return the languages this backend lints."""
+        ...
+
+    def run(self, repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+        """Lint the targets and report findings on their changed lines."""
+        ...
+
+    def fix(
+        self,
+        repo: Repo,
+        snapshots: Sequence[Snapshot],
+        /,
+    ) -> dict[str, str]:
+        """Return the fixed text of each snapshot the backend can fix."""
+        ...
+
+
+def ruff_and_docstring_results(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+) -> BackendResult:
+    """Lint Python targets with ruff check, ruff format and the docstrings."""
+    documentation = [
+        *docstring_findings(repo, targets),
+        *docstring_shape_findings(repo, targets),
+    ]
+    executable = find_tool(RUFF_ENV, RUFF_TOOL)
+    if executable is None:
+        return BackendResult(
+            violations=tuple(documentation),
+            not_checked=tuple(
+                NotChecked(target.path, RUFF_TOOL, RUFF_NOT_FOUND)
+                for target in targets
+            ),
+            tools=(f"{RUFF_TOOL}: not found",),
+        )
+    settings = RuffSettings(
+        executable,
+        tool_version(executable, RUFF_TOOL, repo.root),
+    )
+    styles = {t.path: python_style(repo, t) for t in targets}
+    checked = merge_results(
+        [
+            run_ruff_batch(settings, repo, batch)
+            for batch in ruff_batches(repo, targets, styles)
+        ],
+    )
+    formatted = [
+        violation
+        for t in targets
+        for violation in format_findings(
+            settings,
+            repo,
+            t,
+            styles[t.path],
+        )
+    ]
+    documented = without_ruff_duplicates(documentation, checked.violations)
+    return BackendResult(
+        violations=(*checked.violations, *formatted, *documented),
+        not_checked=checked.not_checked,
+        tools=(settings.version,),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TypeDiagnostic:
+    """One type checker error: its file, position, rule and message."""
+
+    path: str
+    line: int
+    column: int
+    rule: str
+    message: str
+
+
+def mypy_diagnostic(match: re.Match[str]) -> TypeDiagnostic:
+    """Convert one matched mypy error line into a diagnostic."""
+    code = match["code"]
+    return TypeDiagnostic(
+        path=match["path"],
+        line=int(match["line"]),
+        column=int(match["column"] or FORMAT_COLUMN),
+        rule=f"{MYPY_RULE_PREFIX}{code}" if code else MYPY_TOOL,
+        message=match["message"],
+    )
+
+
+def parse_mypy(output: str) -> list[TypeDiagnostic]:
+    """Return the errors of mypy's text output; notes are dropped."""
+    matches = (MYPY_LINE.match(line) for line in output.splitlines())
+    return [mypy_diagnostic(match) for match in matches if match is not None]
+
+
+def targets_by_file(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+) -> dict[Path, LintTarget]:
+    """Map the resolved filesystem path of each target to the target."""
+    return {repo.absolute_path(t.path).resolve(): t for t in targets}
+
+
+def type_violations(
+    files: dict[Path, LintTarget],
+    base: Path,
+    diagnostics: Sequence[TypeDiagnostic],
+    tool: str,
+) -> tuple[Violation, ...]:
+    """Turn the errors on the targets' changed lines into violations.
+
+    Diagnostic paths are resolved against base; errors in other files are
+    dropped.
+    """
+    return tuple(
+        Violation(
+            path=target.path,
+            line=diagnostic.line,
+            column=diagnostic.column,
+            rule=diagnostic.rule,
+            message=diagnostic.message,
+            url="",
+            tool=tool,
+        )
+        for diagnostic in diagnostics
+        if (target := files.get(resolve_against(base, diagnostic.path)))
+        and diagnostic.line in target.changed_lines
+    )
+
+
+def mypy_importable(python: str, cwd: Path) -> bool:
+    """Tell whether the interpreter can import mypy."""
+    done = run_tool([python, *MYPY_IMPORT_PROBE], cwd)
+    return done is not None and done.returncode == EXIT_PASS
+
+
+def mypy_command(repo: Repo, root: Path) -> tuple[str, ...] | None:
+    """Return the argv prefix running mypy for the root, or None."""
+    venv_python = usable_executable(root / VENV_PYTHON) or usable_executable(
+        repo.root / VENV_PYTHON
+    )
+    interpreter = venv_python or shutil.which(SYSTEM_PYTHON)
+    options = (
+        () if interpreter is None else (PYTHON_EXECUTABLE_OPTION, interpreter)
+    )
+    uvx_python = (
+        () if interpreter is None else (UVX_PYTHON_OPTION, interpreter)
+    )
+    configured = os.environ.get(MYPY_ENV)
+    if configured:
+        executable = usable_executable(Path(configured).absolute())
+        return None if executable is None else (executable, *options)
+    if venv_python is not None and mypy_importable(venv_python, root):
+        return (venv_python, *MYPY_MODULE_ARGUMENTS, *options)
+    uvx = shutil.which(UVX_TOOL)
+    return None if uvx is None else (uvx, *uvx_python, MYPY_TOOL, *options)
+
+
+def mypy_cache_dir(root: Path) -> Path:
+    """Return the mypy cache directory of the root, outside the work tree."""
+    digest = hashlib.sha256(str(root).encode(TEXT_ENCODING)).hexdigest()
+    return MYPY_CACHE_ROOT / digest[:CACHE_KEY_LENGTH]
+
+
+def mypy_shadows(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+    scratch: Path,
+) -> list[str]:
+    """Write the index text of index targets and return --shadow-file args."""
+    arguments: list[str] = []
+    for index, target in enumerate(targets):
+        if target.text_source is not TextSource.INDEX:
+            continue
+        shadow = scratch / str(index) / PurePosixPath(target.path).name
+        shadow.parent.mkdir()
+        shadow.write_text(repo.read_text(target), encoding=TEXT_ENCODING)
+        arguments.extend(
+            (MYPY_SHADOW_OPTION, repo.absolute(target.path), str(shadow)),
+        )
+    return arguments
+
+
+def mypy_incomplete(
+    returncode: int,
+    *,
+    parsed: bool,
+    reported: bool,
+) -> bool:
+    """Tell whether a finished mypy run left the targets unchecked.
+
+    Exit 1 means errors were found and must have been parsed; exit 2 and
+    above is a blocking error that only a reported violation explains.
+    """
+    if returncode == EXIT_PASS:
+        return False
+    if returncode >= TOOL_FAILURE_EXIT:
+        return not reported
+    return not parsed
+
+
+def explicit_override_options(
+    repo: Repo, targets: Sequence[LintTarget]
+) -> tuple[str, ...]:
+    """Return the explicit-override option when every target allows it."""
+    resolver = floor_resolver(repo)
+    allowed = bool(targets) and all(
+        resolver.python_floors(target.path).python_at_least(
+            PYTHON_EXPLICIT_OVERRIDE_MINOR
+        )
+        for target in targets
+    )
+    return MYPY_EXPLICIT_OVERRIDE_OPTIONS if allowed else ()
+
+
+def subproject_root(repo: Repo, target: LintTarget) -> Path:
+    """Return the nearest pyproject directory below the repo root, or root."""
+    for directory in repo.absolute_path(target.path).parents:
+        if directory == repo.root:
+            break
+        if (directory / PYPROJECT).is_file():
+            return directory
+    return repo.root
+
+
+def toml_section(document: Mapping[str, Any], *keys: str) -> dict[str, Any]:
+    """Return the nested table at keys, or an empty one when absent."""
+    section: Any = document
+    for key in keys:
+        section = section.get(key) if isinstance(section, dict) else None
+    return section if isinstance(section, dict) else {}
+
+
+def normalized_project_name(name: str) -> str:
+    """Return the PEP 503 normalized form of a project name."""
+    return PEP503_SEPARATORS.sub("-", name).lower()
+
+
+def workspace_members(repo: Repo) -> dict[str, Path]:
+    """Map normalized project names to uv workspace member directories."""
+    workspace = toml_section(
+        read_toml(repo.root / PYPROJECT), "tool", "uv", "workspace"
+    )
+    excluded = {
+        path
+        for pattern in workspace.get("exclude", ())
+        for path in repo.root.glob(pattern)
+    }
+    members: dict[str, Path] = {}
+    for pattern in workspace.get("members", ()):
+        for directory in sorted(repo.root.glob(pattern)):
+            project = toml_section(read_toml(directory / PYPROJECT), "project")
+            name = project.get("name")
+            if directory not in excluded and isinstance(name, str):
+                members[normalized_project_name(name)] = directory
+    return members
+
+
+def member_import_root(directory: Path) -> Path:
+    """Return the directory a workspace member's packages import from."""
+    source = directory / SOURCE_DIRECTORY
+    if source.is_dir() and not (source / INIT_FILE).exists():
+        return source
+    return directory
+
+
+def declared_workspace_roots(
+    repo: Repo, document: Mapping[str, Any]
+) -> list[Path]:
+    """Return the import roots of the workspace sources a project declares."""
+    members = workspace_members(repo)
+    sources = toml_section(document, "tool", "uv", "sources")
+    roots: list[Path] = []
+    for name, source in sources.items():
+        member = members.get(normalized_project_name(name))
+        if member and isinstance(source, dict) and source.get("workspace"):
+            roots.append(member_import_root(member))
+    return roots
+
+
+def pytest_python_paths(root: Path, document: Mapping[str, Any]) -> list[Path]:
+    """Return the pytest pythonpath entries, except the root itself."""
+    options = toml_section(document, "tool", "pytest", "ini_options")
+    configured = options.get("pythonpath", ())
+    entries = [configured] if isinstance(configured, str) else configured
+    paths = [root / entry for entry in entries if isinstance(entry, str)]
+    return [path for path in paths if path.resolve() != root.resolve()]
+
+
+def is_test_module(path: str) -> bool:
+    """Tell whether a repo path is named like a test module."""
+    name = PurePosixPath(path).name
+    return any(
+        fnmatch.fnmatch(name, pattern) for pattern in TEST_FILE_PATTERNS
+    )
+
+
+def pytest_sibling_roots(
+    repo: Repo,
+    root: Path,
+    targets: Sequence[LintTarget],
+) -> list[Path]:
+    """Return the test directories pytest prepend mode puts on sys.path."""
+    return [
+        directory
+        for directory in (
+            repo.absolute_path(target.path).parent
+            for target in targets
+            if is_test_module(target.path)
+        )
+        if directory != root and not (directory / INIT_FILE).exists()
+    ]
+
+
+def mypy_search_path(
+    repo: Repo,
+    root: Path,
+    targets: Sequence[LintTarget],
+    *,
+    with_siblings: bool = True,
+) -> tuple[Path, ...]:
+    """Return the import roots mypy needs besides the project root."""
+    document = read_toml(root / PYPROJECT)
+    sibling_directories = (
+        pytest_sibling_roots(repo, root, targets) if with_siblings else []
+    )
+    return tuple(
+        dict.fromkeys(
+            [
+                *declared_workspace_roots(repo, document),
+                *pytest_python_paths(root, document),
+                *sibling_directories,
+            ]
+        )
+    )
+
+
+def mypy_environment(search_path: Sequence[Path]) -> dict[str, str] | None:
+    """Return the environment giving mypy the search path, None if empty."""
+    inherited = os.environ.get(MYPYPATH_ENV)
+    parts = [*map(str, search_path), *([inherited] if inherited else [])]
+    if not parts:
+        return None
+    return {**os.environ, MYPYPATH_ENV: os.pathsep.join(parts)}
+
+
+def run_mypy(
+    argv: Sequence[str],
+    repo: Repo,
+    root: Path,
+    targets: Sequence[LintTarget],
+) -> subprocess.CompletedProcess[bytes] | None:
+    """Run mypy, once more without test roots after a module name clash."""
+    done = run_tool(
+        argv,
+        root,
+        env=mypy_environment(mypy_search_path(repo, root, targets)),
+    )
+    if done is None or MYPY_DUPLICATE_MODULE not in decode(
+        done.stderr + done.stdout
+    ):
+        return done
+    return run_tool(
+        argv,
+        root,
+        env=mypy_environment(
+            mypy_search_path(repo, root, targets, with_siblings=False)
+        ),
+    )
+
+
+def mypy_group_results(
+    repo: Repo,
+    root: Path,
+    targets: Sequence[LintTarget],
+    run_targets: Sequence[LintTarget],
+    override_options: tuple[str, ...],
+) -> BackendResult:
+    """Type-check the targets of one project root with mypy --strict."""
+    command = mypy_command(repo, root)
+    if command is None:
+        return not_checked_all(targets, MYPY_TOOL, MYPY_NOT_FOUND)
+    package_options = (
+        () if root == repo.root else (MYPY_EXPLICIT_PACKAGE_BASES_OPTION,)
+    )
+    with tempfile.TemporaryDirectory() as scratch:
+        argv = [
+            *command,
+            *MYPY_OPTIONS,
+            *MYPY_DISABLED_ERROR_OPTIONS,
+            *package_options,
+            *override_options,
+            MYPY_CACHE_OPTION,
+            str(mypy_cache_dir(root)),
+            *mypy_shadows(repo, run_targets, Path(scratch)),
+            *(repo.absolute(target.path) for target in targets),
+        ]
+        with heavy_slot():
+            done = run_mypy(argv, repo, root, targets)
+    if done is None:
+        return not_checked_all(targets, MYPY_TOOL, MYPY_FAILED)
+    diagnostics = parse_mypy(decode(done.stdout))
+    files = targets_by_file(repo, targets)
+    found = type_violations(files, root, diagnostics, MYPY_TOOL)
+    if mypy_incomplete(
+        done.returncode,
+        parsed=bool(diagnostics),
+        reported=bool(found),
+    ):
+        reason = failure_reason(done.stderr + done.stdout, MYPY_FAILED)
+        return not_checked_all(targets, MYPY_TOOL, reason)
+    version = command_version(command, MYPY_TOOL, root)
+    return BackendResult(violations=found, tools=(version,))
+
+
+def mypy_results(repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+    """Type-check the Python targets with mypy, one run per project root."""
+    groups: dict[Path, list[LintTarget]] = {}
+    for target in targets:
+        groups.setdefault(subproject_root(repo, target), []).append(target)
+    override_options = explicit_override_options(repo, targets)
+    return merge_results(
+        [
+            mypy_group_results(repo, root, group, targets, override_options)
+            for root, group in groups.items()
+        ]
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PythonBackend:
+    """Python: ruff check, ruff format, the docstring pass and mypy."""
+
+    name: str = "python"
+    languages: frozenset[Language] = frozenset({Language.PYTHON})
+    fast: bool = False
+
+    def run(self, repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+        """Lint Python targets with ruff, the docstring pass and mypy."""
+        ruff = ruff_and_docstring_results(repo, targets)
+        if self.fast:
+            return ruff
+        return merge_results([ruff, mypy_results(repo, targets)])
+
+    def fix(
+        self,
+        repo: Repo,
+        snapshots: Sequence[Snapshot],
+    ) -> dict[str, str]:
+        """Fix Python snapshots with the safe ruff fixes and ruff format."""
+        return fix_python(repo, snapshots)
+
+
+JS_LANGUAGES = frozenset({Language.JAVASCRIPT, Language.TYPESCRIPT})
+PACKAGE_JSON = "package.json"
+NODE_MODULES = "node_modules"
+NODE_BIN = Path(NODE_MODULES) / ".bin"
+ESLINT_TOOL = "eslint"
+ESLINT_CONFIG_NAMES = (
+    "eslint.config.js",
+    "eslint.config.mjs",
+    "eslint.config.cjs",
+)
+OVERLAY_NAME = "lint-strict.eslint.config.mjs"
+ESLINT_JS = "@eslint/js"
+TYPESCRIPT_ESLINT = "typescript-eslint"
+STRICT_TOOL = "typescript-eslint strict"
+STRICT_MISSING = "typescript-eslint is not resolvable from {package}"
+ESLINT_MISSING = "no eslint at {path}"
+NO_PACKAGE = "no package.json between the file and the repository root"
+ESLINT_FAILED = "eslint failed"
+ESLINT_PARSE_RULE = "eslint"
+ESLINT_MIN_SEVERITY = 1
+ESLINT_RANGE_LENGTH = 2
+ESLINT_OPTIONS = ("--format", "json", "--no-warn-ignored")
+TOOL_FAILURE_EXIT = 2
+TS_GLOBS = ("**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts")
+JS_GLOBS = ("**/*.js", "**/*.jsx", "**/*.mjs", "**/*.cjs")
+PRETTIER_TOOL = "prettier"
+PRETTIER_ENV = "LINT_STRICT_PRETTIER"
+DEFAULT_PRETTIER = (
+    Path.home() / ".claude" / "tools" / "node" / NODE_BIN / PRETTIER_TOOL
+)
+PRETTIER_MISSING = "prettier not found (set LINT_STRICT_PRETTIER)"
+PRETTIER_FAILED = "prettier failed"
+PRETTIER_CONFIG_PATTERNS = (
+    ".prettierrc",
+    ".prettierrc.*",
+    "prettier.config.*",
+)
+PRETTIER_DEPENDENCY_SECTIONS = (
+    "dependencies",
+    "devDependencies",
+    "peerDependencies",
+    "optionalDependencies",
+)
+PRETTIER_NO_CONFIG = "--no-config"
+PRETTIER_COMBOS = (
+    (),
+    ("--single-quote",),
+    ("--no-semi",),
+    ("--single-quote", "--no-semi"),
+)
+PRETTIER_SAMPLE_LIMIT = 3
+PRETTIER_UNFORMATTED_MIN_LINES = 5
+PRETTIER_UNFORMATTED_RATIO = 0.2
+PRETTIER_UNFORMATTED_REFERENCE = (
+    "the file at HEAD (or, for a new file, its siblings) is not "
+    "prettier-formatted and the repo has no prettier config"
+)
+ESLINT_ERROR = "error"
+JS_MAX_DEPTH = 3
+JS_MAX_FUNCTION_LINES = 60
+JS_MAX_PARAMS = 4
+JS_MAX_NESTED_CALLBACKS = 3
+TYPESCRIPT_RULES = {
+    "@typescript-eslint/explicit-function-return-type": ESLINT_ERROR,
+    "@typescript-eslint/explicit-module-boundary-types": ESLINT_ERROR,
+}
+COMPLEXITY_RULES: dict[str, tuple[str, int | dict[str, int | bool]]] = {
+    "complexity": (ESLINT_ERROR, MAX_CYCLOMATIC_COMPLEXITY),
+    "max-depth": (ESLINT_ERROR, JS_MAX_DEPTH),
+    "max-lines-per-function": (
+        ESLINT_ERROR,
+        {
+            "max": JS_MAX_FUNCTION_LINES,
+            "skipBlankLines": True,
+            "skipComments": True,
+        },
+    ),
+    "max-params": (ESLINT_ERROR, JS_MAX_PARAMS),
+    "max-nested-callbacks": (ESLINT_ERROR, JS_MAX_NESTED_CALLBACKS),
+}
+TSC_TOOL = "tsc"
+TSC_ENV = "LINT_STRICT_TSC"
+TSCONFIG = "tsconfig.json"
+TSC_OPTIONS = ("--noEmit", "--pretty", "false")
+TSC_PROJECT_OPTION = "-p"
+TSC_INCREMENTAL_OPTION = "--incremental"
+TSC_BUILDINFO_OPTION = "--tsBuildInfoFile"
+TSC_BUILDINFO_SUFFIX = ".tsbuildinfo"
+TSC_LINE = re.compile(
+    r"^(?P<path>.+?)\((?P<line>\d+),(?P<column>\d+)\): "
+    r"error TS(?P<code>\d+): (?P<message>.*)$",
+)
+TSC_RULE_PREFIX = "tsc:TS"
+TSC_MISSING = "no tsc at {path} (set LINT_STRICT_TSC)"
+TSC_FAILED = "tsc failed"
+NO_TSCONFIG = "no tsconfig.json between the file and its package"
+TSC_INDEX_UNSUPPORTED = "tsc reads the working tree, not the staged content"
+TYPE_CHECKED_STRICT = "strictTypeChecked"
+TYPE_CHECKED_STYLISTIC = "stylisticTypeChecked"
+SYNTAX_STRICT = "strict"
+SYNTAX_STYLISTIC = "stylistic"
+MODERN_RULES = {"prefer-object-has-own": "error"}
+TSCONFIG_PATTERN = "tsconfig*.json"
+LS_FILES_INDEX = ("-z",)
+LS_FILES_WORK_TREE = ("-z", "-c", "-o", "--exclude-standard")
+OVERLAY_TEMPLATE = string.Template(
+    """import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
+
+const packageRequire = createRequire($package_json);
+const load = async (name) => {
+  const url = pathToFileURL(packageRequire.resolve(name)).href;
+  const loaded = await import(url);
+  return loaded.default ?? loaded;
+};
+const tsFiles = $ts_files;
+const allFiles = $all_files;
+const configUrl = $config_url;
+const own = configUrl === null ? [] : (await import(configUrl)).default;
+const configs = Array.isArray(own) ? [...own] : [own];
+if ($recommended) {
+  const js = await load("@eslint/js");
+  configs.push({ ...js.configs.recommended, files: allFiles });
+}
+if ($strict) {
+  const tseslint = await load("typescript-eslint");
+  const strict = [
+    ...tseslint.configs.$strict_config,
+    ...tseslint.configs.$stylistic_config,
+  ];
+  for (const entry of strict) {
+    configs.push(entry.files ? entry : { ...entry, files: tsFiles });
+  }
+  configs.push({
+    files: tsFiles,
+    languageOptions: $language_options,
+    rules: $typescript_rules,
+  });
+}
+configs.push({
+  files: allFiles,
+  rules: { ...$complexity_rules, ...$modern_rules },
+});
+export default configs;
+""",
+)
+
+
+def js_literal(value: object) -> str:
+    """Return value as a JavaScript literal."""
+    return json.dumps(value)
+
+
+def find_package(root: Path, file: Path) -> Path | None:
+    """Return the nearest directory with package.json inside the repo."""
+    for directory in file.parents:
+        if not directory.is_relative_to(root):
+            return None
+        if (directory / PACKAGE_JSON).is_file():
+            return directory
+    return None
+
+
+def node_module_available(package: Path, name: str) -> bool:
+    """Tell whether Node resolution from package finds the module."""
+    return any(
+        (directory / NODE_MODULES / name / PACKAGE_JSON).is_file()
+        for directory in (package, *package.parents)
+    )
+
+
+def package_eslint_config(package: Path) -> Path | None:
+    """Return the package's own flat eslint config file, if any."""
+    for name in ESLINT_CONFIG_NAMES:
+        candidate = package / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class OverlayPlan:
+    """What the eslint overlay config loads for one package."""
+
+    package: Path
+    config: Path | None
+    recommended: bool
+    strict: bool
+    type_aware: bool = True
+    object_has_own: bool = False
+
+
+def language_options(plan: OverlayPlan) -> dict[str, dict[str, object]]:
+    """Return the eslint language options the overlay sets for TypeScript."""
+    if not plan.type_aware:
+        return {}
+    return {
+        "parserOptions": {
+            "projectService": True,
+            "tsconfigRootDir": str(plan.package),
+        },
+    }
+
+
+def overlay_source(plan: OverlayPlan) -> str:
+    """Return the ESM flat config that layers the norms on the package."""
+    config_url = None if plan.config is None else plan.config.as_uri()
+    return OVERLAY_TEMPLATE.substitute(
+        package_json=js_literal(str(plan.package / PACKAGE_JSON)),
+        ts_files=js_literal(list(TS_GLOBS)),
+        all_files=js_literal([*TS_GLOBS, *JS_GLOBS]),
+        config_url=js_literal(config_url),
+        recommended=js_literal(plan.recommended),
+        strict=js_literal(plan.strict),
+        strict_config=(
+            TYPE_CHECKED_STRICT if plan.type_aware else SYNTAX_STRICT
+        ),
+        stylistic_config=(
+            TYPE_CHECKED_STYLISTIC if plan.type_aware else SYNTAX_STYLISTIC
+        ),
+        language_options=js_literal(language_options(plan)),
+        typescript_rules=js_literal(TYPESCRIPT_RULES),
+        complexity_rules=js_literal(COMPLEXITY_RULES),
+        modern_rules=js_literal(MODERN_RULES if plan.object_has_own else {}),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EslintFix:
+    """The replacement eslint proposes, in UTF-16 code unit offsets."""
+
+    start: int
+    end: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class EslintMessage:
+    """One eslint message of one file."""
+
+    file: str
+    line: int
+    column: int
+    rule: str
+    message: str
+    url: str
+    severity: int
+    fix: EslintFix | None = None
+
+
+def eslint_results(document: object) -> tuple[list[Any], dict[str, Any]]:
+    """Split eslint JSON into its results and its rules metadata."""
+    if isinstance(document, list):
+        return document, {}
+    if isinstance(document, dict):
+        metadata = document.get("metadata") or {}
+        rules = metadata.get("rulesMeta") or {}
+        return list(document.get("results") or []), rules
+    return [], {}
+
+
+def rule_url(rules: dict[str, Any], rule: str) -> str:
+    """Return the docs URL eslint metadata carries for a rule."""
+    docs = (rules.get(rule) or {}).get("docs") or {}
+    return str(docs.get("url") or "")
+
+
+def eslint_fix(raw: object) -> EslintFix | None:
+    """Convert the fix of an eslint message, None when it has none."""
+    if not isinstance(raw, dict):
+        return None
+    bounds = raw.get("range")
+    if not isinstance(bounds, list) or len(bounds) != ESLINT_RANGE_LENGTH:
+        return None
+    return EslintFix(int(bounds[0]), int(bounds[1]), str(raw.get("text", "")))
+
+
+def parse_eslint(stdout: str) -> list[EslintMessage] | None:
+    """Parse eslint JSON output; return None when it is not JSON."""
+    try:
+        document = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    results, rules = eslint_results(document)
+    messages: list[EslintMessage] = []
+    for result in results:
+        for item in result.get("messages") or []:
+            rule = item.get("ruleId") or ESLINT_PARSE_RULE
+            messages.append(
+                EslintMessage(
+                    file=str(result.get("filePath", "")),
+                    line=int(item.get("line") or MODULE_LINE),
+                    column=int(item.get("column") or FORMAT_COLUMN),
+                    rule=rule,
+                    message=str(item.get("message", "")),
+                    url=rule_url(rules, rule),
+                    severity=int(item.get("severity") or 0),
+                    fix=eslint_fix(item.get("fix")),
+                ),
+            )
+    return messages
+
+
+def not_checked_all(
+    targets: Sequence[LintTarget],
+    tool: str,
+    reason: str,
+) -> BackendResult:
+    """Return a result marking every target as not checked by a tool."""
+    return BackendResult(
+        not_checked=tuple(NotChecked(t.path, tool, reason) for t in targets),
+    )
+
+
+def violations_on_changed_lines(
+    targets: Sequence[LintTarget],
+    found: Sequence[Violation],
+) -> tuple[Violation, ...]:
+    """Keep the violations of the targets located on their changed lines."""
+    by_path = {target.path: target for target in targets}
+    return tuple(
+        violation
+        for violation in found
+        if violation.path in by_path
+        and violation.line in by_path[violation.path].changed_lines
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EslintRun:
+    """One eslint process over targets, from disk or from stdin."""
+
+    argv: tuple[str, ...]
+    targets: tuple[LintTarget, ...]
+    stdin: str | None
+
+
+def optional_heavy_slot(*, heavy: bool) -> AbstractContextManager[None]:
+    """Return the heavy slot for a heavy run, else a context doing nothing."""
+    return heavy_slot() if heavy else nullcontext()
+
+
+def run_eslint(
+    repo: Repo,
+    package: Path,
+    run: EslintRun,
+    *,
+    heavy: bool,
+) -> BackendResult:
+    """Run one eslint process and keep its findings on changed lines."""
+    with optional_heavy_slot(heavy=heavy):
+        done = run_tool(run.argv, package, run.stdin)
+    messages = parse_eslint(decode(done.stdout)) if done else None
+    failed = done is None or (
+        done.returncode >= TOOL_FAILURE_EXIT and not messages
+    )
+    if messages is None or failed:
+        reason = failure_reason(done.stderr, ESLINT_FAILED) if done else ""
+        return not_checked_all(
+            run.targets, ESLINT_TOOL, reason or ESLINT_FAILED
+        )
+    found = [
+        Violation(
+            path=repo.relative(message.file),
+            line=message.line,
+            column=message.column,
+            rule=message.rule,
+            message=message.message,
+            url=message.url,
+            tool=ESLINT_TOOL,
+        )
+        for message in messages
+        if message.severity >= ESLINT_MIN_SEVERITY
+    ]
+    return BackendResult(
+        violations=violations_on_changed_lines(run.targets, found),
+    )
+
+
+def eslint_runs(
+    repo: Repo,
+    base: Sequence[str],
+    targets: Sequence[LintTarget],
+) -> list[EslintRun]:
+    """Plan eslint processes: disk files together, index blobs one each."""
+    disk = tuple(t for t in targets if t.text_source is TextSource.DISK)
+    runs = []
+    if disk:
+        files = tuple(repo.absolute(t.path) for t in disk)
+        runs.append(EslintRun((*base, *files), disk, None))
+    runs.extend(
+        EslintRun(
+            (*base, *ESLINT_STDIN_OPTIONS, repo.absolute(t.path)),
+            (t,),
+            repo.read_text(t),
+        )
+        for t in targets
+        if t.text_source is TextSource.INDEX
+    )
+    return runs
+
+
+def overlay_plan(
+    repo: Repo,
+    package: Path,
+    typescript: Sequence[LintTarget],
+    es_year: int | None = None,
+) -> OverlayPlan:
+    """Plan the eslint overlay of a package from what it can resolve."""
+    return OverlayPlan(
+        package=package,
+        config=package_eslint_config(package),
+        recommended=node_module_available(package, ESLINT_JS),
+        strict=bool(typescript)
+        and node_module_available(package, TYPESCRIPT_ESLINT),
+        type_aware=not repo.quick,
+        object_has_own=es_year is not None and es_year >= OBJECT_HAS_OWN_YEAR,
+    )
+
+
+def package_overlay_plan(
+    repo: Repo, package: Path, typescript: Sequence[LintTarget]
+) -> OverlayPlan:
+    """Plan the eslint overlay of a package with its ES floor."""
+    directory = package.relative_to(repo.root).as_posix()
+    return overlay_plan(
+        repo, package, typescript, floor_resolver(repo).es_floor(directory)
+    )
+
+
+def eslint_base(
+    eslint: str, plan: OverlayPlan, scratch: str
+) -> tuple[str, ...]:
+    """Write the overlay config into scratch and return the eslint argv."""
+    overlay = Path(scratch) / OVERLAY_NAME
+    overlay.write_text(overlay_source(plan), encoding=TEXT_ENCODING)
+    return (eslint, "-c", str(overlay), *ESLINT_OPTIONS)
+
+
+def eslint_package(
+    repo: Repo,
+    package: Path,
+    targets: Sequence[LintTarget],
+    *,
+    heavy: bool,
+) -> BackendResult:
+    """Lint the targets of one package with its own eslint and the norms."""
+    eslint = usable_executable(package / NODE_BIN / ESLINT_TOOL)
+    if eslint is None:
+        reason = ESLINT_MISSING.format(path=package / NODE_BIN / ESLINT_TOOL)
+        return not_checked_all(targets, ESLINT_TOOL, reason)
+    typescript = [t for t in targets if t.language is Language.TYPESCRIPT]
+    plan = package_overlay_plan(repo, package, typescript)
+    results = []
+    if typescript and not plan.strict:
+        reason = STRICT_MISSING.format(package=package)
+        results.append(not_checked_all(typescript, STRICT_TOOL, reason))
+    with tempfile.TemporaryDirectory() as scratch:
+        base = eslint_base(eslint, plan, scratch)
+        results.extend(
+            run_eslint(repo, package, run, heavy=heavy)
+            for run in eslint_runs(repo, base, targets)
+        )
+    version = tool_version(eslint, ESLINT_TOOL, package)
+    return merge_results([*results, BackendResult(tools=(version,))])
+
+
+def parse_tsc(output: str) -> list[TypeDiagnostic]:
+    """Return the file errors of tsc output; global errors are dropped."""
+    matches = (TSC_LINE.match(line) for line in output.splitlines())
+    return [
+        TypeDiagnostic(
+            path=match["path"],
+            line=int(match["line"]),
+            column=int(match["column"]),
+            rule=f"{TSC_RULE_PREFIX}{match['code']}",
+            message=match["message"],
+        )
+        for match in matches
+        if match is not None
+    ]
+
+
+def find_tsconfig(package: Path, file: Path) -> Path | None:
+    """Return the tsconfig.json nearest to the file inside the package."""
+    return next(
+        (
+            directory / TSCONFIG
+            for directory in config_directories(package, file)
+            if (directory / TSCONFIG).is_file()
+        ),
+        None,
+    )
+
+
+def prepare_buildinfo(directory: Path, final: Path, temporary: Path) -> bool:
+    """Copy the last build info to a private file, tell if tsc may use it."""
+    prune_cache(directory)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        if final.is_file():
+            shutil.copyfile(final, temporary)
+            os.utime(final)
+    except OSError:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+        return False
+    return os.access(directory, os.W_OK)
+
+
+@contextmanager
+def tsc_incremental(config: Path) -> Iterator[tuple[str, ...]]:
+    """Yield the incremental tsc options, none when the cache is unusable."""
+    directory = cache_directory(TSC_CACHE)
+    name = cache_key(str(config))[:CACHE_KEY_LENGTH]
+    final = directory / f"{name}{TSC_BUILDINFO_SUFFIX}"
+    unique = f"{name}.{uuid.uuid4().hex}{TSC_BUILDINFO_SUFFIX}"
+    temporary = directory / unique
+    if not prepare_buildinfo(directory, final, temporary):
+        yield ()
+        return
+    try:
+        yield (TSC_INCREMENTAL_OPTION, TSC_BUILDINFO_OPTION, str(temporary))
+        with suppress(OSError):
+            if temporary.is_file():
+                temporary.replace(final)
+    finally:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+
+def run_tsc_process(
+    tsc: str,
+    config: Path,
+    incremental: Sequence[str],
+) -> subprocess.CompletedProcess[bytes] | None:
+    """Run tsc on one project with the given incremental options."""
+    argv = [
+        tsc,
+        *TSC_OPTIONS,
+        *incremental,
+        TSC_PROJECT_OPTION,
+        str(config),
+    ]
+    return run_tool(argv, config.parent)
+
+
+def tsc_ended_blind(
+    done: subprocess.CompletedProcess[bytes] | None,
+) -> bool:
+    """Tell whether tsc failed without reporting any file diagnostic."""
+    if done is None:
+        return False
+    failed = done.returncode != EXIT_PASS
+    return failed and not parse_tsc(decode(done.stdout))
+
+
+def run_tsc(
+    repo: Repo,
+    tsc: str,
+    config: Path,
+    targets: Sequence[LintTarget],
+) -> BackendResult:
+    """Run tsc on one project and keep its errors on changed lines."""
+    project = config.parent
+    with heavy_slot():
+        with tsc_incremental(config) as incremental:
+            done = run_tsc_process(tsc, config, incremental)
+            retry = bool(incremental) and tsc_ended_blind(done)
+        if retry:
+            done = run_tsc_process(tsc, config, ())
+    diagnostics = parse_tsc(decode(done.stdout)) if done else []
+    if done is None or (done.returncode != EXIT_PASS and not diagnostics):
+        reason = (
+            failure_reason(done.stdout + done.stderr, TSC_FAILED)
+            if done
+            else TSC_FAILED
+        )
+        return not_checked_all(targets, TSC_TOOL, reason)
+    files = targets_by_file(repo, targets)
+    return BackendResult(
+        violations=type_violations(files, project, diagnostics, TSC_TOOL),
+    )
+
+
+def group_by_tsconfig(
+    repo: Repo,
+    package: Path,
+    targets: Sequence[LintTarget],
+) -> dict[Path | None, list[LintTarget]]:
+    """Group targets by the tsconfig.json nearest to them in the package."""
+    groups: dict[Path | None, list[LintTarget]] = {}
+    for target in targets:
+        file = repo.absolute_path(target.path)
+        groups.setdefault(find_tsconfig(package, file), []).append(target)
+    return groups
+
+
+def tsc_results(
+    repo: Repo,
+    package: Path | None,
+    targets: Sequence[LintTarget],
+) -> BackendResult:
+    """Type-check a package's TypeScript targets with tsc per tsconfig."""
+    typescript = [t for t in targets if t.language is Language.TYPESCRIPT]
+    if not typescript:
+        return BackendResult()
+    if package is None:
+        return not_checked_all(typescript, TSC_TOOL, NO_PACKAGE)
+    configured = os.environ.get(TSC_ENV)
+    candidate = (
+        Path(configured) if configured else package / NODE_BIN / TSC_TOOL
+    )
+    tsc = usable_executable(candidate)
+    if tsc is None:
+        reason = TSC_MISSING.format(path=candidate)
+        return not_checked_all(typescript, TSC_TOOL, reason)
+    staged = [t for t in typescript if t.text_source is TextSource.INDEX]
+    disk = [t for t in typescript if t.text_source is TextSource.DISK]
+    results = [not_checked_all(staged, TSC_TOOL, TSC_INDEX_UNSUPPORTED)]
+    results.extend(
+        not_checked_all(group, TSC_TOOL, NO_TSCONFIG)
+        if config is None
+        else run_tsc(repo, tsc, config, group)
+        for config, group in group_by_tsconfig(repo, package, disk).items()
+    )
+    version = tool_version(tsc, TSC_TOOL, package)
+    return merge_results([*results, BackendResult(tools=(version,))])
+
+
+def uses_package_prettier(package: Path) -> bool:
+    """Tell whether a package configures or depends on prettier."""
+    if any(
+        any(True for _ in package.glob(pattern))
+        for pattern in PRETTIER_CONFIG_PATTERNS
+    ):
+        return True
+    try:
+        manifest = json.loads(decode((package / PACKAGE_JSON).read_bytes()))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(manifest, dict):
+        return False
+    return PRETTIER_TOOL in manifest or any(
+        PRETTIER_TOOL in (manifest.get(section) or {})
+        for section in PRETTIER_DEPENDENCY_SECTIONS
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PrettierChoice:
+    """The prettier executable for a package and whose config it uses."""
+
+    executable: str | None
+    own_config: bool
+    cwd: Path
+
+
+def prettier_for(repo: Repo, package: Path | None) -> PrettierChoice:
+    """Pick the package prettier when configured, else the fallback."""
+    if package is not None and uses_package_prettier(package):
+        own = usable_executable(package / NODE_BIN / PRETTIER_TOOL)
+        return PrettierChoice(own, own_config=True, cwd=package)
+    configured = os.environ.get(PRETTIER_ENV)
+    fallback = Path(configured) if configured else DEFAULT_PRETTIER
+    return PrettierChoice(
+        usable_executable(fallback),
+        own_config=False,
+        cwd=package or repo.root,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Sample:
+    """A text prettier options are matched against, with its path."""
+
+    path: str
+    text: str
+
+
+def changed_line_count(original: str, formatted: str) -> int:
+    """Return how many lines formatting changes."""
+    return sum(
+        max(opcode.end - opcode.start, opcode.new_end - opcode.new_start)
+        for opcode in line_opcodes(
+            split_lines(original),
+            split_lines(formatted),
+        )
+        if opcode.tag != EQUAL_OPCODE
+    )
+
+
+def choose_combo(
+    samples: Sequence[Sample],
+    format_with: Callable[[tuple[str, ...], Sample], str | None],
+) -> tuple[str, ...]:
+    """Return the option combo that changes the samples the least."""
+
+    def cost(combo: tuple[str, ...]) -> int:
+        """Return the lines the combo changes over all samples."""
+        total = 0
+        for sample in samples:
+            formatted = format_with(combo, sample)
+            total += (
+                len(split_lines(sample.text))
+                if formatted is None
+                else changed_line_count(sample.text, formatted)
+            )
+        return total
+
+    if not samples:
+        return PRETTIER_COMBOS[0]
+    return min(PRETTIER_COMBOS, key=cost)
+
+
+def tracked_paths(repo: Repo) -> frozenset[str]:
+    """Return the repo paths of every file in the index."""
+    output = repo.git("ls-files", "-z")
+    return frozenset(name for name in output.split(NUL) if name)
+
+
+def head_text(repo: Repo, path: str) -> str | None:
+    """Return the HEAD version of a file, or None for a new file."""
+    try:
+        return repo.git("show", f"{HEAD}:{path}")
+    except GitError:
+        return None
+
+
+def prettier_samples(
+    repo: Repo,
+    target: LintTarget,
+    tracked: frozenset[str],
+) -> list[Sample]:
+    """Return the HEAD version, else up to 3 tracked siblings."""
+    original = head_text(repo, target.path)
+    if original is not None:
+        return [Sample(target.path, original)]
+    own = PurePosixPath(target.path)
+    siblings = sorted(
+        (
+            name
+            for name in tracked
+            if name != target.path
+            and PurePosixPath(name).suffix == own.suffix
+            and repo.absolute_path(name).is_file()
+        ),
+        key=lambda name: (PurePosixPath(name).parent != own.parent, name),
+    )
+    return [
+        Sample(name, repo.read_source(name, TextSource.DISK))
+        for name in siblings[:PRETTIER_SAMPLE_LIMIT]
+    ]
+
+
+def ignore_content(path: Path) -> str | None:
+    """Return a key part for an ignore file, None when it is unreadable."""
+    try:
+        return IGNORE_PRESENT + path.read_bytes().hex()
+    except FileNotFoundError:
+        return IGNORE_ABSENT
+    except OSError:
+        return None
+
+
+def cached_stdout(document: object) -> bytes | None:
+    """Return the prettier output a cache entry holds, None if unusable."""
+    if not isinstance(document, dict):
+        return None
+    stdout = document.get(STDOUT_FIELD)
+    if not isinstance(stdout, str):
+        return None
+    try:
+        return stdout.encode(TEXT_ENCODING)
+    except UnicodeEncodeError:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class PrettierRunner:
+    """Runs one prettier executable on texts in a working directory."""
+
+    repo: Repo
+    choice: PrettierChoice
+    executable: str
+
+    def spawn(
+        self,
+        options: tuple[str, ...],
+        sample: Sample,
+    ) -> subprocess.CompletedProcess[bytes] | None:
+        """Start prettier with options on the sample text."""
+        argv = [
+            self.executable,
+            *options,
+            "--stdin-filepath",
+            self.repo.absolute(sample.path),
+        ]
+        return run_tool(argv, self.choice.cwd, sample.text)
+
+    def cache_name(
+        self,
+        options: tuple[str, ...],
+        sample: Sample,
+    ) -> str | None:
+        """Return the cache entry name of a run, None when not cacheable."""
+        identity = executable_identity(self.executable, self.choice.cwd)
+        ignores = [ignore_content(self.choice.cwd / n) for n in IGNORE_FILES]
+        if not identity or None in ignores:
+            return None
+        return cache_key(
+            identity,
+            str(Path(self.executable).resolve()),
+            NUL.join(options),
+            *(i for i in ignores if i is not None),
+            self.repo.absolute(sample.path),
+            sample.text,
+        )
+
+    def run(
+        self,
+        options: tuple[str, ...],
+        sample: Sample,
+    ) -> subprocess.CompletedProcess[bytes] | None:
+        """Run prettier with options on the sample text, reusing results."""
+        if self.choice.own_config:
+            return self.spawn(options, sample)
+        directory = cache_directory(PRETTIER_CACHE)
+        name = self.cache_name(options, sample)
+        if name is None:
+            return self.spawn(options, sample)
+        stdout = cached_stdout(cache_load(directory, name))
+        if stdout is not None:
+            return subprocess.CompletedProcess([], EXIT_PASS, stdout, b"")
+        done = self.spawn(options, sample)
+        if done is not None and done.returncode == EXIT_PASS:
+            document = {STDOUT_FIELD: decode(done.stdout)}
+            cache_store(directory, name, document)
+        return done
+
+    def format(self, options: tuple[str, ...], sample: Sample) -> str | None:
+        """Return the formatted sample, or None when prettier fails."""
+        done = self.run(options, sample)
+        if done is None or done.returncode != EXIT_PASS:
+            return None
+        return decode(done.stdout)
+
+
+def never_prettier_formatted(
+    runner: PrettierRunner,
+    options: tuple[str, ...],
+    samples: Sequence[Sample],
+) -> bool:
+    """Tell whether the samples together drift far from prettier's output."""
+    total = 0
+    drift = 0
+    for sample in samples:
+        lines = len(split_lines(sample.text))
+        formatted = runner.format(options, sample)
+        total += lines
+        drift += (
+            lines
+            if formatted is None
+            else changed_line_count(sample.text, formatted)
+        )
+    return drift >= max(
+        PRETTIER_UNFORMATTED_MIN_LINES,
+        PRETTIER_UNFORMATTED_RATIO * total,
+    )
+
+
+def prettier_options(
+    runner: PrettierRunner,
+    target: LintTarget,
+    tracked: frozenset[str],
+) -> tuple[str, ...] | None:
+    """Return the prettier options of a target, None when never formatted."""
+    if runner.choice.own_config:
+        return ()
+    samples = prettier_samples(runner.repo, target, tracked)
+    combo = choose_combo(
+        samples,
+        lambda combo, sample: runner.format(
+            (PRETTIER_NO_CONFIG, *combo),
+            sample,
+        ),
+    )
+    options = (PRETTIER_NO_CONFIG, *combo)
+    if samples and never_prettier_formatted(runner, options, samples):
+        return None
+    return options
+
+
+def prettier_target(
+    runner: PrettierRunner,
+    target: LintTarget,
+    tracked: frozenset[str],
+) -> BackendResult:
+    """Return FMT violations prettier finds on a target's changed lines.
+
+    Without a repo prettier config, a file whose style reference (its HEAD
+    version, or its siblings for a new file) is far from prettier's output
+    under the best-fitting options is reported as not checked: every edit
+    would otherwise drag in unrelated reformats or a foreign style.
+    """
+    options = prettier_options(runner, target, tracked)
+    if options is None:
+        return not_checked_all(
+            [target],
+            PRETTIER_TOOL,
+            PRETTIER_UNFORMATTED_REFERENCE,
+        )
+    text = runner.repo.read_text(target)
+    done = runner.run(options, Sample(target.path, text))
+    if done is None or done.returncode != EXIT_PASS:
+        reason = failure_reason(done.stderr, PRETTIER_FAILED) if done else ""
+        return not_checked_all(
+            [target],
+            PRETTIER_TOOL,
+            reason or PRETTIER_FAILED,
+        )
+    return BackendResult(
+        violations=tuple(
+            drift_violations(target, text, decode(done.stdout), PRETTIER_TOOL),
+        ),
+    )
+
+
+def prettier_package(
+    repo: Repo,
+    package: Path | None,
+    targets: Sequence[LintTarget],
+) -> BackendResult:
+    """Check the formatting of one package's targets with prettier."""
+    choice = prettier_for(repo, package)
+    if choice.executable is None:
+        return not_checked_all(targets, PRETTIER_TOOL, PRETTIER_MISSING)
+    runner = PrettierRunner(repo, choice, choice.executable)
+    tracked = tracked_paths(repo)
+    results = [prettier_target(runner, t, tracked) for t in targets]
+    version = resolved_version(choice.executable, PRETTIER_TOOL, choice.cwd)
+    return merge_results([*results, BackendResult(tools=(version,))])
+
+
+def group_by_package(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+) -> dict[Path | None, list[LintTarget]]:
+    """Group targets by the package that owns them."""
+    groups: dict[Path | None, list[LintTarget]] = {}
+    for target in targets:
+        package = find_package(repo.root, repo.absolute_path(target.path))
+        groups.setdefault(package, []).append(target)
+    return groups
+
+
+@dataclass(frozen=True, slots=True)
+class JsBackend:
+    """JavaScript and TypeScript: the package eslint plus prettier."""
+
+    name: str = "javascript"
+    languages: frozenset[Language] = JS_LANGUAGES
+    fast: bool = False
+
+    def run(self, repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+        """Lint JS/TS targets per package with eslint and prettier."""
+        results = []
+        for package, group in group_by_package(repo, targets).items():
+            if package is None:
+                results.append(not_checked_all(group, ESLINT_TOOL, NO_PACKAGE))
+            else:
+                results.append(
+                    eslint_package(repo, package, group, heavy=not self.fast),
+                )
+            if not self.fast:
+                results.append(tsc_results(repo, package, group))
+            results.append(prettier_package(repo, package, group))
+        return merge_results(results)
+
+    def fix(
+        self,
+        repo: Repo,
+        snapshots: Sequence[Snapshot],
+    ) -> dict[str, str]:
+        """Fix JS/TS snapshots with eslint and prettier."""
+        return fix_javascript(repo, snapshots)
+
+
+C_LANGUAGES = frozenset({Language.C, Language.CPP})
+CLANG_TIDY_TOOL = "clang-tidy"
+CLANG_TIDY_ENV = "LINT_STRICT_CLANG_TIDY"
+CLANG_FORMAT_TOOL = "clang-format"
+CLANG_FORMAT_ENV = "LINT_STRICT_CLANG_FORMAT"
+CHECKPATCH_TOOL = "checkpatch"
+ZEPHYR_BASE_ENV = "ZEPHYR_BASE"
+ZEPHYR_DIRECTORY = "zephyr"
+CHECKPATCH_SCRIPT = Path("scripts") / "checkpatch.pl"
+CHECKPATCH_CONF = ".checkpatch.conf"
+CHECKPATCH_REQUIRED_OPTIONS = ("--showfile", "--emacs")
+CHECKPATCH_INDENT_RULES = (
+    "LEADING_SPACE",
+    "CODE_INDENT",
+    "SUSPECT_CODE_INDENT",
+    "TABSTOP",
+    "SPACE_BEFORE_TAB",
+    "INDENTED_LABEL",
+    "SWITCH_CASE_INDENT_LEVEL",
+    "PARENTHESIS_ALIGNMENT",
+)
+CHECKPATCH_IGNORE_OPTION = "--ignore="
+CHECKPATCH_RULE_PREFIX = "checkpatch:"
+CHECKPATCH_FAILED = "cannot run checkpatch"
+CHECKPATCH_LINE = re.compile(
+    r"^(?P<path>[^:\s][^:]*):(?P<line>\d+): "
+    r"(?P<kind>[A-Z]+):(?P<id>[A-Z0-9_]+): (?P<message>.*)$",
+)
+CONF_OPTION = re.compile(r"^(?P<option>--[\w-]+)=(?P<value>.+)$")
+CONF_COMMENT = "#"
+COMPILE_DB_NAME = "compile_commands.json"
+COMPILE_DB_MAX_DEPTH = 4
+COMPILE_DB_SKIPPED = frozenset({".git", NODE_MODULES})
+NO_COMPILE_DB = "no compile_commands.json containing {path} - build first"
+NO_INCLUDING_UNIT = "no translation unit includes {name}"
+CLANG_TIDY_MISSING = "clang-tidy not found (set LINT_STRICT_CLANG_TIDY)"
+CLANG_TIDY_FAILED = "clang-tidy failed"
+CLANG_FORMAT_MISSING = "clang-format not found (set LINT_STRICT_CLANG_FORMAT)"
+CLANG_FORMAT_FAILED = "clang-format failed"
+NO_C_STYLE = "no project C style (.clang-format)"
+CLANG_FORMAT_STYLE = ".clang-format"
+HEADER_SUFFIXES = frozenset({".h", ".hpp", ".hh"})
+C_UNIT_SUFFIX = ".c"
+C_CHECK_PATTERNS = (
+    "-*",
+    "clang-diagnostic-*",
+    "clang-analyzer-*",
+    "bugprone-*",
+    "-bugprone-easily-swappable-parameters",
+    "cert-*",
+    "misc-*",
+    "-misc-include-cleaner",
+    "performance-*",
+    "portability-*",
+    "readability-*",
+    "-readability-identifier-length",
+    "-readability-magic-numbers",
+)
+C_CHECKS = ",".join(C_CHECK_PATTERNS)
+CPP_CHECKS = (
+    f"{C_CHECKS},cppcoreguidelines-*,-cppcoreguidelines-avoid-magic-numbers,"
+    "modernize-*"
+)
+COGNITIVE_COMPLEXITY_THRESHOLD = 15
+FUNCTION_LINE_THRESHOLD = 80
+FUNCTION_PARAMETER_THRESHOLD = 5
+FUNCTION_NESTING_THRESHOLD = 4
+TIDY_CHECK_OPTIONS = {
+    "readability-function-cognitive-complexity.Threshold": (
+        COGNITIVE_COMPLEXITY_THRESHOLD
+    ),
+    "readability-function-size.LineThreshold": FUNCTION_LINE_THRESHOLD,
+    "readability-function-size.ParameterThreshold": (
+        FUNCTION_PARAMETER_THRESHOLD
+    ),
+    "readability-function-size.NestingThreshold": FUNCTION_NESTING_THRESHOLD,
+}
+TIDY_CONFIG = json.dumps(
+    {"InheritParentConfig": True, "CheckOptions": TIDY_CHECK_OPTIONS},
+)
+TIDY_EXTRA_ARGS = (
+    "-Wall",
+    "-Wextra",
+    "-Wpedantic",
+    "-Wno-unknown-warning-option",
+)
+TIDY_LINE = re.compile(
+    r"^(?P<path>.+?):(?P<line>\d+):(?P<column>\d+): "
+    r"(?P<severity>warning|error|note): (?P<message>.*?)"
+    r"(?: \[(?P<check>[^\]]+)\])?$",
+)
+TIDY_NOTE = "note"
+MACRO_NOTE_PREFIX = "expanded from macro"
+TIDY_FALLBACK_RULE = "clang-tidy"
+TIDY_DOCS_URL = (
+    "https://clang.llvm.org/extra/clang-tidy/checks/{group}/{rest}.html"
+)
+TIDY_URL_GROUPS = ("clang-analyzer",)
+TIDY_UNDOCUMENTED_GROUPS = ("clang-diagnostic", TIDY_FALLBACK_RULE)
+TIDY_GROUP_SEPARATOR = "-"
+TIDY_CHECK_SEPARATOR = ","
+INCLUDE_DIRECTIVE = re.compile(
+    r'^\s*#\s*include\s*[<"](?P<name>[^>"]+)[>"]',
+    re.MULTILINE,
+)
+VFS_OVERLAY_NAME = "vfs-overlay.yaml"
+VFS_VERSION = 0
+NULL_DEVICE = os.devnull
+PATCH_PREFIXES = ("--src-prefix=a/", "--dst-prefix=b/")
+
+
+@dataclass(frozen=True, slots=True)
+class CompileEntry:
+    """A translation unit of a compile database."""
+
+    file: Path
+    directory: Path
+
+
+@dataclass(frozen=True, slots=True)
+class CompileDb:
+    """A compile_commands.json and its translation units."""
+
+    directory: Path
+    entries: tuple[CompileEntry, ...]
+
+    def entry_for(self, file: Path) -> CompileEntry | None:
+        """Return the entry compiling file, if any."""
+        return next((e for e in self.entries if e.file == file), None)
+
+
+def load_compile_db(path: Path) -> CompileDb | None:
+    """Load a compile database; None when it is not a list of entries."""
+    try:
+        document = json.loads(decode(path.read_bytes()))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, list):
+        return None
+    entries = []
+    for item in document:
+        if not isinstance(item, dict) or "file" not in item:
+            continue
+        directory = Path(str(item.get("directory") or path.parent))
+        file = (directory / str(item["file"])).resolve()
+        entries.append(CompileEntry(file, directory))
+    return CompileDb(path.parent, tuple(entries))
+
+
+def find_compile_dbs(root: Path) -> list[CompileDb]:
+    """Return every compile database at most 4 directories below root."""
+    found: list[CompileDb] = []
+    for directory, names, files in root.walk():
+        depth = len(directory.relative_to(root).parts)
+        kept = [] if depth >= COMPILE_DB_MAX_DEPTH else sorted(names)
+        names[:] = [name for name in kept if name not in COMPILE_DB_SKIPPED]
+        if COMPILE_DB_NAME in files:
+            database = load_compile_db(directory / COMPILE_DB_NAME)
+            if database is not None:
+                found.append(database)
+    return found
+
+
+def includes_basename(source: Path, basename: str) -> bool:
+    """Tell whether a source file includes a header by its basename."""
+    try:
+        text = decode(source.read_bytes())
+    except OSError:
+        return False
+    return any(
+        PurePosixPath(match.group("name")).name == basename
+        for match in INCLUDE_DIRECTIVE.finditer(text)
+    )
+
+
+def including_unit(
+    databases: Sequence[CompileDb],
+    header: Path,
+) -> tuple[CompileDb, CompileEntry] | None:
+    """Return a unit including the header, same directory first."""
+    candidates = [
+        (database, entry)
+        for database in databases
+        for entry in database.entries
+        if includes_basename(entry.file, header.name)
+    ]
+    candidates.sort(key=lambda pair: pair[1].file.parent != header.parent)
+    return candidates[0] if candidates else None
+
+
+@dataclass(frozen=True, slots=True)
+class TidyNote:
+    """A note clang-tidy attached to a diagnostic."""
+
+    path: str
+    line: int
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class TidyDiagnostic:
+    """A clang-tidy warning or error with its notes."""
+
+    path: str
+    line: int
+    column: int
+    message: str
+    check: str
+    notes: tuple[TidyNote, ...]
+
+
+def parse_clang_tidy(output: str) -> list[TidyDiagnostic]:
+    """Parse clang-tidy output into diagnostics carrying their notes."""
+    diagnostics: list[TidyDiagnostic] = []
+    for text in output.splitlines():
+        match = TIDY_LINE.match(text)
+        if match is None:
+            continue
+        line = int(match.group("line"))
+        if match.group("severity") == TIDY_NOTE:
+            if diagnostics:
+                note = TidyNote(
+                    match.group("path"), line, match.group("message")
+                )
+                last = diagnostics[-1]
+                diagnostics[-1] = replace(last, notes=(*last.notes, note))
+            continue
+        check = match.group("check") or TIDY_FALLBACK_RULE
+        diagnostics.append(
+            TidyDiagnostic(
+                path=match.group("path"),
+                line=line,
+                column=int(match.group("column")),
+                message=match.group("message"),
+                check=check.split(TIDY_CHECK_SEPARATOR)[0],
+                notes=(),
+            ),
+        )
+    return diagnostics
+
+
+def resolve_against(directory: Path, path: str) -> Path:
+    """Return path made absolute against directory and resolved."""
+    return (directory / path).resolve()
+
+
+def expanded_from_untracked(
+    diagnostic: TidyDiagnostic,
+    tracked: frozenset[Path],
+    directory: Path,
+) -> bool:
+    """Tell whether a macro note points into a file the repo lacks."""
+    return any(
+        note.message.startswith(MACRO_NOTE_PREFIX)
+        and resolve_against(directory, note.path) not in tracked
+        for note in diagnostic.notes
+    )
+
+
+def clang_tidy_url(check: str) -> str:
+    """Return the documentation URL of a clang-tidy check."""
+    for group in TIDY_UNDOCUMENTED_GROUPS:
+        if check.startswith(group):
+            return ""
+    for group in TIDY_URL_GROUPS:
+        if check.startswith(group + TIDY_GROUP_SEPARATOR):
+            rest = check.removeprefix(group + TIDY_GROUP_SEPARATOR)
+            return TIDY_DOCS_URL.format(group=group, rest=rest)
+    group, separator, rest = check.partition(TIDY_GROUP_SEPARATOR)
+    if not separator:
+        return ""
+    return TIDY_DOCS_URL.format(group=group, rest=rest)
+
+
+def vfs_overlay_yaml(real: Path, contents: Path) -> str:
+    """Return a clang VFS overlay mapping real to the contents file."""
+    overlay = {
+        "version": VFS_VERSION,
+        "use-external-names": False,
+        "roots": [
+            {
+                "name": str(real),
+                "type": "file",
+                "external-contents": str(contents),
+            },
+        ],
+    }
+    return json.dumps(overlay, indent=2)
+
+
+@dataclass(frozen=True, slots=True)
+class TidyJob:
+    """One clang-tidy process: the unit to run and the target it checks."""
+
+    target: LintTarget
+    database: Path
+    directory: Path
+    unit: Path
+    header_filter: str | None
+
+
+def tidy_job(
+    repo: Repo,
+    databases: Sequence[CompileDb],
+    target: LintTarget,
+) -> TidyJob | NotChecked:
+    """Plan the clang-tidy run of a target, or say why it cannot run."""
+    path = repo.absolute_path(target.path).resolve()
+    if path.suffix in HEADER_SUFFIXES:
+        pair = including_unit(databases, path)
+        if pair is None:
+            reason = NO_INCLUDING_UNIT.format(name=path.name)
+            return NotChecked(target.path, CLANG_TIDY_TOOL, reason)
+        database, entry = pair
+        header_filter = re.escape(str(path))
+        return TidyJob(
+            target,
+            database.directory,
+            entry.directory,
+            entry.file,
+            header_filter,
+        )
+    for database in databases:
+        entry = database.entry_for(path)
+        if entry is not None:
+            return TidyJob(
+                target,
+                database.directory,
+                entry.directory,
+                path,
+                None,
+            )
+    reason = NO_COMPILE_DB.format(path=path)
+    return NotChecked(target.path, CLANG_TIDY_TOOL, reason)
+
+
+def tidy_command(
+    executable: str,
+    job: TidyJob,
+    overlay: Path | None,
+) -> list[str]:
+    """Return the clang-tidy argv of a job."""
+    checks = C_CHECKS if job.unit.suffix == C_UNIT_SUFFIX else CPP_CHECKS
+    argv = [
+        executable,
+        "-p",
+        str(job.database),
+        "--quiet",
+        f"--checks={checks}",
+        f"--config={TIDY_CONFIG}",
+        *(f"--extra-arg={argument}" for argument in TIDY_EXTRA_ARGS),
+    ]
+    if job.header_filter is not None:
+        argv.append(f"--header-filter={job.header_filter}")
+    if overlay is not None:
+        argv.append(f"--vfsoverlay={overlay}")
+    argv.append(str(job.unit))
+    return argv
+
+
+@dataclass(frozen=True, slots=True)
+class TidyContext:
+    """What every clang-tidy job of a run shares."""
+
+    repo: Repo
+    executable: str
+    tracked: frozenset[Path]
+
+
+def run_tidy_job(context: TidyContext, job: TidyJob) -> BackendResult:
+    """Run clang-tidy for one job and keep findings on changed lines."""
+    target = job.target
+    real = context.repo.absolute_path(target.path).resolve()
+    with tempfile.TemporaryDirectory() as scratch:
+        overlay = None
+        if target.text_source is TextSource.INDEX:
+            contents = Path(scratch) / real.name
+            contents.write_text(
+                context.repo.read_text(target),
+                encoding=TEXT_ENCODING,
+            )
+            overlay = Path(scratch) / VFS_OVERLAY_NAME
+            overlay.write_text(
+                vfs_overlay_yaml(real, contents),
+                encoding=TEXT_ENCODING,
+            )
+        argv = tidy_command(context.executable, job, overlay)
+        done = run_tool(argv, job.directory)
+    diagnostics = parse_clang_tidy(decode(done.stdout)) if done else []
+    if done is None or (done.returncode != EXIT_PASS and not diagnostics):
+        reason = failure_reason(done.stderr, CLANG_TIDY_FAILED) if done else ""
+        return not_checked_all(
+            [target],
+            CLANG_TIDY_TOOL,
+            reason or CLANG_TIDY_FAILED,
+        )
+    found = [
+        Violation(
+            path=target.path,
+            line=diagnostic.line,
+            column=diagnostic.column,
+            rule=diagnostic.check,
+            message=diagnostic.message,
+            url=clang_tidy_url(diagnostic.check),
+            tool=CLANG_TIDY_TOOL,
+        )
+        for diagnostic in diagnostics
+        if resolve_against(job.directory, diagnostic.path) == real
+        and not expanded_from_untracked(
+            diagnostic,
+            context.tracked,
+            job.directory,
+        )
+    ]
+    return BackendResult(
+        violations=violations_on_changed_lines([target], found),
+    )
+
+
+def clang_tidy_results(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+) -> BackendResult:
+    """Run clang-tidy on every C/C++ target in parallel."""
+    executable = find_tool(CLANG_TIDY_ENV, CLANG_TIDY_TOOL)
+    if executable is None:
+        return not_checked_all(targets, CLANG_TIDY_TOOL, CLANG_TIDY_MISSING)
+    databases = find_compile_dbs(repo.root)
+    planned = [tidy_job(repo, databases, target) for target in targets]
+    jobs = [job for job in planned if isinstance(job, TidyJob)]
+    skipped = tuple(item for item in planned if isinstance(item, NotChecked))
+    results = [BackendResult(not_checked=skipped)]
+    if jobs:
+        tracked = frozenset(
+            repo.absolute_path(name).resolve() for name in tracked_paths(repo)
+        )
+        context = TidyContext(repo, executable, tracked)
+        with ThreadPoolExecutor() as pool:
+            results.extend(
+                pool.map(lambda job: run_tidy_job(context, job), jobs),
+            )
+        version = tool_version(executable, CLANG_TIDY_TOOL, repo.root)
+        results.append(BackendResult(tools=(version,)))
+    return merge_results(results)
+
+
+def zephyr_base(repo: Repo) -> Path | None:
+    """Return the Zephyr base of a Zephyr repo, if any."""
+    local = repo.root / ZEPHYR_DIRECTORY
+    if (local / CHECKPATCH_SCRIPT).is_file():
+        return local
+    configured = os.environ.get(ZEPHYR_BASE_ENV)
+    if configured and (Path(configured) / CHECKPATCH_SCRIPT).is_file():
+        return Path(configured)
+    return None
+
+
+def absolute_option(token: str, base: Path) -> str:
+    """Make the relative path value of a --option=value token absolute."""
+    match = CONF_OPTION.match(token)
+    if match is None:
+        return token
+    value = match.group("value")
+    if Path(value).is_absolute() or not (base / value).exists():
+        return token
+    return f"{match.group('option')}={base / value}"
+
+
+def rewrite_checkpatch_conf(text: str, base: Path) -> str:
+    """Return the conf with absolute paths plus --showfile and --emacs."""
+    lines = []
+    for line in split_lines(text):
+        if line.lstrip().startswith(CONF_COMMENT):
+            lines.append(line)
+            continue
+        lines.append(" ".join(absolute_option(t, base) for t in line.split()))
+    present = {token for line in lines for token in line.split()}
+    lines.extend(o for o in CHECKPATCH_REQUIRED_OPTIONS if o not in present)
+    lines.append(CHECKPATCH_IGNORE_OPTION + ",".join(CHECKPATCH_INDENT_RULES))
+    return NEWLINE.join(lines) + NEWLINE
+
+
+def checkpatch_patch(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+    tracked: frozenset[str],
+) -> str:
+    """Return the scoped diff of the targets, untracked ones as new."""
+    known = [t.path for t in targets if t.path in tracked]
+    parts = []
+    if known:
+        parts.append(
+            repo.git(
+                "--literal-pathspecs",
+                "diff",
+                *repo.diff_arguments,
+                *DIFF_FLAGS,
+                *PATCH_PREFIXES,
+                PATHSPEC_SEPARATOR,
+                *known,
+            ),
+        )
+    for target in targets:
+        if target.path in tracked:
+            continue
+        argv = [
+            GIT,
+            "diff",
+            "--no-index",
+            "--no-color",
+            *PATCH_PREFIXES,
+            PATHSPEC_SEPARATOR,
+            NULL_DEVICE,
+            target.path,
+        ]
+        done = run_tool(argv, repo.root)
+        parts.append(decode(done.stdout) if done else "")
+    return "".join(parts)
+
+
+def parse_checkpatch(output: str) -> list[Violation]:
+    """Parse checkpatch emacs lines into violations."""
+    found = []
+    for text in output.splitlines():
+        match = CHECKPATCH_LINE.match(text)
+        if match is None:
+            continue
+        found.append(
+            Violation(
+                path=match.group("path"),
+                line=int(match.group("line")),
+                column=FORMAT_COLUMN,
+                rule=CHECKPATCH_RULE_PREFIX + match.group("id"),
+                message=match.group("message"),
+                url="",
+                tool=CHECKPATCH_TOOL,
+            ),
+        )
+    return found
+
+
+def checkpatch_results(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+    base: Path,
+) -> BackendResult:
+    """Run the Zephyr checkpatch on the scoped diff of C targets."""
+    c_targets = [t for t in targets if t.language is Language.C]
+    if not c_targets:
+        return BackendResult()
+    patch = checkpatch_patch(repo, c_targets, tracked_paths(repo))
+    conf = base / CHECKPATCH_CONF
+    conf_text = decode(conf.read_bytes()) if conf.is_file() else ""
+    with tempfile.TemporaryDirectory() as scratch:
+        (Path(scratch) / CHECKPATCH_CONF).write_text(
+            rewrite_checkpatch_conf(conf_text, base),
+            encoding=TEXT_ENCODING,
+        )
+        argv = [str(base / CHECKPATCH_SCRIPT), "--no-tree", "--patch", "-"]
+        done = run_tool(argv, Path(scratch), patch)
+    if done is None:
+        return not_checked_all(c_targets, CHECKPATCH_TOOL, CHECKPATCH_FAILED)
+    found = parse_checkpatch(decode(done.stdout))
+    return BackendResult(
+        violations=violations_on_changed_lines(c_targets, found),
+        tools=(CHECKPATCH_TOOL,),
+    )
+
+
+def clang_style(repo: Repo, file: Path) -> Path | None:
+    """Return the nearest .clang-format inside the repository."""
+    for directory in config_directories(repo.root, file):
+        candidate = directory / CLANG_FORMAT_STYLE
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def clang_format_argv(executable: str, style: Path, path: Path) -> list[str]:
+    """Return the clang-format argv formatting stdin in the project style."""
+    return [executable, f"--style=file:{style}", f"--assume-filename={path}"]
+
+
+def clang_format_target(
+    repo: Repo,
+    executable: str,
+    target: LintTarget,
+) -> BackendResult:
+    """Return FMT violations clang-format finds on changed lines."""
+    path = repo.absolute_path(target.path)
+    style = clang_style(repo, path)
+    if style is None:
+        return not_checked_all([target], CLANG_FORMAT_TOOL, NO_C_STYLE)
+    text = repo.read_text(target)
+    argv = clang_format_argv(executable, style, path)
+    done = run_tool(argv, repo.root, text)
+    if done is None or done.returncode != EXIT_PASS:
+        reason = (
+            failure_reason(done.stderr, CLANG_FORMAT_FAILED) if done else ""
+        )
+        return not_checked_all(
+            [target],
+            CLANG_FORMAT_TOOL,
+            reason or CLANG_FORMAT_FAILED,
+        )
+    formatted = decode(done.stdout)
+    return BackendResult(
+        violations=tuple(
+            drift_violations(target, text, formatted, CLANG_FORMAT_TOOL),
+        ),
+        tools=(tool_version(executable, CLANG_FORMAT_TOOL, repo.root),),
+    )
+
+
+def clang_format_results(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+) -> BackendResult:
+    """Check the formatting of C/C++ targets with the project style."""
+    executable = find_tool(CLANG_FORMAT_ENV, CLANG_FORMAT_TOOL)
+    if executable is None:
+        return not_checked_all(
+            targets, CLANG_FORMAT_TOOL, CLANG_FORMAT_MISSING
+        )
+    return merge_results(
+        [clang_format_target(repo, executable, t) for t in targets],
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CBackend:
+    """C and C++: clang-tidy, clang-format and, in Zephyr, checkpatch."""
+
+    name: str = "c"
+    languages: frozenset[Language] = C_LANGUAGES
+    fast: bool = False
+
+    def run(self, repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+        """Lint C/C++ targets with every applicable C tool."""
+        if self.fast:
+            return clang_format_results(repo, targets)
+        base = zephyr_base(repo)
+        results = [
+            clang_tidy_results(repo, targets),
+            clang_format_results(repo, targets),
+        ]
+        if base is not None:
+            results.append(checkpatch_results(repo, targets, base))
+        return merge_results(results)
+
+    def fix(
+        self,
+        repo: Repo,
+        snapshots: Sequence[Snapshot],
+    ) -> dict[str, str]:
+        """Fix C/C++ snapshots with clang-format."""
+        return fix_c(repo, snapshots)
+
+
+RUFF_SAFE = "safe"
+RUFF_FIX_PASSES = 3
+FILE_CHANGED_DURING_FIX = "file changed during --fix"
+FILE_UNREADABLE = "not readable as UTF-8 text"
+FILE_WRITE_FAILED = "cannot write the fixed file: {error}"
+TEMP_SUFFIX = ".lint-strict.tmp"
+FIXED_MESSAGE = "fixed {lines} lines in {files}"
+LINE_BREAKS = "\r\n"
+CARRIAGE_RETURN = "\r"
+BMP_MAX = 0xFFFF
+UTF16_UNIT = 1
+SURROGATE_UNITS = 2
+ESLINT_STDIN_OPTIONS = ("--stdin", STDIN_FILENAME_OPTION)
+
+
+@dataclass(frozen=True, slots=True)
+class Snapshot:
+    """The bytes and the text of a target as read when --fix started."""
+
+    target: LintTarget
+    data: bytes
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class FixState:
+    """A text under repair and the lines of it that count as changed."""
+
+    text: str
+    changed: frozenset[int]
+
+
+@dataclass(frozen=True, slots=True)
+class SpliceResult:
+    """A text with formatter changes spliced in and the lines it moved."""
+
+    text: str
+    lines_replaced: int
+
+
+@dataclass(frozen=True, slots=True)
+class FixSummary:
+    """The files --fix rewrote, the lines it changed and what it skipped."""
+
+    files: tuple[str, ...]
+    lines: int
+    not_checked: tuple[NotChecked, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TextEdit:
+    """A replacement of the text between two offsets."""
+
+    start: int
+    end: int
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class EditSpan:
+    """The old lines an edit removes, the new lines it writes, the shift."""
+
+    old: range
+    new: range
+    delta: int
+
+
+@dataclass(frozen=True, slots=True)
+class TextFix:
+    """Edits of one fix; they are applied together or not at all."""
+
+    edits: tuple[TextEdit, ...]
+
+
+def initial_state(snapshot: Snapshot) -> FixState:
+    """Return the state of a snapshot before any fix."""
+    return FixState(snapshot.text, snapshot.target.changed_lines)
+
+
+def split_keeping_ends(text: str) -> list[str]:
+    """Split text into lines that keep their line endings."""
+    parts = text.split(NEWLINE)
+    lines = [part + NEWLINE for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def with_line_ending(line: str, model: str) -> str:
+    """Return the body of a line with the line ending of the model."""
+    body = line.rstrip(LINE_BREAKS)
+    return body + model[len(model.rstrip(LINE_BREAKS)) :]
+
+
+def match_trailing_newline(text: str, original: str) -> str:
+    """Give the text the trailing newline state the original had."""
+    wants = original.endswith(NEWLINE)
+    if not text or text.endswith(NEWLINE) == wants:
+        return text
+    if wants:
+        return text + NEWLINE
+    return text.removesuffix(NEWLINE).removesuffix(CARRIAGE_RETURN)
+
+
+def join_lines(lines: Sequence[str], original: str) -> str:
+    """Join lines into a text that ends like the original."""
+    body = "".join(
+        line if line.endswith(NEWLINE) else line + NEWLINE
+        for line in lines[:-1]
+    )
+    return match_trailing_newline(body + "".join(lines[-1:]), original)
+
+
+def splice_equal_lines(
+    first_line: int,
+    before: Sequence[str],
+    after: Sequence[str],
+    changed: frozenset[int],
+) -> tuple[list[str], int]:
+    """Take the formatted version of the changed lines of a replacement."""
+    lines: list[str] = []
+    count = 0
+    pairs = enumerate(zip(before, after, strict=True), start=first_line)
+    for number, (old, new) in pairs:
+        merged = with_line_ending(new, old) if number in changed else old
+        count += int(merged != old)
+        lines.append(merged)
+    return lines, count
+
+
+def squeezed(line: str) -> str:
+    """Return a line without any whitespace."""
+    return "".join(line.split())
+
+
+@dataclass(frozen=True, slots=True)
+class SplicePlan:
+    """The lines of a text and its formatted version, and what changed."""
+
+    old: Sequence[str]
+    new: Sequence[str]
+    changed: frozenset[int]
+    original_squeezed: frozenset[str]
+
+    @classmethod
+    def of(
+        cls,
+        original: str,
+        formatted: str,
+        changed: frozenset[int],
+    ) -> Self:
+        """Split both texts and derive the squeezed original lines."""
+        old = split_keeping_ends(original)
+        return cls(
+            old,
+            split_keeping_ends(formatted),
+            changed,
+            frozenset(squeezed(line) for line in old),
+        )
+
+    def before(self, opcode: Opcode) -> list[str]:
+        """Return the original lines an opcode covers."""
+        return list(self.old[opcode.start : opcode.end])
+
+    def after(self, opcode: Opcode) -> list[str]:
+        """Return the formatted lines an opcode produces."""
+        return list(self.new[opcode.new_start : opcode.new_end])
+
+    def pairs_up(self, opcode: Opcode) -> bool:
+        """Tell whether each line became a whitespace twin or a new line."""
+        before = self.before(opcode)
+        after = self.after(opcode)
+        if len(before) != len(after):
+            return False
+        return all(
+            squeezed(a) == squeezed(b)
+            or squeezed(b) not in self.original_squeezed
+            for a, b in zip(before, after, strict=True)
+        )
+
+
+def splice_opcode(opcode: Opcode, plan: SplicePlan) -> tuple[list[str], int]:
+    """Return the lines an opcode contributes and how many it replaced."""
+    before = plan.before(opcode)
+    after = plan.after(opcode)
+    if opcode.tag == EQUAL_OPCODE:
+        return before, 0
+    if plan.pairs_up(opcode):
+        first = opcode_lines(opcode).start
+        return splice_equal_lines(first, before, after, plan.changed)
+    if opcode_fully_changed(opcode, plan.changed):
+        return after, max(len(before), len(after))
+    return before, 0
+
+
+def moved_lines(opcodes: Sequence[Opcode], plan: SplicePlan) -> bool:
+    """Tell whether a line leaves one place and appears in another."""
+    removed: Counter[str] = Counter()
+    added: Counter[str] = Counter()
+    for op in opcodes:
+        if op.tag == EQUAL_OPCODE or plan.pairs_up(op):
+            continue
+        removed.update(squeezed(line) for line in plan.before(op))
+        added.update(squeezed(line) for line in plan.after(op))
+    return any(line for line in removed & added)
+
+
+def unsafe_reordering(opcodes: Sequence[Opcode], plan: SplicePlan) -> bool:
+    """Tell whether lines move and some line of the move is unchanged."""
+    if not moved_lines(opcodes, plan):
+        return False
+    return not all(
+        opcode_fully_changed(op, plan.changed)
+        for op in opcodes
+        if op.tag != EQUAL_OPCODE
+    )
+
+
+def splice_formatting(
+    original: str,
+    formatted: str,
+    changed: frozenset[int],
+) -> SpliceResult:
+    """Apply the formatter changes on changed lines, keep the rest."""
+    plan = SplicePlan.of(original, formatted, changed)
+    opcodes = line_opcodes(split_lines(original), split_lines(formatted))
+    if unsafe_reordering(opcodes, plan):
+        return SpliceResult(original, 0)
+    lines: list[str] = []
+    replaced = 0
+    for opcode in opcodes:
+        kept, count = splice_opcode(opcode, plan)
+        lines.extend(kept)
+        replaced += count
+    return SpliceResult(join_lines(lines, original), replaced)
+
+
+def spliced_text(
+    text: str,
+    changed: frozenset[int],
+    format_text: Callable[[str], str | None],
+) -> str:
+    """Splice the formatter changes on changed lines, if still canonical."""
+    formatted = format_text(text)
+    if formatted is None:
+        return text
+    result = splice_formatting(text, formatted, changed)
+    if not result.lines_replaced or format_text(result.text) != formatted:
+        return text
+    return result.text
+
+
+def edits_overlap(first: TextEdit, second: TextEdit) -> bool:
+    """Tell whether two edits touch the same stretch of text."""
+    return first.start <= second.end and second.start <= first.end
+
+
+def select_fixes(fixes: Sequence[TextFix]) -> list[TextFix]:
+    """Keep each fix whose edits overlap no fix kept before it."""
+    chosen: list[TextFix] = []
+    taken: list[TextEdit] = []
+    for fix in fixes:
+        if any(edits_overlap(e, other) for e in fix.edits for other in taken):
+            continue
+        chosen.append(fix)
+        taken.extend(fix.edits)
+    return chosen
+
+
+def edit_span(
+    text: str,
+    starts: Sequence[int],
+    edit: TextEdit,
+    shift: int,
+) -> EditSpan:
+    """Locate the lines an edit removes and the lines it writes."""
+    removed = text[edit.start : edit.end].count(NEWLINE)
+    added = edit.content.count(NEWLINE)
+    old_first = bisect.bisect_right(starts, edit.start)
+    whole_lines = (
+        edit.start in starts
+        and edit.end in starts
+        and (not edit.content or edit.content.endswith(NEWLINE))
+    )
+    written = added if whole_lines else added + 1
+    gone = removed if whole_lines else removed + 1
+    new_first = old_first + shift
+    return EditSpan(
+        range(old_first, old_first + gone),
+        range(new_first, new_first + written),
+        added - removed,
+    )
+
+
+def shifted_lines(
+    changed: frozenset[int],
+    spans: Sequence[EditSpan],
+) -> set[int]:
+    """Move the changed lines no edit touched to their new numbers."""
+    return {
+        line + sum(span.delta for span in spans if span.old.stop <= line)
+        for line in changed
+        if not any(line in span.old for span in spans)
+    }
+
+
+def apply_fixes(state: FixState, fixes: Sequence[TextFix]) -> FixState:
+    """Apply the fixes and carry the changed lines through their edits."""
+    starts = line_offsets(state.text)
+    edits = sorted(
+        (edit for fix in fixes for edit in fix.edits),
+        key=lambda edit: (edit.start, edit.end),
+    )
+    pieces: list[str] = []
+    spans: list[EditSpan] = []
+    cursor = 0
+    shift = 0
+    for edit in edits:
+        span = edit_span(state.text, starts, edit, shift)
+        pieces.extend((state.text[cursor : edit.start], edit.content))
+        spans.append(span)
+        cursor = edit.end
+        shift += span.delta
+    pieces.append(state.text[cursor:])
+    touched = {line for span in spans for line in span.new}
+    changed = shifted_lines(state.changed, spans) | touched
+    return FixState("".join(pieces), frozenset(changed))
+
+
+def line_offsets(text: str) -> list[int]:
+    """Return the offset at which each line of the text starts."""
+    return [0, *(i + 1 for i, char in enumerate(text) if char == NEWLINE)]
+
+
+def ruff_offset(
+    starts: Sequence[int],
+    text: str,
+    location: dict[str, int],
+) -> int:
+    """Convert a ruff row and column into an offset in the text."""
+    row = location["row"] - 1
+    if row >= len(starts):
+        return len(text)
+    return min(starts[row] + location["column"] - 1, len(text))
+
+
+def ruff_fix(
+    fix: dict[str, Any],
+    starts: Sequence[int],
+    text: str,
+) -> TextFix:
+    """Convert the JSON fix of a ruff diagnostic into a text fix."""
+    return TextFix(
+        tuple(
+            TextEdit(
+                ruff_offset(starts, text, edit["location"]),
+                ruff_offset(starts, text, edit["end_location"]),
+                edit["content"],
+            )
+            for edit in fix["edits"]
+        ),
+    )
+
+
+def safe_ruff_fixes(
+    items: Sequence[dict[str, Any]],
+    text: str,
+    changed: frozenset[int],
+) -> list[TextFix]:
+    """Return the safe fixes of ruff diagnostics located on changed lines."""
+    starts = line_offsets(text)
+    return [
+        ruff_fix(item["fix"], starts, text)
+        for item in items
+        if (item.get("fix") or {}).get("applicability") == RUFF_SAFE
+        and item["location"]["row"] in changed
+    ]
+
+
+def utf16_index_function(text: str) -> Callable[[int], int]:
+    """Return a function turning UTF-16 offsets of text into indexes."""
+    ends = list(
+        itertools.accumulate(
+            SURROGATE_UNITS if ord(char) > BMP_MAX else UTF16_UNIT
+            for char in text
+        ),
+    )
+    return lambda offset: bisect.bisect_right(ends, offset)
+
+
+def eslint_text_fixes(
+    messages: Sequence[EslintMessage],
+    text: str,
+    changed: frozenset[int],
+) -> list[TextFix]:
+    """Return the fixes of eslint messages located on changed lines."""
+    index_of = utf16_index_function(text)
+    return [
+        TextFix(
+            (
+                TextEdit(
+                    index_of(message.fix.start),
+                    index_of(message.fix.end),
+                    message.fix.text,
+                ),
+            ),
+        )
+        for message in messages
+        if message.fix is not None and message.line in changed
+    ]
+
+
+def run_formatter(argv: Sequence[str], cwd: Path, text: str) -> str | None:
+    """Return the text a formatter prints for stdin, None on failure."""
+    done = run_tool(argv, cwd, text)
+    if done is None or done.returncode != EXIT_PASS:
+        return None
+    return decode(done.stdout)
+
+
+@dataclass(frozen=True, slots=True)
+class RuffFixer:
+    """Applies the safe ruff fixes and the ruff formatter to one target."""
+
+    settings: RuffSettings
+    repo: Repo
+    target: LintTarget
+    style: PythonStyle
+
+    def check(self, text: str) -> list[dict[str, Any]] | None:
+        """Return the ruff diagnostics of a text, None on failure."""
+        filename = self.repo.absolute(self.target.path)
+        command = [
+            *self.settings.check_command(
+                self.style,
+                test_file=is_test_file(self.target.path),
+            ),
+            *stdin_arguments(filename),
+        ]
+        return ruff_items(run_tool(command, self.repo.root, text))
+
+    def format(self, text: str) -> str | None:
+        """Return the text formatted by ruff, None on failure."""
+        filename = self.repo.absolute(self.target.path)
+        command = self.settings.format_command(self.style, filename)
+        return run_formatter(command, self.repo.root, text)
+
+    def fix_pass(self, state: FixState) -> FixState | None:
+        """Apply the safe fixes on changed lines, None when none apply."""
+        fixes = select_fixes(
+            safe_ruff_fixes(
+                self.check(state.text) or [],
+                state.text,
+                state.changed,
+            ),
+        )
+        if not fixes:
+            return None
+        return apply_fixes(state, fixes)
+
+    def fixed_text(self, snapshot: Snapshot) -> str:
+        """Return the snapshot text fixed and formatted on changed lines."""
+        state = initial_state(snapshot)
+        for _ in range(RUFF_FIX_PASSES):
+            stepped = self.fix_pass(state)
+            if stepped is None:
+                break
+            state = stepped
+        return spliced_text(state.text, state.changed, self.format)
+
+
+def fix_python(repo: Repo, snapshots: Sequence[Snapshot]) -> dict[str, str]:
+    """Fix Python targets with the safe ruff fixes and ruff format."""
+    executable = find_tool(RUFF_ENV, RUFF_TOOL)
+    if executable is None:
+        return {}
+    settings = RuffSettings(executable, RUFF_TOOL)
+    return {
+        snapshot.target.path: RuffFixer(
+            settings,
+            repo,
+            snapshot.target,
+            python_style(repo, snapshot.target),
+        ).fixed_text(snapshot)
+        for snapshot in snapshots
+    }
+
+
+def apply_eslint_messages(
+    messages: Sequence[EslintMessage],
+    state: FixState,
+) -> FixState:
+    """Apply the eslint fixes located on changed lines in one pass."""
+    fixes = select_fixes(
+        eslint_text_fixes(messages, state.text, state.changed),
+    )
+    if not fixes:
+        return state
+    return apply_fixes(state, fixes)
+
+
+@dataclass(frozen=True, slots=True)
+class EslintFixer:
+    """Applies the fixes eslint proposes on the changed lines of a target."""
+
+    repo: Repo
+    package: Path
+    base: tuple[str, ...]
+    batched: dict[str, list[EslintMessage]]
+
+    def fix(self, target: LintTarget, state: FixState) -> FixState:
+        """Apply the eslint fixes located on changed lines in one pass."""
+        messages = self.batched.get(target.path)
+        if messages is None:
+            argv = (
+                *self.base,
+                *ESLINT_STDIN_OPTIONS,
+                self.repo.absolute(target.path),
+            )
+            done = run_tool(argv, self.package, state.text)
+            parsed = parse_eslint(decode(done.stdout)) if done else None
+            messages = parsed or []
+        return apply_eslint_messages(messages, state)
+
+
+def unchanged_on_disk(repo: Repo, snapshot: Snapshot) -> bool:
+    """Tell whether the file still holds the bytes the snapshot read."""
+    try:
+        path = repo.absolute_path(snapshot.target.path)
+        return path.read_bytes() == snapshot.data
+    except OSError:
+        return False
+
+
+def eslint_batch_messages(
+    repo: Repo,
+    package: Path,
+    base: tuple[str, ...],
+    snapshots: Sequence[Snapshot],
+) -> dict[str, list[EslintMessage]]:
+    """Run one eslint over snapshots on disk; no messages when it fails."""
+    if not snapshots:
+        return {}
+    files = (repo.absolute(s.target.path) for s in snapshots)
+    done = run_tool((*base, *files), package)
+    messages = parse_eslint(decode(done.stdout)) if done else None
+    if done is None or messages is None:
+        return {}
+    if done.returncode >= TOOL_FAILURE_EXIT and not messages:
+        return {}
+    batched: dict[str, list[EslintMessage]] = {
+        s.target.path: [] for s in snapshots
+    }
+    for message in messages:
+        batched.get(repo.relative(message.file), []).append(message)
+    return batched
+
+
+def eslint_fixed_states(
+    repo: Repo,
+    package: Path,
+    snapshots: Sequence[Snapshot],
+) -> dict[str, FixState]:
+    """Apply the package eslint fixes to the snapshots of one package."""
+    states = {s.target.path: initial_state(s) for s in snapshots}
+    eslint = usable_executable(package / NODE_BIN / ESLINT_TOOL)
+    if eslint is None:
+        return states
+    typescript = [
+        s.target for s in snapshots if s.target.language is Language.TYPESCRIPT
+    ]
+    plan = package_overlay_plan(repo, package, typescript)
+    on_disk = [s for s in snapshots if unchanged_on_disk(repo, s)]
+    with tempfile.TemporaryDirectory() as scratch:
+        base = eslint_base(eslint, plan, scratch)
+        batched = eslint_batch_messages(repo, package, base, on_disk)
+        fixer = EslintFixer(repo, package, base, batched)
+        return {
+            s.target.path: fixer.fix(s.target, states[s.target.path])
+            for s in snapshots
+        }
+
+
+def prettier_fixed_text(
+    runner: PrettierRunner,
+    target: LintTarget,
+    state: FixState,
+    tracked: frozenset[str],
+) -> str:
+    """Return the state text formatted by prettier on changed lines."""
+    options = prettier_options(runner, target, tracked)
+    if options is None:
+        return state.text
+    return spliced_text(
+        state.text,
+        state.changed,
+        lambda text: runner.format(options, Sample(target.path, text)),
+    )
+
+
+def fix_package(
+    repo: Repo,
+    package: Path | None,
+    snapshots: Sequence[Snapshot],
+) -> dict[str, str]:
+    """Fix the JS/TS targets of one package with eslint and prettier."""
+    states = (
+        {s.target.path: initial_state(s) for s in snapshots}
+        if package is None
+        else eslint_fixed_states(repo, package, snapshots)
+    )
+    choice = prettier_for(repo, package)
+    if choice.executable is None:
+        return {path: state.text for path, state in states.items()}
+    runner = PrettierRunner(repo, choice, choice.executable)
+    tracked = tracked_paths(repo)
+    return {
+        s.target.path: prettier_fixed_text(
+            runner,
+            s.target,
+            states[s.target.path],
+            tracked,
+        )
+        for s in snapshots
+    }
+
+
+def fix_javascript(
+    repo: Repo,
+    snapshots: Sequence[Snapshot],
+) -> dict[str, str]:
+    """Fix JS/TS targets per package with eslint and prettier."""
+    by_path = {s.target.path: s for s in snapshots}
+    texts: dict[str, str] = {}
+    groups = group_by_package(repo, [s.target for s in snapshots])
+    for package, group in groups.items():
+        texts.update(
+            fix_package(repo, package, [by_path[t.path] for t in group]),
+        )
+    return texts
+
+
+def fix_c(repo: Repo, snapshots: Sequence[Snapshot]) -> dict[str, str]:
+    """Fix C/C++ targets with clang-format in the project style."""
+    executable = find_tool(CLANG_FORMAT_ENV, CLANG_FORMAT_TOOL)
+    if executable is None:
+        return {}
+    texts: dict[str, str] = {}
+    for snapshot in snapshots:
+        path = repo.absolute_path(snapshot.target.path)
+        style = clang_style(repo, path)
+        if style is None:
+            continue
+        argv = clang_format_argv(executable, style, path)
+        texts[snapshot.target.path] = spliced_text(
+            snapshot.text,
+            snapshot.target.changed_lines,
+            functools.partial(run_formatter, argv, repo.root),
+        )
+    return texts
+
+
+def read_snapshot(repo: Repo, target: LintTarget) -> Snapshot | NotChecked:
+    """Read a target once as bytes and text, or say why it is skipped."""
+    try:
+        data = repo.absolute_path(target.path).read_bytes()
+        return Snapshot(target, data, data.decode(TEXT_ENCODING))
+    except (OSError, UnicodeDecodeError):
+        return NotChecked(target.path, PROGRAM, FILE_UNREADABLE)
+
+
+def write_temporary(path: Path, content: bytes) -> Path:
+    """Write content next to path with the mode of path; return the file."""
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent,
+        suffix=TEMP_SUFFIX,
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(content)
+    try:
+        shutil.copymode(path, temporary)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
+def write_if_unchanged(
+    path: Path,
+    snapshot: bytes,
+    content: bytes,
+) -> str | None:
+    """Replace the file unless it changed; return why it was not."""
+    try:
+        temporary = write_temporary(path, content)
+    except OSError as error:
+        return FILE_WRITE_FAILED.format(error=error)
+    try:
+        if path.read_bytes() != snapshot:
+            temporary.unlink(missing_ok=True)
+            return FILE_CHANGED_DURING_FIX
+        temporary.replace(path)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        return FILE_WRITE_FAILED.format(error=error)
+    return None
+
+
+def fixed_texts(
+    repo: Repo,
+    snapshots: Sequence[Snapshot],
+) -> dict[str, str]:
+    """Let every backend fix the snapshots of its languages."""
+    texts: dict[str, str] = {}
+    for backend in BACKENDS:
+        mine = [s for s in snapshots if s.target.language in backend.languages]
+        if mine:
+            texts.update(backend.fix(repo, mine))
+    return texts
+
+
+def fix_targets(repo: Repo, targets: Sequence[LintTarget]) -> FixSummary:
+    """Fix the changed lines of the targets on disk, compare-and-swap."""
+    read = [read_snapshot(repo, target) for target in targets]
+    snapshots = [item for item in read if isinstance(item, Snapshot)]
+    skipped = [item for item in read if isinstance(item, NotChecked)]
+    texts = fixed_texts(repo, snapshots)
+    files: list[str] = []
+    lines = 0
+    for snapshot in snapshots:
+        path = snapshot.target.path
+        text = texts.get(path, snapshot.text)
+        if text == snapshot.text:
+            continue
+        failure = write_if_unchanged(
+            repo.absolute_path(path),
+            snapshot.data,
+            text.encode(TEXT_ENCODING),
+        )
+        if failure is None:
+            files.append(path)
+            lines += changed_line_count(snapshot.text, text)
+        else:
+            skipped.append(NotChecked(path, PROGRAM, failure))
+    return FixSummary(tuple(files), lines, tuple(skipped))
+
+
+JSCPD_TOOL = "jscpd"
+JSCPD_ENV = "LINT_STRICT_JSCPD"
+JSCPD_MISSING = "jscpd not found (set LINT_STRICT_JSCPD or put it on PATH)"
+JSCPD_FAILED = "jscpd failed"
+JSCPD_TIMEOUT = "jscpd did not finish within its time budget"
+JSCPD_BAD_REPORT = "jscpd wrote no readable report"
+JSCPD_MIN_LINES = 8
+JSCPD_MIN_TOKENS = 80
+JSCPD_TIMEOUT_SECONDS = 60.0
+JSCPD_ARGUMENT_LIMIT = 1_000_000
+JSCPD_REPORT_NAME = "jscpd-report.json"
+JSCPD_OUTPUT_OPTION = "--output"
+JSCPD_OPTIONS = (
+    "--min-lines",
+    str(JSCPD_MIN_LINES),
+    "--min-tokens",
+    str(JSCPD_MIN_TOKENS),
+    "--reporters",
+    "json",
+    "--silent",
+    "--absolute",
+)
+CLONE_RULE = "DUP001"
+CLONE_COLUMN = 1
+CLONE_MESSAGE = (
+    "duplicates {path}:{start}-{end} ({lines} lines) "
+    "— reuse or extract a shared function"
+)
+STAGED_DIFFERS = "staged content differs from the working tree"
+CLONE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".mjs",
+        ".cjs",
+        ".mts",
+        ".cts",
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".hpp",
+    },
+)
+CLONE_EXCLUDED_SEGMENTS = frozenset(
+    {
+        NODE_MODULES,
+        "build",
+        "dist",
+        ".venv",
+        "venv",
+        "vendor",
+        "migrations",
+        "__generated__",
+        "generated",
+    },
+)
+DECLARATION_SUFFIX = ".d.ts"
+JS_TEST_MARKERS = frozenset({".test", ".spec"})
+JS_TEST_DIRECTORIES = frozenset({"__tests__", "e2e", "cypress"})
+BASE_DIRECTORY = "base"
+BASE_ARCHIVE = "base.tar"
+
+
+type CloneKey = tuple[frozenset[str], int | str]
+
+
+class CloneCheckError(Exception):
+    """The clone check could not finish; the message says why."""
+
+
+@dataclass(frozen=True, slots=True)
+class CloneFragment:
+    """One side of a clone: a repo path and an inclusive line range."""
+
+    path: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class Clone:
+    """Two fragments jscpd found to be copies of each other."""
+
+    first: CloneFragment
+    second: CloneFragment
+    lines: int
+    tokens: int
+    digest: str = ""
+
+
+def is_clone_exempt(path: str) -> bool:
+    """Tell whether a repo path is a test file exempt from clone checks."""
+    pure = PurePosixPath(path)
+    return (
+        is_test_file(path)
+        or PurePosixPath(pure.stem).suffix in JS_TEST_MARKERS
+        or bool(JS_TEST_DIRECTORIES.intersection(pure.parts[:-1]))
+    )
+
+
+def clone_eligible(path: str) -> bool:
+    """Tell whether jscpd should read a repo path."""
+    pure = PurePosixPath(path)
+    return (
+        pure.suffix in CLONE_SUFFIXES
+        and not path.endswith(DECLARATION_SUFFIX)
+        and not is_clone_exempt(path)
+        and CLONE_EXCLUDED_SEGMENTS.isdisjoint(pure.parts)
+    )
+
+
+def clone_inputs(repo: Repo, targets: Sequence[LintTarget]) -> list[str]:
+    """Return the repo files jscpd reads: tracked and changed, on disk."""
+    diverged = {t.path for t in targets if t.text_source is TextSource.INDEX}
+    candidates = tracked_paths(repo) | {t.path for t in targets}
+    return sorted(
+        path
+        for path in candidates - diverged
+        if clone_eligible(path) and is_plain_file(repo.absolute_path(path))
+    )
+
+
+def is_plain_file(path: Path) -> bool:
+    """Tell whether a path is a regular file and not a symlink."""
+    return path.is_file() and not path.is_symlink()
+
+
+def chunk_by_size(items: Sequence[str], limit: int) -> list[list[str]]:
+    """Split items into chunks whose joined size stays within the limit."""
+    chunks: list[list[str]] = [[]]
+    size = 0
+    for item in items:
+        cost = len(item.encode(TEXT_ENCODING)) + 1
+        if chunks[-1] and size + cost > limit:
+            chunks.append([])
+            size = 0
+        chunks[-1].append(item)
+        size += cost
+    return chunks
+
+
+def fragment_from(raw: dict[str, Any], root: Repo) -> CloneFragment:
+    """Convert one file entry of a jscpd report into a fragment."""
+    return CloneFragment(
+        root.relative(raw["name"]),
+        int(raw["start"]),
+        int(raw["end"]),
+    )
+
+
+def clone_text_digest(text: str) -> str:
+    """Hash a clone's text without its whitespace; empty for no text."""
+    squeezed_text = squeezed(text)
+    if not squeezed_text:
+        return ""
+    return hashlib.sha256(squeezed_text.encode(TEXT_ENCODING)).hexdigest()
+
+
+def clone_from(item: dict[str, Any], root: Repo) -> Clone:
+    """Convert one duplicate of a jscpd report into a clone."""
+    first = fragment_from(item["firstFile"], root)
+    second = fragment_from(item["secondFile"], root)
+    lines = int(item.get("lines") or first.end - first.start + 1)
+    return Clone(
+        first,
+        second,
+        lines,
+        int(item.get("tokens") or 0),
+        clone_text_digest(str(item.get("fragment") or "")),
+    )
+
+
+def read_clone_report(report: Path, root: Repo) -> list[Clone]:
+    """Parse the duplicates of a jscpd JSON report."""
+    try:
+        document = json.loads(decode(report.read_bytes()))
+        return [clone_from(item, root) for item in document["duplicates"]]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        raise CloneCheckError(JSCPD_BAD_REPORT) from None
+
+
+def run_jscpd(
+    executable: str,
+    cwd: Path,
+    files: Sequence[str],
+    output: Path,
+    deadline: float,
+) -> None:
+    """Run jscpd on files, writing its report into the output directory."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CloneCheckError(JSCPD_TIMEOUT)
+    argv = [executable, *JSCPD_OPTIONS, JSCPD_OUTPUT_OPTION, str(output)]
+    try:
+        done = subprocess.run(
+            [*argv, *files],
+            cwd=cwd,
+            capture_output=True,
+            check=False,
+            timeout=remaining,
+        )
+    except subprocess.TimeoutExpired:
+        raise CloneCheckError(JSCPD_TIMEOUT) from None
+    except OSError:
+        raise CloneCheckError(JSCPD_FAILED) from None
+    if not (output / JSCPD_REPORT_NAME).is_file():
+        raise CloneCheckError(failure_reason(done.stderr, JSCPD_FAILED))
+
+
+def detect_clones(
+    executable: str,
+    root: Repo,
+    files: Sequence[str],
+    deadline: float,
+) -> list[Clone]:
+    """Run jscpd over files in size-limited chunks and merge the clones."""
+    clones: list[Clone] = []
+    with tempfile.TemporaryDirectory() as scratch:
+        chunks = chunk_by_size(files, JSCPD_ARGUMENT_LIMIT)
+        for number, chunk in enumerate(chunks):
+            output = Path(scratch) / str(number)
+            run_jscpd(executable, root.root, chunk, output, deadline)
+            report = output / JSCPD_REPORT_NAME
+            clones.extend(read_clone_report(report, root))
+    return clones
+
+
+def present_in_base(repo: Repo, ref: str, paths: Sequence[str]) -> list[str]:
+    """Return the paths the base version has."""
+    listing = repo.git("ls-tree", "-r", "-z", "--name-only", ref)
+    existing = frozenset(filter(None, listing.split(NUL)))
+    return [path for path in paths if path in existing]
+
+
+def materialize_base(
+    repo: Repo,
+    ref: str,
+    present: Sequence[str],
+    destination: Path,
+) -> None:
+    """Extract the base version of the present paths."""
+    archive = destination.parent / BASE_ARCHIVE
+    repo.git("archive", "--format=tar", f"--output={archive}", ref)
+    with tarfile.open(archive) as bundle:
+        wanted = frozenset(present)
+        members = [
+            member
+            for member in bundle.getmembers()
+            if member.isfile() and member.name in wanted
+        ]
+        for member in members:
+            bundle.extract(member, destination, filter=tarfile.data_filter)
+
+
+def clone_key(clone: Clone) -> CloneKey:
+    """Identify a clone by its paths and its text, else its size."""
+    pair = frozenset({clone.first.path, clone.second.path})
+    return pair, clone.digest or clone.tokens or clone.lines
+
+
+def cached_clone_keys(document: object) -> set[CloneKey] | None:
+    """Return the clone keys a cache entry holds, None if malformed."""
+    if not isinstance(document, list):
+        return None
+    keys: set[CloneKey] = set()
+    for item in document:
+        match item:
+            case [[*paths], int() | str() as size] if all(
+                isinstance(path, str) for path in paths
+            ):
+                keys.add((frozenset(paths), size))
+            case _:
+                return None
+    return keys
+
+
+def base_revision(repo: Repo) -> str | None:
+    """Return the commit the base ref names now, None when it has none."""
+    try:
+        return repo.git("rev-parse", repo.base_ref).strip()
+    except GitError:
+        return None
+
+
+def base_cache_name(
+    repo: Repo,
+    executable: str,
+    revision: str,
+    present: Sequence[str],
+) -> str | None:
+    """Return the cache entry name of the base clones, None if unusable."""
+    identity = executable_identity(executable, repo.root)
+    if not identity:
+        return None
+    return cache_key(
+        revision,
+        identity,
+        str(Path(executable).resolve()),
+        NUL.join(JSCPD_OPTIONS),
+        NUL.join(sorted(present)),
+    )
+
+
+def detect_base_clones(
+    repo: Repo,
+    executable: str,
+    ref: str,
+    present: Sequence[str],
+    deadline: float,
+) -> list[Clone]:
+    """Run jscpd over the base version of the present paths."""
+    with tempfile.TemporaryDirectory() as scratch:
+        base_root = Path(scratch) / BASE_DIRECTORY
+        materialize_base(repo, ref, present, base_root)
+        base_repo = Repo(base_root)
+        return detect_clones(
+            executable,
+            base_repo,
+            [base_repo.absolute(path) for path in present],
+            deadline,
+        )
+
+
+def base_clone_keys(
+    repo: Repo,
+    executable: str,
+    inputs: Sequence[str],
+    deadline: float,
+) -> set[CloneKey]:
+    """Return the keys of the clones the base version of the inputs had."""
+    revision = base_revision(repo)
+    ref = revision or repo.base_ref
+    present = present_in_base(repo, ref, inputs)
+    if not present:
+        return set()
+    directory = cache_directory(JSCPD_CACHE)
+    name = (
+        None
+        if revision is None
+        else base_cache_name(repo, executable, revision, present)
+    )
+    if name is not None:
+        cached = cached_clone_keys(cache_load(directory, name))
+        if cached is not None:
+            return cached
+    base = detect_base_clones(repo, executable, ref, present, deadline)
+    keys = {clone_key(clone) for clone in base}
+    if name is not None:
+        cache_store(
+            directory,
+            name,
+            [[sorted(pair), size] for pair, size in keys],
+        )
+    return keys
+
+
+def new_clones(
+    repo: Repo,
+    executable: str,
+    inputs: Sequence[str],
+) -> list[Clone]:
+    """Return the clones of the inputs that the base version lacked."""
+    deadline = time.monotonic() + JSCPD_TIMEOUT_SECONDS
+    absolute = [repo.absolute(path) for path in inputs]
+    current = detect_clones(executable, repo, absolute, deadline)
+    if not current:
+        return []
+    known = base_clone_keys(repo, executable, inputs, deadline)
+    return [clone for clone in current if clone_key(clone) not in known]
+
+
+def clone_violation(
+    own: CloneFragment,
+    other: CloneFragment,
+    lines: int,
+    target: LintTarget,
+) -> Violation | None:
+    """Return a violation for a fragment overlapping the changed lines."""
+    first = min(
+        (n for n in target.changed_lines if own.start <= n <= own.end),
+        default=None,
+    )
+    if first is None:
+        return None
+    message = CLONE_MESSAGE.format(
+        path=other.path,
+        start=other.start,
+        end=other.end,
+        lines=lines,
+    )
+    return Violation(
+        path=own.path,
+        line=first,
+        column=CLONE_COLUMN,
+        rule=CLONE_RULE,
+        message=message,
+        url="",
+        tool=JSCPD_TOOL,
+    )
+
+
+def clone_violations(
+    targets: Sequence[LintTarget],
+    clones: Sequence[Clone],
+) -> tuple[Violation, ...]:
+    """Return a violation per clone fragment touching a changed line."""
+    by_path = {target.path: target for target in targets}
+    found = (
+        clone_violation(own, other, clone.lines, by_path[own.path])
+        for clone in clones
+        for own, other in (
+            (clone.first, clone.second),
+            (clone.second, clone.first),
+        )
+        if own.path in by_path
+    )
+    return tuple(violation for violation in found if violation is not None)
+
+
+def clone_results(repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+    """Flag new clones on the changed lines of the targets."""
+    eligible = [t for t in targets if clone_eligible(t.path)]
+    if not eligible:
+        return BackendResult()
+    executable = find_tool(JSCPD_ENV, JSCPD_TOOL)
+    if executable is None:
+        return not_checked_all(eligible, JSCPD_TOOL, JSCPD_MISSING)
+    diverged = [t for t in eligible if t.text_source is TextSource.INDEX]
+    checked = [t for t in eligible if t.text_source is TextSource.DISK]
+    skipped = not_checked_all(diverged, JSCPD_TOOL, STAGED_DIFFERS)
+    if not checked:
+        return skipped
+    try:
+        clones = new_clones(repo, executable, clone_inputs(repo, targets))
+    except (CloneCheckError, GitError, OSError, tarfile.TarError) as error:
+        failed = not_checked_all(checked, JSCPD_TOOL, str(error))
+        return merge_results([skipped, failed])
+    found = BackendResult(
+        violations=clone_violations(checked, clones),
+        tools=(resolved_version(executable, JSCPD_TOOL, repo.root),),
+    )
+    return merge_results([skipped, found])
+
+
+@dataclass(frozen=True, slots=True)
+class CloneBackend:
+    """Duplicated code: jscpd clones that touch the changed lines."""
+
+    name: str = "clones"
+    languages: frozenset[Language] = NON_LOCALE_LANGUAGES
+
+    def run(self, repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+        """Flag new clones of existing code on the changed lines."""
+        return clone_results(repo, targets)
+
+    def fix(
+        self,
+        _repo: Repo,
+        _snapshots: Sequence[Snapshot],
+    ) -> dict[str, str]:
+        """Return no fixes, clones cannot be fixed mechanically."""
+        return {}
+
+
+MAGIC_TOOL = "magic-numbers"
+MAGIC_VERSION = "magic-numbers (built-in)"
+MAGIC_COMPARISON_MESSAGE = (
+    "magic number in comparison: {values} — name it as a constant"
+)
+MAGIC_REPEATED_MESSAGE = (
+    "magic number repeated on {lines}+ lines: {values} — name it as a constant"
+)
+MAGIC_DELAY_MESSAGE = (
+    "magic number in a delay: {values} — name it as a constant"
+)
+MAGIC_MESSAGES = {
+    MagicRule.COMPARISON: MAGIC_COMPARISON_MESSAGE,
+    MagicRule.REPEATED: MAGIC_REPEATED_MESSAGE,
+    MagicRule.DELAY: MAGIC_DELAY_MESSAGE,
+}
+MAGIC_STATIC_LANGUAGES = {
+    Language.TYPESCRIPT: StaticLanguage.SCRIPT,
+    Language.JAVASCRIPT: StaticLanguage.SCRIPT,
+    Language.C: StaticLanguage.NATIVE,
+    Language.CPP: StaticLanguage.NATIVE,
+}
+
+
+def magic_hits(target: LintTarget, text: str) -> list[MagicHit]:
+    """Return the magic-number hits of one target's text."""
+    changed = target.changed_lines
+    if target.language is Language.PYTHON:
+        tree = parse_python(text)
+        return [] if tree is None else python_magic_hits(tree, changed, text)
+    language = MAGIC_STATIC_LANGUAGES[target.language]
+    return token_magic_hits(tokenize_source(text, language), language, changed)
+
+
+def magic_violation(target: LintTarget, hit: MagicHit) -> Violation:
+    """Turn a magic-number hit into a violation."""
+    message = MAGIC_MESSAGES[hit.rule].format(
+        values=", ".join(hit.values), lines=REPEAT_LINES
+    )
+    return Violation(
+        path=target.path,
+        line=hit.line,
+        column=hit.column,
+        rule=hit.rule.value,
+        message=message,
+        url="",
+        tool=MAGIC_TOOL,
+    )
+
+
+def magic_target_results(repo: Repo, target: LintTarget) -> BackendResult:
+    """Return the magic-number violations of one target."""
+    try:
+        hits = magic_hits(target, repo.read_text(target))
+    except (GitError, OSError) as error:
+        return BackendResult(
+            not_checked=(NotChecked(target.path, MAGIC_TOOL, str(error)),)
+        )
+    return BackendResult(
+        violations=tuple(magic_violation(target, hit) for hit in hits)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MagicBackend:
+    """Magic numbers: comparisons, delays and values repeated on 3+ lines."""
+
+    name: str = MAGIC_TOOL
+    languages: frozenset[Language] = NON_LOCALE_LANGUAGES
+
+    def run(self, repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+        """Flag magic numbers on the changed lines of non-test targets."""
+        checked = [t for t in targets if not static_is_test(t.path)]
+        if not checked:
+            return BackendResult()
+        results = [magic_target_results(repo, target) for target in checked]
+        return merge_results([*results, BackendResult(tools=(MAGIC_VERSION,))])
+
+    def fix(
+        self,
+        _repo: Repo,
+        _snapshots: Sequence[Snapshot],
+    ) -> dict[str, str]:
+        """Return no fixes, magic numbers cannot be fixed mechanically."""
+        return {}
+
+
+HABIT_TOOL = "habit-rules"
+HABIT_VERSION = "habit-rules (built-in)"
+HABIT_PARSE_FAILURE = "the file does not parse"
+ENV_EXAMPLE_FILE = ".env.example"
+ENV_EXAMPLE_NAME = re.compile(
+    r"^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=", re.MULTILINE
+)
+REPOSITORIES_SEGMENT = "repositories"
+STAGED_ARGUMENT = "--cached"
+
+
+@dataclass(frozen=True, slots=True)
+class RepoFacts:
+    """What the habit rules need to know about the repository."""
+
+    repo_slug: str | None
+    env_example_names: frozenset[str] | None
+    has_repositories_dir: bool
+    floors: FloorResolver
+
+
+def run_text_source(repo: Repo) -> TextSource:
+    """Return where repo configuration files are read from in this run."""
+    if STAGED_ARGUMENT in repo.diff_arguments:
+        return TextSource.INDEX
+    return TextSource.DISK
+
+
+def env_example_names(repo: Repo) -> frozenset[str] | None:
+    """Return the variable names of the root .env.example, if it exists."""
+    try:
+        text = repo.read_source(ENV_EXAMPLE_FILE, run_text_source(repo))
+    except (GitError, OSError):
+        return None
+    return frozenset(ENV_EXAMPLE_NAME.findall(text))
+
+
+def tracked_or_present_files(repo: Repo, directory: str) -> list[str]:
+    """List the files under a directory of the run's text source."""
+    options = (
+        LS_FILES_INDEX
+        if run_text_source(repo) is TextSource.INDEX
+        else LS_FILES_WORK_TREE
+    )
+    try:
+        return repo.git("ls-files", *options, "--", directory).split(NUL)
+    except GitError:
+        return []
+
+
+def tsconfig_paths(repo: Repo, directory: str) -> list[str]:
+    """List the tsconfig files under a directory, skipping node_modules."""
+    return sorted(
+        name
+        for name in tracked_or_present_files(repo, directory)
+        if fnmatch.fnmatch(PurePosixPath(name).name, TSCONFIG_PATTERN)
+        and NODE_MODULES not in PurePosixPath(name).parts
+    )
+
+
+def floor_resolver(repo: Repo) -> FloorResolver:
+    """Return a floor resolver reading the run's text source."""
+    source = run_text_source(repo)
+
+    def read(path: str) -> str | None:
+        """Return the text of a repo file, None when unreadable."""
+        try:
+            return repo.read_source(path, source)
+        except (GitError, OSError):
+            return None
+
+    return FloorResolver(
+        read, lambda directory: tsconfig_paths(repo, directory)
+    )
+
+
+def has_repositories_dir(repo: Repo) -> bool:
+    """Tell whether a tracked file lies under a repositories directory."""
+    try:
+        listing = repo.git("ls-files", "-z")
+    except GitError:
+        return False
+    return any(
+        REPOSITORIES_SEGMENT in PurePosixPath(name).parts[:-1]
+        for name in listing.split(NUL)
+    )
+
+
+def repo_facts(repo: Repo) -> RepoFacts:
+    """Collect the repository facts once for a whole run."""
+    return RepoFacts(
+        origin_slug(repo.root),
+        env_example_names(repo),
+        has_repositories_dir(repo),
+        floor_resolver(repo),
+    )
+
+
+def renamed_from(entries: Sequence[DiffEntry], path: str) -> str | None:
+    """Return the path a renamed file had before, None when not renamed."""
+    return next(
+        (e.old_path for e in entries if e.path == path and e.old_path), None
+    )
+
+
+def base_text_line_count(repo: Repo, path: str) -> int | None:
+    """Return the line count of a path at the base, None when absent."""
+    try:
+        return line_count(repo.git("show", f"{repo.base_ref}:{path}"))
+    except GitError:
+        return None
+
+
+def base_line_count(repo: Repo, path: str) -> int | None:
+    """Return the base line count of a file, following a rename."""
+    count = base_text_line_count(repo, path)
+    if count is not None:
+        return count
+    try:
+        entries = listed_changes(repo, repo.diff_arguments, ())
+    except GitError:
+        return None
+    old_path = renamed_from(entries, path)
+    return None if old_path is None else base_text_line_count(repo, old_path)
+
+
+def habit_hits(
+    repo: Repo, facts: RepoFacts, target: LintTarget, text: str
+) -> tuple[list[HabitHit], bool]:
+    """Return the habit hits of a target and whether it parsed."""
+    long_file = line_count(text) > MAX_FILE_LINES
+    context = HabitContext(
+        target.path,
+        facts.repo_slug,
+        facts.env_example_names,
+        facts.has_repositories_dir,
+        base_line_count(repo, target.path) if long_file else None,
+    )
+    hits = line_count_hits(text, context)
+    found = language_habit_hits(repo, facts, target, text, context)
+    if found is None:
+        return hits, False
+    return [*hits, *found], True
+
+
+def language_habit_hits(
+    repo: Repo,
+    facts: RepoFacts,
+    target: LintTarget,
+    text: str,
+    context: HabitContext,
+) -> list[HabitHit] | None:
+    """Return the language-specific habit hits, None when unparsable."""
+    changed = target.changed_lines
+    match target.language:
+        case Language.PYTHON:
+            tree = parse_python(text)
+            if tree is None:
+                return None
+            floors = facts.floors.python_floors(target.path)
+            return [
+                *python_habit_hits(tree, text, changed, context),
+                *python_version_hits(tree, changed, floors),
+            ]
+        case Language.TYPESCRIPT | Language.JAVASCRIPT:
+            tokens = tokenize_source(text, StaticLanguage.SCRIPT)
+            floors = facts.floors.script_floors(target.path)
+            return [
+                *script_habit_hits(tokens, changed, context),
+                *script_version_hits(tokens, changed, floors),
+            ]
+        case Language.LOCALE:
+            document = parse_locale(target.path, text)
+            if document is None:
+                return None
+            sibling = locale_sibling(repo, target, document)
+            return locale_habit_hits(document, changed, context, sibling)
+    return []
+
+
+def locale_sibling(
+    repo: Repo, target: LintTarget, document: LocaleDocument
+) -> LocaleDocument | None:
+    """Return the other language's locale file, None when unavailable."""
+    path = sibling_path(target.path, document.language)
+    if path is None:
+        return None
+    try:
+        text = repo.read_source(path, target.text_source)
+    except (GitError, OSError):
+        return None
+    return parse_locale(path, text)
+
+
+def habit_violation(target: LintTarget, hit: HabitHit) -> Violation:
+    """Turn a habit hit into a violation."""
+    return Violation(
+        path=target.path,
+        line=hit.line,
+        column=hit.column,
+        rule=hit.rule.value,
+        message=hit.message,
+        url="",
+        tool=HABIT_TOOL,
+    )
+
+
+def habit_target_results(
+    repo: Repo, facts: RepoFacts, target: LintTarget
+) -> BackendResult:
+    """Return the habit violations of one target."""
+    try:
+        hits, parsed = habit_hits(repo, facts, target, repo.read_text(target))
+    except (GitError, OSError) as error:
+        return BackendResult(
+            not_checked=(NotChecked(target.path, HABIT_TOOL, str(error)),)
+        )
+    unparsed = (
+        ()
+        if parsed
+        else (NotChecked(target.path, HABIT_TOOL, HABIT_PARSE_FAILURE),)
+    )
+    return BackendResult(
+        violations=tuple(habit_violation(target, hit) for hit in hits),
+        not_checked=unparsed,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HabitBackend:
+    """Review habits that can be checked mechanically on changed lines."""
+
+    name: str = HABIT_TOOL
+    languages: frozenset[Language] = frozenset(Language)
+
+    def run(self, repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
+        """Flag the habit violations on the changed lines of the targets."""
+        facts = repo_facts(repo)
+        results = [habit_target_results(repo, facts, t) for t in targets]
+        return merge_results([*results, BackendResult(tools=(HABIT_VERSION,))])
+
+    def fix(
+        self,
+        _repo: Repo,
+        _snapshots: Sequence[Snapshot],
+    ) -> dict[str, str]:
+        """Return no fixes, habits cannot be fixed mechanically."""
+        return {}
+
+
+BACKENDS: tuple[Backend, ...] = (
+    PythonBackend(),
+    JsBackend(),
+    CBackend(),
+    CloneBackend(),
+    MagicBackend(),
+    HabitBackend(),
+)
+FAST_BACKENDS: tuple[Backend, ...] = (
+    PythonBackend(fast=True),
+    JsBackend(fast=True),
+    CBackend(fast=True),
+    MagicBackend(),
+    HabitBackend(),
+)
+
+
+def run_backends(
+    repo: Repo,
+    targets: Sequence[LintTarget],
+    backends: Sequence[Backend],
+) -> BackendResult:
+    """Run every backend on the targets of its languages."""
+    results = []
+    for backend in backends:
+        mine = [t for t in targets if t.language in backend.languages]
+        if mine:
+            results.append(backend.run(repo, mine))
+    return merge_results(results)
+
+
+def violation_order(violation: Violation) -> tuple[str, int, int, str]:
+    """Return the sort key of a violation: path, line, column, rule."""
+    return (violation.path, violation.line, violation.column, violation.rule)
+
+
+def not_checked_order(item: NotChecked) -> tuple[str, str]:
+    """Return the sort key of a not-checked entry: path, tool."""
+    return (item.path, item.tool)
+
+
+def build_report(
+    repo: Repo,
+    scope: Scope,
+    backends: Sequence[Backend] = BACKENDS,
+) -> Report:
+    """Collect the targets of the scope, lint them and build the report."""
+    repo = located_repo(repo, scope)
+    collected = collect_targets(repo, scope)
+    targets = collected.targets
+    result = run_backends(repo, targets, backends)
+    return Report(
+        mode=scope.mode,
+        tools=tuple(dict.fromkeys(result.tools)),
+        target_count=len(targets),
+        violations=tuple(sorted(set(result.violations), key=violation_order)),
+        not_checked=tuple(
+            sorted(
+                result.not_checked + collected.not_checked,
+                key=not_checked_order,
+            ),
+        ),
+        suppressions=tuple(find_suppressions(repo, targets)),
+    )
+
+
+def fix_report(repo: Repo, scope: Scope) -> Report:
+    """Fix the changed lines on disk, then report what is left."""
+    located = located_repo(repo, scope)
+    summary = fix_targets(located, collect_targets(located, scope).targets)
+    report = build_report(repo, scope, FAST_BACKENDS)
+    unchecked = {*report.not_checked, *summary.not_checked}
+    return replace(
+        report,
+        not_checked=tuple(sorted(unchecked, key=not_checked_order)),
+        fix=summary,
+    )
+
+
+def format_violation(violation: Violation) -> str:
+    """Return the one-line text form of a violation."""
+    location = f"{violation.path}:{violation.line}:{violation.column}"
+    text = f"{location} {violation.rule} {violation.message}"
+    return f"{text} [{violation.url}]" if violation.url else text
+
+
+def cap_violations(
+    violations: Sequence[str], cap: OutputCap | None
+) -> list[str]:
+    """Return the violation lines, cut at the cap with a pointer to the log."""
+    if cap is None or len(violations) <= cap.max_lines:
+        return list(violations)
+    hidden = len(violations) - cap.max_lines
+    more = f"… {hidden} more — full list: {cap.log_path}"
+    return [*violations[: cap.max_lines], more]
+
+
+def render(report: Report, cap: OutputCap | None) -> list[str]:
+    """Render the report as text lines, capped when a cap is given."""
+    tools = ", ".join(report.tools) or NO_TOOLS
+    lines = [f"{PROGRAM}: {report.mode.value} | tools: {tools}"]
+    if report.fix is not None and report.fix.files:
+        lines.append(
+            FIXED_MESSAGE.format(
+                lines=report.fix.lines,
+                files=", ".join(report.fix.files),
+            ),
+        )
+    if not report.target_count:
+        lines.append(NO_CHANGED_FILES)
+    lines.extend(
+        cap_violations([format_violation(v) for v in report.violations], cap),
+    )
+    if report.not_checked:
+        lines.append(NOT_CHECKED_HEADING)
+        lines.extend(
+            f"{LIST_INDENT}{item.path} [{item.tool}] {item.reason}"
+            for item in report.not_checked
+        )
+    if report.suppressions:
+        lines.append(SUPPRESSIONS_HEADING)
+        lines.extend(
+            f"{LIST_INDENT}{item.path}:{item.line} {item.text}"
+            for item in report.suppressions
+        )
+    verdict = (
+        SUCCESS_VERDICT
+        if report.passed
+        else f"{FAILURE_VERDICT} ({len(report.violations)})"
+    )
+    lines.append(verdict)
+    return lines
+
+
+def report_json(report: Report) -> dict[str, Any]:
+    """Return the JSON document of a report."""
+    document: dict[str, Any] = {
+        "violations": [asdict(item) for item in report.violations],
+        "not_checked": [asdict(item) for item in report.not_checked],
+        "suppressions": [asdict(item) for item in report.suppressions],
+        "passed": report.passed,
+    }
+    if report.fix is not None:
+        document["fixed_files"] = list(report.fix.files)
+        document["fixed_lines"] = report.fix.lines
+    return document
+
+
+def log_path_for(repo: Repo) -> Path:
+    """Return the log file path of a run on repo started now."""
+    directory = Path(os.environ.get(LOG_DIR_ENV) or DEFAULT_LOG_DIR)
+    now = datetime.datetime.now(tz=datetime.UTC).astimezone()
+    stamp = now.strftime(LOG_TIME_FORMAT)
+    return directory / f"{stamp}-{repo.root.name}{LOG_SUFFIX}"
+
+
+def write_log(path: Path, lines: Sequence[str]) -> None:
+    """Write the full report text to the log, warning when it fails."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(NEWLINE.join(lines) + NEWLINE, encoding=TEXT_ENCODING)
+    except OSError as error:
+        print(f"{PROGRAM}: cannot write log {path}: {error}", file=sys.stderr)
+
+
+def parse_arguments(argv: Sequence[str] | None) -> Options:
+    """Parse the command line into options; exit 2 on usage errors."""
+    parser = argparse.ArgumentParser(prog=PROGRAM, description=__doc__)
+    parser.add_argument("--repo", default=".", help="repository to lint")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--base", metavar="REF", help="diff against merge-base")
+    modes.add_argument("--staged", action="store_true", help="lint the index")
+    modes.add_argument(
+        "--tracked",
+        action="store_true",
+        help="working tree vs HEAD without untracked files",
+    )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="apply formatter and safe fixes on changed lines",
+    )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="with --fix, skip type-aware eslint rules",
+    )
+    parser.add_argument("--paths", nargs="+", default=[], metavar="P")
+    parser.add_argument("--json", action="store_true", help="print JSON")
+    parser.add_argument(
+        "--max-lines",
+        type=int,
+        default=DEFAULT_MAX_LINES,
+        metavar="N",
+    )
+    namespace = parser.parse_args(argv)
+    if namespace.fix and (
+        namespace.staged or namespace.tracked or namespace.base is not None
+    ):
+        parser.error(FIX_EXCLUSIVE)
+    if namespace.quick and not namespace.fix:
+        parser.error(QUICK_REQUIRES_FIX)
+    return Options(
+        repo=Path(namespace.repo),
+        scope=Scope(
+            mode=mode_of(namespace),
+            base_ref=namespace.base,
+            paths=tuple(namespace.paths),
+        ),
+        json=namespace.json,
+        max_lines=namespace.max_lines,
+        fix=namespace.fix,
+        quick=namespace.quick,
+    )
+
+
+def mode_of(namespace: argparse.Namespace) -> Mode:
+    """Return the scope mode the mutually exclusive flags select."""
+    if namespace.base is not None:
+        return Mode.BASE
+    if namespace.staged:
+        return Mode.STAGED
+    if namespace.tracked:
+        return Mode.TRACKED
+    return Mode.WORKTREE
+
+
+def rebase_paths(
+    root: Path,
+    origin: Path,
+    paths: Sequence[str],
+) -> tuple[str, ...]:
+    """Turn pathspecs relative to origin into repo-root pathspecs.
+
+    Absolute paths are kept; a relative path escaping the repository
+    raises GitError.
+    """
+    base = origin.resolve()
+    rebased = []
+    for path in paths:
+        if Path(path).is_absolute():
+            rebased.append(path)
+            continue
+        candidate = Path(os.path.normpath(base / path))
+        if not candidate.is_relative_to(root):
+            message = f"path outside the repository: {path}"
+            raise GitError(message)
+        rebased.append(candidate.relative_to(root).as_posix())
+    return tuple(rebased)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run lint-strict and return the exit code."""
+    options = parse_arguments(argv)
+    try:
+        repo = replace(
+            open_repo(options.repo),
+            literal_pathspecs=options.fix,
+            quick=options.quick,
+        )
+        paths = rebase_paths(repo.root, options.repo, options.scope.paths)
+        scope = replace(options.scope, paths=paths)
+        report = (
+            fix_report(repo, scope)
+            if options.fix
+            else build_report(repo, scope)
+        )
+    except GitError as error:
+        print(f"{PROGRAM}: {error}", file=sys.stderr)
+        return EXIT_USAGE
+    log_path = log_path_for(repo)
+    write_log(log_path, render(report, None))
+    if options.json:
+        print(json.dumps(report_json(report), indent=2))
+    else:
+        cap = OutputCap(options.max_lines, log_path)
+        print(NEWLINE.join(render(report, cap)))
+    return EXIT_PASS if report.passed else EXIT_FAIL
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

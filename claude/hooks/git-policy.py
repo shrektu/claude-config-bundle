@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse(Bash) hook: git branch rule (non-work branches need the user's consent) + commit message rule.
+"""PreToolUse(Bash) hook: git branch rule (only work branches may be moved) + commit message rule.
 By design constructs that hide the cwd or the git word (scripts, eval, $GIT, `!` aliases, exotic heredoc or
 case nesting) are not classified - git-guard carries the same class of blind spots."""
 import json
@@ -33,8 +33,8 @@ CD_OPTS = {"-L", "-P", "-e", "-@", "--"}
 CASE_KEYWORD = "case"
 ESAC_KEYWORD = "esac"
 
-WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/")
-WORK_BRANCH_HINT = "feature/*, bugfix/*, hotfix/*"
+WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/", "test/")
+WORK_BRANCH_HINT = "feature/*, bugfix/*, hotfix/*, test/*"
 REFS_HEADS = "refs/heads/"
 GIT_TIMEOUT_S = 2
 REBASE_STATE_DIRS = ("rebase-merge", "rebase-apply")
@@ -53,7 +53,6 @@ LONG_VALUE_OPTS = {
                "--trailer"},
     "tag": {"--message", "--file", "--local-user"},
     "branch": {"--set-upstream-to"},
-    "push": {"--push-option", "--repo", "--receive-pack", "--exec"},
     "notes": {"--message", "--file", "--reuse-message", "--reedit-message"},
     "symbolic-ref": {"-m"},
     "update-ref": {"-m"},
@@ -77,31 +76,21 @@ ALIAS_CONFIG_KEY = "alias.%s"
 SHELL_ALIAS_MARK = "!"
 MAX_ALIAS_DEPTH = 3
 
-FORBIDDEN_TRAILERS = ("Co-Authored-By", "Generated with", "Claude-Session")
-ALLOWED_TRAILER_KEY = "signed-off-by"
-TRAILER_KEY_RE = re.compile(r"^\s*([^:=\s]+)")
-MIN_WORDS = 3
-MAX_WORDS = 7
-WORDS_RULE = "3–7 words"
-MESSAGE_PLACEHOLDER = "<Imperative verb, 3–7 words>"
-SENTENCE_BREAK_RE = re.compile(r"[.!?;]\s")
-GERUND_SUFFIX = "ing"
-PAST_SUFFIX = "ed"
-IMPERATIVE_ED = frozenset({"embed", "seed", "feed", "speed", "shed", "proceed", "exceed", "succeed", "need", "heed",
-                           "breed", "bleed", "shred"})
-COMMON_VERBS = frozenset(word.lower() for word in (
-    "Add Fix Update Remove Use Make Move Rename Replace Refactor Implement Introduce Support Handle Allow Enable "
-    "Disable Drop Bump Run Wire Document Test Split Merge Revert Simplify Clean Validate Guard Route Retire "
-    "Ensure Prevent Raise Return Store Load Show Hide Set Reset Keep Limit Rewrite Restore Pin Upgrade Log "
-    "Cache Expose Skip Cover Check Build Create Delete Improve Optimize Reduce Increase Correct Align Adjust "
-    "Convert Parse Render Format Export Import Include Exclude Mark Migrate Deprecate Normalize Sort Filter "
-    "Map Apply Accept Reject Stop Start Record Report Track Extract Rework Tighten Relax Harden Fetch Send Read "
-    "Write Generate Configure Install Inline Wrap Unify Share Avoid Clarify Prepare Register Hand Bind Block "
-    "Gate Pass Bound Cap Measure Resolve Detect Compute Emit Expand Collapse Defer Schedule Publish Sync "
-    "Verify Tune Speed Reorder Lift Lower Narrow Widen Wait Retry Close Open").split())
-COMMIT_VALUE_LETTERS = "mFCc"
-SIGNOFF_LETTER = "s"
-
+FORBIDDEN_TRAILERS = ("Signed-off-by", "Co-Authored-By", "Generated with", "Claude-Session")
+MAX_MESSAGE_WORDS = 7
+SENTENCE_BREAK_RE = re.compile(r"[.!?]\s+\S")
+NON_IMPERATIVE_SUFFIXES = ("ed", "ing")
+MIN_SUFFIX_STEM = 2
+THIRD_PERSON_SUFFIXES = ("es", "s")
+COMMON_VERBS = frozenset({
+    "add", "allow", "apply", "avoid", "bump", "call", "change", "check", "clean", "convert", "create",
+    "define", "delete", "disable", "drop", "enable", "ensure", "expose", "extract", "fetch", "fix", "handle",
+    "hide", "implement", "improve", "include", "introduce", "keep", "limit", "load", "log", "make", "map",
+    "merge", "move", "parse", "pass", "prevent", "read", "refactor", "reject", "remove", "rename", "replace",
+    "resolve", "restore", "return", "reuse", "revert", "run", "save", "send", "set", "share", "show", "simplify",
+    "skip", "sort", "split", "start", "stop", "store", "support", "switch", "take", "test", "track", "update",
+    "use", "validate", "write",
+})
 TRAILER_EVENTS = ("--trailer",)
 COMMIT_DRY_RUN_EVENTS = {"--short", "--porcelain", "--long", "--null", "-z"}
 EMOJI_RE = re.compile("[\u2600-\u27bf\U0001f300-\U0001faff]")
@@ -117,28 +106,6 @@ TAG_WRITE_EVENTS = {"-d", "--delete", "-a", "--annotate", "-s", "--sign", "-f", 
                     "-F", "--file", "-e", "--edit", "--create-reflog"}
 BRANCH_WRITE_EVENTS = {"-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-f", "--force"}
 NOTES_WRITE_SUBS = {"add", "append", "remove"}
-FILE_MESSAGE_EVENTS = {"-F", "--file"}
-BRANCH_DELETE_EVENTS = {"-d", "-D", "--delete"}
-BRANCH_MOVE_EVENTS = {"-m", "-M", "--move", "-c", "-C", "--copy"}
-BRANCH_RENAME_EVENTS = {"-m", "-M", "--move"}
-PUSH_WIDE_EVENTS = {"--all", "--mirror", "--tags", "--follow-tags"}
-PUSH_TAG_WORD = "tag"
-TAG_REFS = "refs/tags/"
-HEAD_REF = "HEAD"
-FORCE_PREFIX = "+"
-REFSPEC_SEP = ":"
-PUSH_DEFAULT_MATCHING = "matching"
-DEFAULT_REMOTE = "origin"
-PUSH_TARGET_REV = "@{push}"
-CONFIG_ENV_OPT = "--config-env"
-FIXUP_OPTS = ("--fixup", "--squash")
-STDIN_EVENT = "--stdin"
-GH_PROG = "gh"
-GH_VALUE_OPTS = {"-R", "--repo"}
-GH_PR_MERGE_WORDS = ("pr", "merge")
-GH_PR_MERGE = "gh pr merge"
-GH_MERGE_REASON = "`gh pr merge` merges a PR into its base branch, which needs the user's consent."
-SUBAGENT_REASON = "only the main session commits or publishes; a subagent reports its changes instead."
 
 HINT = " If this really has to land there, say so and let the user decide how (their own commit, a PR, a cherry-pick)."
 
@@ -147,8 +114,6 @@ class GitOpts(NamedTuple):
     directory: str
     git_dir: str
     work_tree: str
-    config: tuple = ()
-    config_env: bool = False
 
 
 class GitCall(NamedTuple):
@@ -178,23 +143,15 @@ class RepoState(NamedTuple):
     directory: str
 
 
-def decide(decision, reason):
+def deny(reason):
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
+            "permissionDecision": "deny",
             "permissionDecisionReason": f"git-policy: {reason}",
         }
     }))
     sys.exit(0)
-
-
-def deny(reason):
-    decide("deny", reason)
-
-
-def ask(reason):
-    decide("ask", reason)
 
 
 def matching_paren(text, start):
@@ -551,7 +508,7 @@ def analyze(tokens, cwd, depth, inline=None, alias_depth=0):
         return [], cd_target(tokens[i + 1:], cwd)
     if prog in WRAPPERS:
         for k in range(i + 1, len(tokens)):
-            if basename(tokens[k]) in SHELLS | {"git", "eval", GH_PROG} and not tokens[k].startswith("-"):
+            if basename(tokens[k]) in SHELLS | {"git", "eval"} and not tokens[k].startswith("-"):
                 found, _ = analyze(tokens[k:], cwd, depth, inline, alias_depth)
                 return found, cwd
         return [], cwd
@@ -559,11 +516,9 @@ def analyze(tokens, cwd, depth, inline=None, alias_depth=0):
         return shell_calls(tokens, i, cwd, depth), cwd
     if prog == "eval":
         return scan(" ".join(tokens[i + 1:]), cwd, depth + 1), cwd
-    if prog == GH_PROG:
-        return gh_calls(tokens[i + 1:], cwd), cwd
     if prog != "git":
         return [], cwd
-    directory, git_dir, work_tree, config, config_env = cwd, "", "", [], False
+    directory, git_dir, work_tree = cwd, "", ""
     aliases = dict(inline)
     j = i + 1
     while j < len(tokens) and tokens[j].startswith("-"):
@@ -580,18 +535,14 @@ def analyze(tokens, cwd, depth, inline=None, alias_depth=0):
             work_tree = value
         elif name == "--git-dir" and value:
             git_dir = value
-        elif name == CONFIG_ENV_OPT:
-            config_env = True
-        elif name == "-c" and value:
-            config.append(value)
-            if value.startswith(ALIAS_PREFIX):
-                alias_name, _, expansion = value[len(ALIAS_PREFIX):].partition("=")
-                if alias_name and expansion:
-                    aliases[alias_name] = expansion
+        elif name == "-c" and value and value.startswith(ALIAS_PREFIX):
+            alias_name, _, expansion = value[len(ALIAS_PREFIX):].partition("=")
+            if alias_name and expansion:
+                aliases[alias_name] = expansion
         j += step
     if j >= len(tokens):
         return [], cwd
-    opts = GitOpts(directory, git_dir, work_tree, tuple(config), config_env)
+    opts = GitOpts(directory, git_dir, work_tree)
     sub = tokens[j]
     if sub not in KNOWN_SUBCOMMANDS:
         expansion = aliases.get(sub) or alias_expansion(opts, sub)
@@ -604,22 +555,6 @@ def analyze(tokens, cwd, depth, inline=None, alias_depth=0):
                 found, _ = analyze(expanded, cwd, depth, aliases, alias_depth + 1)
                 return found, cwd
     return [GitCall(sub, tuple(tokens[j + 1:]), opts)], cwd
-
-
-def gh_calls(args, cwd):
-    words, skip_value = [], False
-    for arg in args:
-        if skip_value:
-            skip_value = False
-        elif arg in GH_VALUE_OPTS:
-            skip_value = True
-        elif not arg.startswith("-"):
-            words.append(arg)
-        if len(words) == len(GH_PR_MERGE_WORDS):
-            break
-    if tuple(words) == GH_PR_MERGE_WORDS:
-        return [GitCall(GH_PR_MERGE, tuple(args), GitOpts(cwd, "", ""))]
-    return []
 
 
 _ALIAS_CACHE = {}
@@ -770,8 +705,6 @@ def is_work_branch(name):
 def git_output(opts, *args):
     """Runs git with the same repository selection the inspected command uses."""
     command = ["git", "-C", opts.directory]
-    for entry in opts.config:
-        command += ["-c", entry]
     if opts.git_dir:
         command.append(f"--git-dir={opts.git_dir}")
     if opts.work_tree:
@@ -831,86 +764,6 @@ def branch_verdict(call, action):
             f"Run it on a work branch instead: `git switch -c feature/<topic>`.{HINT}")
 
 
-def not_work_reason(call, action, name):
-    return f"`git {call.sub}` {action} `{name}`, which is not a work branch ({WORK_BRANCH_HINT}).{HINT}"
-
-
-def ref_write_targets(call, parsed, state):
-    if call.sub in ("update-ref", "symbolic-ref"):
-        ref = parsed.positional[0] if parsed.positional else ""
-        return [ref[len(REFS_HEADS):]] if ref.startswith(REFS_HEADS) else []
-    if parsed.has(*BRANCH_DELETE_EVENTS):
-        return list(parsed.positional)
-    if parsed.has(*BRANCH_MOVE_EVENTS):
-        names = list(parsed.positional)
-        if parsed.has(*BRANCH_RENAME_EVENTS) and len(names) == 1 and state.branch:
-            names.append(state.branch)
-        return names
-    return list(parsed.positional[:1])
-
-
-def push_destination(spec, current):
-    dest = spec.lstrip(FORCE_PREFIX)
-    if REFSPEC_SEP in dest:
-        dest = dest.split(REFSPEC_SEP, 1)[1]
-    dest = dest.removeprefix(REFS_HEADS)
-    return current if dest == HEAD_REF else dest
-
-
-def push_without_refspec_reason(call, parsed, current):
-    remote = parsed.positional[0] if parsed.positional else (
-        git_output(call.opts, "config", "--get", f"branch.{current}.remote") or DEFAULT_REMOTE)
-    if git_output(call.opts, "config", "--get", "push.default") == PUSH_DEFAULT_MATCHING:
-        return f"`git push` with `push.default=matching` publishes every matching branch, not only `{current}`.{HINT}"
-    if git_output(call.opts, "config", "--get-all", f"remote.{remote}.push"):
-        return f"`git push` follows the configured `remote.{remote}.push` refspec, not only `{current}`.{HINT}"
-    target = git_output(call.opts, "rev-parse", "--abbrev-ref", "--symbolic-full-name", PUSH_TARGET_REV)
-    if target:
-        dest = target.removeprefix(f"{remote}/")
-        if not is_work_branch(dest):
-            return (f"`git push` publishes `{current}` to `{dest}`, which is not a work branch "
-                    f"({WORK_BRANCH_HINT}).{HINT}")
-    return None
-
-
-def push_reason(call, parsed, state):
-    current = state.branch or state.rebase_head
-    if not current or not is_work_branch(current):
-        return None
-    for event in sorted(PUSH_WIDE_EVENTS):
-        if parsed.has(event):
-            return f"`git push {event}` publishes more than the current work branch.{HINT}"
-    refspecs = parsed.positional[1:]
-    if not refspecs:
-        return push_without_refspec_reason(call, parsed, current)
-    for spec in refspecs:
-        dest = push_destination(spec, current)
-        if spec == PUSH_TAG_WORD or TAG_REFS in spec or dest.startswith(TAG_REFS):
-            return f"`git push` publishes a tag.{HINT}"
-        if not is_work_branch(dest):
-            return (f"`git push` publishes to `{dest or spec}`, which is not a work branch "
-                    f"({WORK_BRANCH_HINT}).{HINT}")
-    return None
-
-
-def mutation_reason(call, parsed, action):
-    if call.sub == "push" and call.opts.config_env:
-        return f"`git push` carries `{CONFIG_ENV_OPT}`, whose value is not visible and may change what is published.{HINT}"
-    state = repo_state(call.opts)
-    if state is None:
-        return None
-    if call.sub == "update-ref" and parsed.has(STDIN_EVENT):
-        return f"`git update-ref --stdin` moves refs named on stdin, which may be a non-work branch.{HINT}"
-    if call.sub in ("branch", "update-ref", "symbolic-ref"):
-        names = ref_write_targets(call, parsed, state)
-        if names:
-            return next((not_work_reason(call, action, name) for name in names if not is_work_branch(name)), None)
-    reason = branch_verdict(call, action)
-    if reason is None and call.sub == "push":
-        return push_reason(call, parsed, state)
-    return reason
-
-
 def has_emoji(text):
     return bool(EMOJI_RE.search(text)) or any(ord(ch) >= NON_BMP_MIN for ch in text)
 
@@ -924,78 +777,53 @@ def clean_message(message):
     return "".join(ch for ch in first if not has_emoji(ch)).strip()
 
 
-def imperative(word):
-    low = word.lower()
-    if not word[:1].isupper() or low.endswith(GERUND_SUFFIX):
-        return False
-    if low.endswith(PAST_SUFFIX) and low not in IMPERATIVE_ED:
-        return False
-    stems = [low[:-1] if low.endswith("s") else None, low[:-2] if low.endswith("es") else None,
-             low[:-3] + "y" if low.endswith("ies") else None]
-    return not any(stem in COMMON_VERBS for stem in stems if stem)
-
-
-def message_problem(text):
-    body = text.strip()
-    body = body[:-1] if body.endswith(".") else body
-    words = body.split()
-    if not MIN_WORDS <= len(words) <= MAX_WORDS:
-        return f"the commit message is ONE imperative sentence of {WORDS_RULE}, this one has {len(words)}."
-    if SENTENCE_BREAK_RE.search(body):
-        return "the commit message is one sentence, but this one runs on past a sentence break."
-    if not imperative(words[0]):
-        return f"the commit message starts with an imperative verb (`Add`, not `Added` or `Adds`): `{words[0]}`."
-    return None
-
-
-def drop_commit_options(args):
+def suggest_commit(sub, args, message):
     keep, skip_next = [], False
     for arg in args:
         if skip_next:
             skip_next = False
             continue
-        name = arg.partition("=")[0] if arg.startswith("--") else arg
-        if name in MESSAGE_EVENTS | REUSE_EVENTS | set(TRAILER_EVENTS):
-            skip_next = "=" not in arg
+        if arg in MESSAGE_EVENTS or arg in TRAILER_EVENTS:
+            skip_next = True
             continue
-        if name in SIGNOFF_EVENTS | NO_SIGNOFF_EVENTS:
+        if arg in SIGNOFF_EVENTS or arg in NO_SIGNOFF_EVENTS or arg in REUSE_EVENTS:
             continue
-        if arg.startswith("-") and not arg.startswith("--") and len(arg) > 1:
-            flags = ""
-            for pos, ch in enumerate(arg[1:]):
-                if ch in COMMIT_VALUE_LETTERS:
-                    skip_next = pos == len(arg) - 2
-                    break
-                if ch != SIGNOFF_LETTER:
-                    flags += ch
-            if flags:
-                keep.append("-" + flags)
+        if arg.startswith(("--message=", "--trailer=")) or arg.startswith("-m") and len(arg) > 2:
             continue
         keep.append(arg)
-    return keep
+    body = ["git", sub, *keep]
+    words = (clean_message(message) if message is not None else "").split()[:MAX_MESSAGE_WORDS]
+    body += ["-m", " ".join(words) or "Fix the thing"]
+    return shlex.join(body)
 
 
-def suggest_commit(sub, args, message):
-    cleaned = clean_message(message) if message is not None else ""
-    chosen = cleaned if cleaned and message_problem(cleaned) is None else MESSAGE_PLACEHOLDER
-    return shlex.join(["git", sub, *drop_commit_options(args), "-s", "-m", chosen])
+def first_word_is_not_imperative(text):
+    words = text.split()
+    if not words:
+        return False
+    word = words[0].strip(".,:;!?").lower()
+    if any(word.endswith(suffix) and len(word) - len(suffix) > MIN_SUFFIX_STEM
+           for suffix in NON_IMPERATIVE_SUFFIXES):
+        return True
+    return any(word.endswith(suffix) and word[:-len(suffix)] in COMMON_VERBS for suffix in THIRD_PERSON_SUFFIXES)
 
 
-def read_message_file(opts, value):
-    try:
-        with open(resolve(opts.directory, value), encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-
-def trailer_problem(value):
+def message_verdict(text, fix):
+    if "\n" in text or NEWLINE_MARK in text:
+        return f"the commit message is ONE sentence with no body, but this one contains a newline. Use: {fix}"
     for trailer in FORBIDDEN_TRAILERS:
-        if trailer.lower() in value.lower():
-            return f"`{trailer}` is not allowed in a commit message; the only trailer is `Signed-off-by:` added by `-s`."
-    key = TRAILER_KEY_RE.match(value)
-    if not key or key.group(1).lower() != ALLOWED_TRAILER_KEY:
-        return "the only trailer a commit carries is `Signed-off-by:`, added by `-s`."
+        if trailer.lower() in text.lower():
+            return f"`{trailer}` is not allowed in a commit message; commits carry no trailers. Use: {fix}"
+    if has_emoji(text):
+        return f"commit messages carry no emoji. Use: {fix}"
+    if SENTENCE_BREAK_RE.search(text.strip()):
+        return f"the commit message is ONE sentence. Use: {fix}"
+    if len(text.split()) > MAX_MESSAGE_WORDS:
+        return (f"the commit message has {len(text.split())} words; the limit is {MAX_MESSAGE_WORDS}, "
+                f"and fewer is better. Use: {fix}")
+    if first_word_is_not_imperative(text):
+        return (f"the commit message starts in the imperative mood (\"Add\", \"Fix\", \"Remove\"), "
+                f"not \"{text.split()[0]}\". Use: {fix}")
     return None
 
 
@@ -1004,48 +832,24 @@ def commit_verdict(call, parsed):
         return None
     messages = parsed.values_of(*MESSAGE_EVENTS)
     message_count = parsed.count(*MESSAGE_EVENTS)
-    files = parsed.values_of(*FILE_MESSAGE_EVENTS)
-    file_text = read_message_file(call.opts, files[0]) if files and not messages else None
-    file_text = file_text.removesuffix("\n") if file_text is not None else None
-    message = messages[0] if messages else file_text
+    message = messages[0] if messages else None
     fix = suggest_commit(call.sub, call.args, message)
-    for value in parsed.values_of(*TRAILER_EVENTS):
-        problem = trailer_problem(value)
-        if problem:
-            return f"{problem} Use: {fix}"
-    if not toggled(parsed.events, SIGNOFF_EVENTS, NO_SIGNOFF_EVENTS):
-        return f"every commit is signed off: `git commit` is missing `-s`/`--signoff`. Use: {fix}"
-    sources = parsed.count(*MESSAGE_EVENTS, *REUSE_EVENTS)
-    if parsed.has(*NO_MESSAGE_CHECK_EVENTS) and sources:
-        kind = next(opt for opt in FIXUP_OPTS if parsed.has(opt))
-        target = (parsed.values_of(kind) or ["<sha>"])[0]
-        fixed = shlex.join(["git", call.sub, "-s", kind, target])
-        return (f"`{kind}` with `-m` or `-F` adds a body; use a plain `{kind} <sha>`, the subject is generated. "
-                f"Use: {fixed}")
-    if parsed.has(*NO_MESSAGE_CHECK_EVENTS) or parsed.has("--amend") and parsed.has("--no-edit"):
+    if toggled(parsed.events, SIGNOFF_EVENTS, NO_SIGNOFF_EVENTS):
+        return f"commits carry no `Signed-off-by`: drop `-s`/`--signoff`. Use: {fix}"
+    if parsed.values_of(*TRAILER_EVENTS) or parsed.has(*TRAILER_EVENTS):
+        return f"commits carry no trailers: drop `--trailer`. Use: {fix}"
+    if parsed.has(*NO_MESSAGE_CHECK_EVENTS):
+        return None
+    if parsed.has("--amend") and parsed.has("--no-edit"):
+        return None
+    if parsed.has(*REUSE_EVENTS):
+        return f"give the commit message with one `-m`, so it can be checked. Use: {fix}"
+    if not message_count:
         return None
     if message_count > 1:
         return (f"the commit message is ONE sentence with no body: {message_count} `-m` options were given. "
                 f"Use: {fix}")
-    if sources > 1:
-        return f"the commit message comes from exactly one source (`-m` or `-F`), not {sources}. Use: {fix}"
-    if not sources:
-        return f"a commit needs its message on the command line, a bare `git commit` opens an editor. Use: {fix}"
-    if not messages and not files:
-        return f"`-C`, `-c` and their long forms reuse an old message; give a fresh one. Use: {fix}"
-    if not messages and file_text is None:
-        return f"the message file `{files[0]}` is unreadable (`-F -` reads stdin). Use: {fix}"
-    text = message
-    if "\n" in text or NEWLINE_MARK in text:
-        return f"the commit message is ONE sentence with no body, but this one contains a newline. Use: {fix}"
-    for trailer in FORBIDDEN_TRAILERS:
-        if trailer.lower() in text.lower():
-            return (f"`{trailer}` is not allowed in a commit message; the only trailer is `Signed-off-by:` "
-                    f"added by `-s`. Use: {fix}")
-    if has_emoji(text):
-        return f"commit messages carry no emoji. Use: {fix}"
-    problem = message_problem(text)
-    return f"{problem} Use: {fix}" if problem else None
+    return message_verdict(messages[0], fix)
 
 
 def main():
@@ -1060,28 +864,17 @@ def main():
         cwd = payload.get("cwd")
         if not isinstance(cwd, str) or not cwd:
             cwd = os.getcwd()
-        subagent = payload.get("agent_type") is not None
-        asks = []
         for call in scan(command, os.path.expanduser(cwd)):
-            if call.sub == GH_PR_MERGE:
-                if subagent:
-                    deny(SUBAGENT_REASON)
-                asks.append(GH_MERGE_REASON)
-                continue
             parsed = parse(call.sub, call.args)
-            action = mutates(call.sub, parsed)
-            if action and subagent:
-                deny(SUBAGENT_REASON)
             if call.sub == "commit":
                 reason = commit_verdict(call, parsed)
                 if reason:
                     deny(reason)
+            action = mutates(call.sub, parsed)
             if action:
-                reason = mutation_reason(call, parsed, action)
+                reason = branch_verdict(call, action)
                 if reason:
-                    asks.append(reason)
-        if asks:
-            ask("; ".join(dict.fromkeys(asks)))
+                    deny(reason)
     except SystemExit:
         raise
     except Exception:

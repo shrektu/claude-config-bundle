@@ -1,19 +1,517 @@
 #!/usr/bin/env bash
 usage() {
   cat <<'USAGE'
-usage: verify [-t LINES] [-n NAME] -- <command> [args...]
+usage: verify [-t LINES] [-n NAME] [--repo PATH] -- <command> [args...]
 Runs the command, keeps the full output in $CLAUDE_VERIFY_LOG_DIR (default ~/.cache/claude-verify)
 and prints only PASS/FAIL, exit code, timing and the error section. Exits with the command's code.
 One argument is run through `bash -c`; several arguments are executed directly.
+--repo names the repository this run belongs to; without it the repo comes from a leading
+`cd <path> &&` in the command, else from the current directory, normalised to the worktree root.
+The command runs in a systemd user scope (MemoryMax 6G, swap 1G, CPUQuota 600%, CPUWeight 30, nice 10);
+override with VERIFY_MEMORY_MAX, VERIFY_SWAP_MAX, VERIFY_CPU_QUOTA, VERIFY_CPU_WEIGHT, VERIFY_NICE; VERIFY_NO_LIMITS=1 disables.
 USAGE
 }
+
+ledger_record() {
+  python3 - "$@" <<'LEDGER_PY'
+"""Append one classified record for this verify run, prune the ledger and rotate stale logs.
+
+Called with log_dir, repo argument, command string, log path, exit code and slug. Any failure is
+swallowed: the ledger never changes what verify prints or the code it exits with."""
+import dataclasses
+import datetime
+import fcntl
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+
+SCHEMA_VERSION = 1
+LEDGER_NAME = "ledger.jsonl"
+LOCK_NAME = "ledger.lock"
+TEMP_PREFIX = "ledger-"
+LOG_SUFFIX = ".log"
+SECONDS_PER_DAY = 86400
+ENTRY_MAX_AGE_DAYS = 30
+LOG_MAX_AGE_DAYS = 7
+LOG_READ_LIMIT_BYTES = 4_000_000
+GIT_TIMEOUT_SECONDS = 5
+GIT_TOPLEVEL = ("rev-parse", "--show-toplevel")
+SESSION_ID_ENV = "CLAUDE_CODE_SESSION_ID"
+OUTCOME_GREEN = "green"
+OUTCOME_RED = "red"
+OUTCOME_ERROR = "error"
+UNEXPANDED_MARKERS = ("$", "`")
+LEADING_CD = re.compile(r"^\s*cd\s+(?P<path>'[^']*'|\"[^\"]*\"|[^\s;&|]+)\s*&&")
+QUOTES = "'\""
+SEGMENT_BREAKS = ";&|\n()"
+COMMENT_MARKER = "#"
+COMMENT_OPENERS = " \t\n;&|("
+OPTION_PREFIXES = ("-", "+")
+LOCK_WAIT_BUDGET_SECONDS = 0.5
+LOCK_RETRY_SLEEP_SECONDS = 0.02
+ATOMIC_WRITE_LIMIT_BYTES = 4096
+RECORD_MAX_BYTES = 3900
+TRUNCATED_CMD_SUFFIX = " ...truncated"
+RECORD_LINE_TERMINATOR = "\n"
+
+SINGLE_RUNNERS = frozenset({"pytest", "vitest", "jest", "mocha", "playwright", "ctest", "twister"})
+PAIR_RUNNERS = frozenset({("cargo", "test"), ("go", "test"), ("bun", "test"), ("deno", "test"),
+                          ("npm", "test")})
+PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun"})
+RUN_SUBCOMMAND = "run"
+TEST_SCRIPT = "test"
+DIRECT_LAUNCHERS = frozenset({"uvx", "npx", "bunx"})
+LAUNCHER_PAIRS = frozenset({("uv", "run"), ("poetry", "run"), ("pdm", "run"), ("hatch", "run"),
+                            ("pnpm", "exec"), ("pnpm", "dlx"), ("yarn", "dlx")})
+MODULE_LAUNCHER = re.compile(r"^python[0-9.]*$")
+MODULE_FLAG = "-m"
+ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+SHELL_KEYWORDS = {"if", "then", "elif", "else", "fi", "while", "until", "do", "done", "case", "esac",
+                  "!", "function", "{", "}"}
+WRAPPERS = {"env", "command", "builtin", "exec", "sudo", "doas", "nice", "ionice", "time", "nohup",
+            "timeout", "stdbuf", "unbuffer", "xargs", "chronic", "systemd-run"}
+WRAPPER_VALUE_OPTS = {
+    "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
+    "nice": {"-n", "--adjustment"},
+    "timeout": {"-k", "-s", "--kill-after", "--signal"},
+    "ionice": {"-c", "-n", "-p", "--class", "--classdata", "--pid"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U", "--user", "--group",
+             "--host", "--prompt", "--role", "--type", "--other-user", "--close-from"},
+    "xargs": {"-n", "-L", "-P", "-s", "-a", "-d", "-E", "-I", "--max-args", "--max-procs",
+              "--max-chars", "--arg-file", "--delimiter"},
+    "systemd-run": {"-p", "--property", "-u", "--unit", "-E", "--setenv", "-M", "--machine",
+                    "-H", "--host", "-C", "--capsule", "--description", "--slice", "--uid",
+                    "--gid", "--nice", "--working-directory", "--service-type",
+                    "--path-property", "--socket-property", "--timer-property", "--on-active",
+                    "--on-boot", "--on-startup", "--on-unit-active", "--on-unit-inactive",
+                    "--on-calendar", "--expand-environment"},
+}
+WRAPPER_OPTIONAL_VALUE_OPTS = {"xargs": {"-i", "-e", "-l", "--replace", "--eof", "--max-lines"}}
+WRAPPER_VALUE_ARGS = {"timeout": 1}
+
+RUNNER_FAILURE = re.compile(
+    r"^=+ .*\b[1-9]\d* failed\b.*=+$"
+    r"|^[1-9]\d* failed\b.*\bin \d"
+    r"|^FAILED \S"
+    r"|^\s*Tests\s+[1-9]\d* failed"
+    r"|^\s*FAIL\s+\S"
+    r"|^Tests:\s.*\b[1-9]\d* failed"
+    r"|^\s*[1-9]\d* fail\b"
+    r"|^test result: FAILED\."
+    r"|^--- FAIL: "
+    r"|^FAIL\s+\S+"
+    r"|^FAILED( \(|$)"
+    r"|^\s*[1-9]\d* failing"
+    r"|^\s*\d+% tests passed, [1-9]\d* tests failed out of \d+"
+    r"|^\s*[1-9]\d* failed\b"
+    r"|^INFO\s+-\s+[1-9]\d* of \d+ test configurations failed",
+    re.M)
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class LedgerRecord:
+    """One verify run as the ledger stores it; field order is the field order on disk."""
+
+    schema: int
+    ts: str
+    rc: int
+    outcome: str
+    repo: str
+    cmd: str
+    log: str
+    session_id: str | None
+    slug: str
+
+
+@dataclasses.dataclass(slots=True, frozen=True)
+class StoredEntry:
+    """A ledger line already on disk, kept verbatim so pruning never rewrites its content."""
+
+    line: str
+    ts: datetime.datetime | None
+    outcome: str
+    log: str
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def absolute_path(value):
+    return value if os.path.isabs(value) else os.path.abspath(value)
+
+
+def strip_comments(cmd):
+    """The command without shell comments, so a runner named in one never counts as a runner."""
+    kept, quote, index = [], "", 0
+    while index < len(cmd):
+        char = cmd[index]
+        if char == "\\" and quote != "'":
+            kept.append(cmd[index:index + 2])
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            kept.append(char)
+            index += 1
+            continue
+        if char in QUOTES:
+            quote = char
+            kept.append(char)
+            index += 1
+            continue
+        if char == COMMENT_MARKER and (not kept or kept[-1][-1] in COMMENT_OPENERS):
+            while index < len(cmd) and cmd[index] != "\n":
+                index += 1
+            continue
+        kept.append(char)
+        index += 1
+    return "".join(kept)
+
+
+def split_segments(cmd):
+    parts, current, quote, index = [], [], "", 0
+    while index < len(cmd):
+        char = cmd[index]
+        if char == "\\" and quote != "'":
+            current.append(cmd[index:index + 2])
+            index += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            current.append(char)
+        elif char in QUOTES:
+            quote = char
+            current.append(char)
+        elif char in SEGMENT_BREAKS:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    parts.append("".join(current))
+    return [part for part in parts if part.strip()]
+
+
+def tokens_of(segment):
+    try:
+        return shlex.split(segment)
+    except ValueError:
+        return segment.split()
+
+
+def skip_wrapper(tokens, index):
+    word = os.path.basename(tokens[index])
+    value_opts = WRAPPER_VALUE_OPTS.get(word, ())
+    optional_opts = WRAPPER_OPTIONAL_VALUE_OPTS.get(word, ())
+    index += 1
+    while index < len(tokens) and tokens[index].startswith("-") and tokens[index] != "-":
+        option = tokens[index]
+        index += 1
+        if "=" in option or option in optional_opts:
+            continue
+        if option in value_opts and index < len(tokens):
+            index += 1
+    extra = WRAPPER_VALUE_ARGS.get(word, 0)
+    while extra > 0 and index < len(tokens) and not tokens[index].startswith("-"):
+        index, extra = index + 1, extra - 1
+    return index
+
+
+def strip_prefix(tokens):
+    """The tokens with environment assignments, shell keywords and wrappers like timeout removed."""
+    index, moved = 0, True
+    while moved and index < len(tokens):
+        moved = False
+        while index < len(tokens) and (tokens[index] in SHELL_KEYWORDS
+                                       or ENV_ASSIGNMENT.match(tokens[index])):
+            index, moved = index + 1, True
+        if index < len(tokens) and os.path.basename(tokens[index]) in WRAPPERS:
+            index, moved = skip_wrapper(tokens, index), True
+    return tokens[index:]
+
+
+def launcher_target(head, tokens, following):
+    if head in DIRECT_LAUNCHERS:
+        return following[0] if following else ""
+    if following and (head, following[0]) in LAUNCHER_PAIRS:
+        return following[1] if len(following) > 1 else ""
+    if MODULE_LAUNCHER.match(head) and MODULE_FLAG in tokens:
+        index = tokens.index(MODULE_FLAG)
+        if index + 1 < len(tokens):
+            return os.path.basename(tokens[index + 1])
+    return ""
+
+
+def names_known_runner(cmd):
+    """True when a segment's command word is a known runner, or a known launcher starts one."""
+    for segment in split_segments(strip_comments(cmd)):
+        tokens = strip_prefix(tokens_of(segment))
+        if not tokens:
+            continue
+        head = os.path.basename(tokens[0])
+        following = [os.path.basename(token) for token in tokens[1:]
+                     if not token.startswith(OPTION_PREFIXES)]
+        if head in SINGLE_RUNNERS:
+            return True
+        if following and (head, following[0]) in PAIR_RUNNERS:
+            return True
+        if head in PACKAGE_MANAGERS and following[:2] == [RUN_SUBCOMMAND, TEST_SCRIPT]:
+            return True
+        if launcher_target(head, tokens, following) in SINGLE_RUNNERS:
+            return True
+    return False
+
+
+def parse_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed
+
+
+def parse_entry(line):
+    try:
+        data = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    log = data.get("log")
+    outcome = data.get("outcome")
+    return StoredEntry(
+        line=line.rstrip("\n"),
+        ts=parse_timestamp(data.get("ts")),
+        outcome=outcome if isinstance(outcome, str) else "",
+        log=log if isinstance(log, str) else "")
+
+
+def log_text(path):
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            if size > LOG_READ_LIMIT_BYTES:
+                handle.seek(size - LOG_READ_LIMIT_BYTES)
+                handle.readline()
+            return handle.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def classify(rc, cmd, log):
+    if rc == 0:
+        return OUTCOME_GREEN
+    if not names_known_runner(cmd):
+        return OUTCOME_ERROR
+    if RUNNER_FAILURE.search(log_text(log)):
+        return OUTCOME_RED
+    return OUTCOME_ERROR
+
+
+def leading_cd_path(cmd):
+    match = LEADING_CD.match(cmd)
+    if not match:
+        return ""
+    path = match.group("path")
+    if path[:1] in QUOTES and path[-1:] == path[:1]:
+        path = path[1:-1]
+    if any(marker in path for marker in UNEXPANDED_MARKERS):
+        return ""
+    return path
+
+
+def worktree_root(path):
+    expanded = os.path.expanduser(path)
+    try:
+        done = subprocess.run(["git", "-C", expanded, *GIT_TOPLEVEL], capture_output=True,
+                              text=True, timeout=GIT_TIMEOUT_SECONDS)
+        if done.returncode == 0 and done.stdout.strip():
+            return os.path.realpath(done.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.path.realpath(expanded)
+
+
+def resolve_repo(repo_argument, cmd):
+    candidate = repo_argument or leading_cd_path(cmd) or os.getcwd()
+    return worktree_root(candidate)
+
+
+def read_entries(log_dir):
+    path = os.path.join(log_dir, LEDGER_NAME)
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        parsed = (parse_entry(line) for line in handle if line.strip())
+        return [entry for entry in parsed if entry is not None]
+
+
+def prune_under_lock(log_dir):
+    """Dropping expired lines is a read-modify-replace, so it is the one step that needs the lock."""
+    path = os.path.join(log_dir, LEDGER_NAME)
+    if not os.path.isfile(path):
+        return
+    with open(os.path.join(log_dir, LOCK_NAME), "a", encoding="utf-8") as lock:
+        if not locked(lock):
+            return
+        cutoff = now() - datetime.timedelta(days=ENTRY_MAX_AGE_DAYS)
+        kept, dropped = [], False
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                entry = parse_entry(line) if line.strip() else None
+                if entry is None or entry.ts is None or entry.ts < cutoff:
+                    dropped = True
+                    continue
+                kept.append(entry)
+        if dropped:
+            rewrite_ledger(log_dir, path, kept)
+
+
+def rewrite_ledger(log_dir, path, kept):
+    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=log_dir,
+                                         prefix=TEMP_PREFIX, delete=False)
+    try:
+        with handle:
+            for entry in kept:
+                handle.write(entry.line + "\n")
+        os.replace(handle.name, path)
+    except Exception:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+def rotate_logs(log_dir, kept):
+    protected = {os.path.realpath(entry.log) for entry in kept if entry.outcome == OUTCOME_RED}
+    cutoff = time.time() - LOG_MAX_AGE_DAYS * SECONDS_PER_DAY
+    with os.scandir(log_dir) as entries:
+        for entry in entries:
+            if not entry.name.endswith(LOG_SUFFIX) or not entry.is_file():
+                continue
+            if os.path.realpath(entry.path) in protected:
+                continue
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    os.unlink(entry.path)
+            except OSError:
+                pass
+
+
+def append_unlocked(log_dir, text):
+    """Write one record with a single O_APPEND write."""
+    handle = os.open(os.path.join(log_dir, LEDGER_NAME),
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(handle, (text + RECORD_LINE_TERMINATOR).encode("utf-8"))
+    finally:
+        os.close(handle)
+
+
+def append_line(log_dir, text):
+    """Append under the prune lock and report whether it was held."""
+    try:
+        lock = open(os.path.join(log_dir, LOCK_NAME), "a", encoding="utf-8")
+    except OSError:
+        append_unlocked(log_dir, text)
+        return False
+    with lock:
+        held = locked(lock)
+        append_unlocked(log_dir, text)
+        return held
+
+
+def locked(handle):
+    """The lock is best effort: the exit code of the command must never wait on another writer."""
+    deadline = time.monotonic() + LOCK_WAIT_BUDGET_SECONDS
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LOCK_RETRY_SLEEP_SECONDS)
+
+
+def written_size(line):
+    return len((line + RECORD_LINE_TERMINATOR).encode("utf-8"))
+
+
+def serialise(record):
+    """One line small enough that a single O_APPEND write cannot tear; only cmd ever gives way."""
+    line = json.dumps(dataclasses.asdict(record), ensure_ascii=False)
+    cmd = record.cmd
+    while cmd and written_size(line) > RECORD_MAX_BYTES:
+        excess = written_size(line) - RECORD_MAX_BYTES
+        cmd = cmd[:max(0, len(cmd) - max(1, excess))]
+        shortened = dataclasses.replace(record, cmd=cmd + TRUNCATED_CMD_SUFFIX)
+        line = json.dumps(dataclasses.asdict(shortened), ensure_ascii=False)
+    return line
+
+
+def store(log_dir, record):
+    lock_held = append_line(log_dir, serialise(record))
+    try:
+        if lock_held:
+            prune_under_lock(log_dir)
+    except Exception:
+        pass
+    try:
+        rotate_logs(log_dir, read_entries(log_dir))
+    except Exception:
+        pass
+
+
+def main(argv):
+    log_dir, repo_argument, cmd, log, rc_text, slug = argv
+    log_dir = absolute_path(log_dir)
+    log = absolute_path(log)
+    rc = int(rc_text)
+    session_id = os.environ.get(SESSION_ID_ENV) or None
+    store(log_dir, LedgerRecord(
+        schema=SCHEMA_VERSION,
+        ts=now().isoformat(),
+        rc=rc,
+        outcome=classify(rc, cmd, log),
+        repo=resolve_repo(repo_argument, cmd),
+        cmd=cmd,
+        log=log,
+        session_id=session_id,
+        slug=slug))
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except Exception:
+        pass
+LEDGER_PY
+}
+
 set -uo pipefail
 TAIL=40
 NAME=""
+REPO=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -t|--tail) TAIL=$2; shift 2 ;;
     -n|--name) NAME=$2; shift 2 ;;
+    --repo) REPO=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     *) break ;;
@@ -25,18 +523,34 @@ case $TAIL in ''|*[!0-9]*) TAIL=40 ;; esac
 
 LOG_DIR=${CLAUDE_VERIFY_LOG_DIR:-$HOME/.cache/claude-verify}
 mkdir -p "$LOG_DIR"
-find "$LOG_DIR" -name '*.log' -mtime +7 -delete 2>/dev/null
+case $LOG_DIR in
+  /*) ;;
+  *) LOG_DIR=$(cd "$LOG_DIR" 2>/dev/null && pwd) || LOG_DIR=$PWD/$LOG_DIR ;;
+esac
 if [ $# -eq 1 ]; then CMD_STR=$1; else CMD_STR=$(printf '%q ' "$@"); CMD_STR=${CMD_STR% }; fi
 SLUG=$(printf '%s' "${NAME:-$CMD_STR}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40)
 LOG=$LOG_DIR/$(date +%Y%m%d-%H%M%S)-$SLUG-$$.log
 START=$(date +%s)
-if [ $# -eq 1 ]; then bash -o pipefail -c "$1" >"$LOG" 2>&1; else "$@" >"$LOG" 2>&1; fi
+MEMORY_MAX=${VERIFY_MEMORY_MAX:-6G}
+USER_BUS=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus
+RESOURCE_LIMIT=()
+if [ -z "${VERIFY_NO_LIMITS:-}" ] && [ -z "${VERIFY_LIMITED:-}" ] && [ -S "$USER_BUS" ] && command -v systemd-run >/dev/null; then
+  RESOURCE_LIMIT=(systemd-run --user --scope --quiet --collect
+    -p MemoryMax="$MEMORY_MAX" -p MemorySwapMax="${VERIFY_SWAP_MAX:-1G}"
+    -p CPUQuota="${VERIFY_CPU_QUOTA:-600%}" -p CPUWeight="${VERIFY_CPU_WEIGHT:-30}"
+    -- nice -n "${VERIFY_NICE:-10}")
+fi
+export VERIFY_LIMITED=1 BUN_MEMORY_LIMITED=1
+if [ $# -eq 1 ]; then "${RESOURCE_LIMIT[@]}" bash -o pipefail -c "$1" >"$LOG" 2>&1; else "${RESOURCE_LIMIT[@]}" "$@" >"$LOG" 2>&1; fi
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
 LINES=$(wc -l <"$LOG")
 STATUS=PASS; [ "$RC" -eq 0 ] || STATUS=FAIL
 echo "VERIFY $STATUS exit=$RC time=${ELAPSED}s lines=$LINES cmd: $CMD_STR"
 echo "log: $LOG"
+if [ "$RC" -eq 137 ] && [ "${#RESOURCE_LIMIT[@]}" -gt 0 ]; then
+  echo "limits: exit 137 (killed, memory limit $MEMORY_MAX); VERIFY_MEMORY_MAX=... or VERIFY_NO_LIMITS=1 lifts it"
+fi
 if [ "$RC" -eq 0 ]; then
   WARNINGS=$(grep -Eci 'DeprecationWarning|PendingDeprecationWarning|\bdeprecated\b' "$LOG" || true)
   [ "${WARNINGS:-0}" -gt 0 ] && echo "warnings: $WARNINGS deprecation lines (see log)"
@@ -78,4 +592,5 @@ if not short and not first_fail:
     emit(f"last {len(last)} lines", last)
 emit("summary", summary[-3:])
 PY
+ledger_record "$LOG_DIR" "$REPO" "$CMD_STR" "$LOG" "$RC" "$SLUG" >/dev/null 2>&1
 exit "$RC"

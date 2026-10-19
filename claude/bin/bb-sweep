@@ -1,0 +1,2044 @@
+#!/usr/bin/env python3
+"""bb-sweep — co w Bitbuckecie czeka na Ciebie.
+
+usage: bb-sweep [--json] [--refresh-repos] [--repos a,b,c] [--deep] [--include-drafts] [SECTION ...]
+       bb-sweep resolve REPO PR THREAD [THREAD ...]
+       bb-sweep resolve --answered [--repos a,b,c] [--dry-run]
+       bb-sweep harvest [--since YYYY-MM-DD] [--repos a,b] [--json] [--all]
+       bb-sweep harvest-mark REPO PR THREAD [THREAD ...]
+       bb-sweep harvest-done
+       bb-sweep static --repo DIR --base REF [--json]
+
+SECTION: mine | review | replies | approve | all   (domyślnie: all)
+  mine     PR-y Twojego autorstwa z wątkami bez Twojej odpowiedzi
+  review   otwarte cudze PR-y, na których nie oddałeś głosu (nie tylko te z przypisaniem)
+  replies  cudze PR-y z moim głosem: wątki, w których ktoś odpowiedział po mnie, komentarze autora w dowolnym wątku i push po moim ostatnim wpisie
+  approve  cudze PR-y z moim changes_requested, gdzie wszystkie moje wątki są zamknięte
+
+Wątki bota (CodeRabbit publikuje jako konto Jenkins) są oznaczone [bot]:
+po odpowiedzi i poprawce takiego wątku zamyka się go — `resolve --answered`
+robi to hurtem dla wątków bota na moich PR-ach, w których ostatni głos jest mój.
+
+Drafty są pomijane — review i odpowiedzi robimy tylko na PR-ach OPEN.
+--include-drafts pokazuje je mimo to (sam podgląd, nadal nic nie zapisuje).
+
+Dane z REST API Bitbucketa; poświadczenia z ~/.config/bitbucket/credentials.
+Limit API to ~1000 żądań/h, więc skan jest oszczędny: moje PR-y biorą się z jednego zapytania
+workspace, a o otwarte PR-y pytane są tylko repozytoria ruszane w ostatnich 120 dni plus te,
+gdzie już mnie przypisywano (~/.cache/claude-bb/reviewer-repos.json). `--deep` pyta o wszystkie
+repozytoria (wolne, drogie), `--refresh-repos` odświeża listę repozytoriów (7 dni cache),
+a stan `resolution` wątków jest cache'owany w ~/.cache/claude-bb/resolved.json.
+Skan wszystkich otwartych PR-ów zużywa wyraźnie więcej żądań niż skan samych przypisanych.
+Nic nie zapisuje do Bitbucketa — tylko czyta.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import base64
+import contextlib
+import dataclasses
+import fcntl
+import functools
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tokenize
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta, timezone
+from enum import StrEnum
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
+
+from magic_numbers import (
+    MagicHit,
+    MagicRule,
+    python_explained_lines,
+    python_magic_hits,
+    token_magic_hits,
+)
+from source_lexer import (
+    StaticLanguage,
+    Token,
+    TokenKind,
+    parse_python,
+    static_is_test,
+    static_language,
+    tokenize_source,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+WORKSPACE = "acme"
+API = "https://api.bitbucket.org/2.0/"
+CRED_PATH = os.path.expanduser("~/.config/bitbucket/credentials")
+CACHE_DIR_ENV = "BB_SWEEP_CACHE_DIR"
+CACHE_DIR = os.environ.get(CACHE_DIR_ENV) or str(
+    Path("~/.cache/claude-bb").expanduser()
+)
+REPO_CACHE = os.path.join(CACHE_DIR, "repos.json")
+REVIEWER_CACHE = os.path.join(CACHE_DIR, "reviewer-repos.json")
+RESOLVED_CACHE = os.path.join(CACHE_DIR, "resolved.json")
+REPO_CACHE_MAX_AGE_S = 7 * 24 * 3600
+REVIEW_WINDOW_DAYS = 120
+BOT_MARKER = "coderabbit-reviewed-pr"
+BOT_NICKS = {"jenkins", "coderabbit", "coderabbitai"}
+MAX_WORKERS = 10
+OPEN_PRS_QUERY = 'state="OPEN"'
+ACTIVITY_PAGELEN = 50
+SHORT_HASH_LEN = 9
+
+
+@dataclass(frozen=True)
+class PushAfterMe:
+    head: str
+    pushed_on: str
+
+
+class ActivityIncomplete(Exception):
+    pass
+
+
+@functools.cache
+def auth_header() -> str:
+    with open(CRED_PATH) as fh:
+        cred = fh.read().strip()
+    return "Basic " + base64.b64encode(cred.encode()).decode()
+
+
+RETRY_CODES = {429, 500, 502, 503, 504}
+NO_ACCESS_CODES = {403, 404, 410}
+MAX_RETRIES = 6
+MAX_BACKOFF_S = 60
+REQUESTS_PER_S = 3
+_slot_lock = threading.Lock()
+_next_slot = [0.0]
+
+
+def throttle() -> None:
+    """Globalny limiter — Bitbucket odpowiada 429 na zrywy równoległych żądań."""
+    with _slot_lock:
+        now = time.monotonic()
+        slot = max(now, _next_slot[0])
+        _next_slot[0] = slot + 1 / REQUESTS_PER_S
+    if slot > now:
+        time.sleep(slot - now)
+
+
+def get(url: str) -> dict:
+    if not url.startswith("http"):
+        url = API + url
+    req = urllib.request.Request(url, headers={"Authorization": auth_header()})
+    for attempt in range(MAX_RETRIES):
+        throttle()
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as err:
+            if err.code not in RETRY_CODES or attempt == MAX_RETRIES - 1:
+                raise
+            wait = err.headers.get("Retry-After")
+            time.sleep(
+                float(wait)
+                if wait and wait.isdigit()
+                else min(MAX_BACKOFF_S, 2**attempt)
+            )
+        except urllib.error.URLError:
+            if attempt == MAX_RETRIES - 1:
+                raise
+            time.sleep(min(MAX_BACKOFF_S, 2**attempt))
+    raise RuntimeError("nieosiągalne")
+
+
+def post_empty(url: str) -> dict:
+    """Puste POST-y Bitbucketa (resolve, approve) wywalają się z Content-Type."""
+    req = urllib.request.Request(
+        API + url,
+        data=b"",
+        headers={"Authorization": auth_header()},
+        method="POST",
+    )
+    throttle()
+    with urllib.request.urlopen(req) as resp:
+        return json.load(resp)
+
+
+def pages(url: str):
+    while url:
+        data = get(url)
+        yield from data.get("values", [])
+        url = data.get("next")
+
+
+def me() -> dict:
+    return get("user")
+
+
+def load_cache(path: str, default):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def save_cache(path: str, data) -> None:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(data, fh)
+
+
+def repo_index(refresh: bool) -> dict[str, str]:
+    """slug -> updated_on; lista repozytoriów zmienia się rzadko, cache na 7 dni."""
+    cached = load_cache(REPO_CACHE, None)
+    fresh = (
+        not refresh
+        and isinstance(cached, dict)
+        and cached.get("updated")
+        and time.time() - os.path.getmtime(REPO_CACHE) < REPO_CACHE_MAX_AGE_S
+    )
+    if fresh:
+        return cached["updated"]
+    index = {
+        r["slug"]: r.get("updated_on") or ""
+        for r in pages(
+            f"repositories/{WORKSPACE}?pagelen=100&fields=values.slug,values.updated_on,next"
+        )
+    }
+    save_cache(REPO_CACHE, {"updated": index})
+    return index
+
+
+def candidate_repos(index: dict[str, str], deep: bool) -> list[str]:
+    """Pytamy o reviewera tylko repozytoria żywe albo takie, gdzie już mnie przypisano."""
+    if deep:
+        return sorted(index)
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=REVIEW_WINDOW_DAYS)
+    ).isoformat()
+    recent = {slug for slug, updated in index.items() if updated >= cutoff}
+    return sorted(recent | set(load_cache(REVIEWER_CACHE, [])))
+
+
+PR_FIELDS = ",".join(
+    [
+        "values.id",
+        "values.title",
+        "values.draft",
+        "values.updated_on",
+        "values.comment_count",
+        "values.author.uuid",
+        "values.author.display_name",
+        "values.source.branch.name",
+        "values.source.commit.hash",
+        "values.destination.branch.name",
+        "values.participants",
+        "values.reviewers.uuid",
+        "values.links.html.href",
+        "next",
+    ]
+)
+MY_PR_FIELDS = PR_FIELDS + ",values.destination.repository.full_name"
+
+
+def my_open_prs(uuid: str) -> list[tuple[str, dict]]:
+    """Wszystkie moje otwarte PR-y w workspace jednym zapytaniem, bez skanu repozytoriów."""
+    url = (
+        f"workspaces/{WORKSPACE}/pullrequests/{urllib.parse.quote(uuid)}"
+        f"?state=OPEN&pagelen=50&fields={MY_PR_FIELDS}"
+    )
+    out = []
+    for pr in pages(url):
+        full_name = pr["destination"]["repository"]["full_name"]
+        out.append((full_name.split("/")[-1], pr))
+    return out
+
+
+def open_prs(repo: str, query: str) -> list[dict]:
+    q = urllib.parse.quote(query)
+    try:
+        return list(
+            pages(
+                f"repositories/{WORKSPACE}/{repo}/pullrequests"
+                f"?q={q}&pagelen=50&fields={PR_FIELDS}"
+            )
+        )
+    except urllib.error.HTTPError as err:
+        if err.code in NO_ACCESS_CODES:
+            return []
+        raise
+
+
+def comments(repo: str, pr_id: int) -> list[dict] | None:
+    """None = nie udało się pobrać; pusta lista = PR bez komentarzy."""
+    try:
+        return [
+            c
+            for c in pages(
+                f"repositories/{WORKSPACE}/{repo}/pullrequests/{pr_id}"
+                f"/comments?pagelen=100"
+            )
+            if not c.get("deleted")
+        ]
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        return None
+
+
+RESOLVED_IDS: set[int] = set()
+
+
+def is_resolved(repo: str, pr_id: int, comment_id: int) -> bool | None:
+    """Listing nie zwraca `resolution` — trzeba dobić pojedynczym GET-em; None = błąd."""
+    if comment_id in RESOLVED_IDS:
+        return True
+    try:
+        c = get(
+            f"repositories/{WORKSPACE}/{repo}/pullrequests/{pr_id}/comments/{comment_id}"
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        return None
+    if c.get("resolution"):
+        RESOLVED_IDS.add(comment_id)
+        return True
+    return False
+
+
+def is_bot(user: dict) -> bool:
+    name = (user.get("nickname") or user.get("display_name") or "").strip().lower()
+    return name in BOT_NICKS
+
+
+def threads(items: list[dict]) -> dict[int, list[dict]]:
+    by_id = {c["id"]: c for c in items}
+
+    def root(c: dict) -> int:
+        seen: set[int] = set()
+        while c.get("parent") and c["parent"]["id"] in by_id and c["id"] not in seen:
+            seen.add(c["id"])
+            c = by_id[c["parent"]["id"]]
+        return c["id"]
+
+    out: dict[int, list[dict]] = {}
+    for c in items:
+        out.setdefault(root(c), []).append(c)
+    for chain in out.values():
+        chain.sort(key=lambda c: c["created_on"])
+    return out
+
+
+def location(comment: dict) -> str:
+    inline = comment.get("inline") or {}
+    if not inline:
+        return "ogólny"
+    line = inline.get("to") or inline.get("from") or ""
+    return f"{inline.get('path')}:{line}"
+
+
+def excerpt(comment: dict, limit: int = 160) -> str:
+    return " ".join(comment["content"]["raw"].split())[:limit]
+
+
+def my_state(pr: dict, uuid: str) -> str | None:
+    for p in pr.get("participants", []):
+        if p["user"]["uuid"] == uuid:
+            return p.get("state")
+    return None
+
+
+def parse_ts(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def my_last_entry(
+    items: list[dict], uuid: str, participated_on: str | None
+) -> datetime | None:
+    entries = [
+        parse_ts(comment["created_on"])
+        for comment in items
+        if comment["user"]["uuid"] == uuid
+    ]
+    if participated_on is not None:
+        entries.append(parse_ts(participated_on))
+    return max(entries) if entries else None
+
+
+def author_threads_after(
+    items: list[dict], author_uuid: str, uuid: str, since: datetime
+) -> list[dict]:
+    out: list[dict] = []
+    for rid, chain in threads(items).items():
+        if BOT_MARKER in chain[0]["content"]["raw"]:
+            continue
+        if any(comment["user"]["uuid"] == uuid for comment in chain):
+            continue
+        qualifying = [
+            comment
+            for comment in chain
+            if comment["user"]["uuid"] == author_uuid
+            and not is_bot(comment["user"])
+            and parse_ts(comment["created_on"]) > since
+        ]
+        if not qualifying:
+            continue
+        newest = qualifying[-1]
+        out.append(
+            {
+                "thread": rid,
+                "bot": False,
+                "where": location(chain[0]),
+                "last_by": newest["user"]["display_name"],
+                "last_on": newest["created_on"][:16],
+                "excerpt": excerpt(newest),
+                "size": len(chain),
+                "outside": True,
+            }
+        )
+    return out
+
+
+def push_after(repo: str, pr_id: int, head_hash: str, since: datetime) -> PushAfterMe | None:
+    updates: list[dict] = []
+    baseline: str | None = None
+    for activity in pages(
+        f"repositories/{WORKSPACE}/{repo}/pullrequests/{pr_id}/activity"
+        f"?pagelen={ACTIVITY_PAGELEN}"
+    ):
+        update = activity.get("update")
+        if update is None:
+            continue
+        try:
+            update_date = update["date"]
+            update_hash = update["source"]["commit"]["hash"]
+        except KeyError:
+            raise ActivityIncomplete from None
+        if parse_ts(update_date) <= since:
+            baseline = update_hash
+            break
+        updates.append(update)
+    if baseline is None:
+        raise ActivityIncomplete
+    if head_hash == baseline:
+        return None
+    newest_push = next(
+        (
+            update
+            for update in updates
+            if update["source"]["commit"]["hash"] != baseline
+        ),
+        None,
+    )
+    if newest_push is None:
+        raise ActivityIncomplete
+    return PushAfterMe(
+        head=head_hash[:SHORT_HASH_LEN],
+        pushed_on=newest_push["date"],
+    )
+
+
+def assigned_to_me(pr: dict, uuid: str) -> bool:
+    return any(reviewer.get("uuid") == uuid for reviewer in pr.get("reviewers", []))
+
+
+def collect(
+    repos: list[str],
+    uuid: str,
+    include_drafts: bool = False,
+    need_review: bool = True,
+) -> dict:
+    def wanted(pr: dict) -> bool:
+        return include_drafts or not pr.get("draft")
+
+    def scan(repo: str) -> tuple[str, list[dict], bool]:
+        try:
+            return repo, open_prs(repo, OPEN_PRS_QUERY), True
+        except (urllib.error.HTTPError, urllib.error.URLError):
+            return repo, [], False
+
+    mine = [(repo, pr) for repo, pr in my_open_prs(uuid) if wanted(pr)]
+    seen = {(repo, pr["id"]) for repo, pr in mine}
+    review: list[tuple[str, dict]] = []
+    unreachable: list[str] = []
+    if need_review:
+        assigned_repos: set[str] = set()
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            for repo, r, ok in pool.map(scan, repos):
+                if not ok:
+                    unreachable.append(f"{repo} (lista PR-ów)")
+                if any(assigned_to_me(pr, uuid) for pr in r):
+                    assigned_repos.add(repo)
+                review += [
+                    (repo, pr)
+                    for pr in r
+                    if wanted(pr) and (repo, pr["id"]) not in seen
+                ]
+        save_cache(REVIEWER_CACHE, sorted(assigned_repos))
+
+    def with_comments(entry: tuple[str, dict]) -> tuple[str, dict, list[dict] | None]:
+        repo, pr = entry
+        return repo, pr, comments(repo, pr["id"]) if pr["comment_count"] else []
+
+    result = {"mine": [], "review": [], "replies": [], "approve": [], "degraded": unreachable}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for repo, pr, items in pool.map(with_comments, mine + review):
+            authored_by_me = pr["author"]["uuid"] == uuid
+            waiting = []
+            answered_me = []
+            outside = []
+            push = None
+            my_open = 0
+            degraded = items is None
+            for rid, chain in threads(items or []).items():
+                if BOT_MARKER in chain[0]["content"]["raw"]:
+                    continue
+                last = chain[-1]
+                i_spoke = any(c["user"]["uuid"] == uuid for c in chain)
+                mine_to_close = not authored_by_me and i_spoke
+                if last["user"]["uuid"] == uuid and not mine_to_close:
+                    continue
+                resolved = is_resolved(repo, pr["id"], rid)
+                if resolved is None:
+                    degraded = True
+                elif resolved:
+                    continue
+                if mine_to_close:
+                    my_open += 1
+                if last["user"]["uuid"] == uuid:
+                    continue
+                row = {
+                    "thread": rid,
+                    "bot": is_bot(chain[0]["user"]),
+                    "where": location(chain[0]),
+                    "last_by": last["user"]["display_name"],
+                    "last_on": last["created_on"][:16],
+                    "excerpt": excerpt(last),
+                    "size": len(chain),
+                }
+                if authored_by_me:
+                    waiting.append(row)
+                elif i_spoke:
+                    answered_me.append(row)
+            state = my_state(pr, uuid)
+            if not authored_by_me and state is not None and items is not None:
+                participated_on = next(
+                    (
+                        participant.get("participated_on")
+                        for participant in pr.get("participants", [])
+                        if participant["user"]["uuid"] == uuid
+                    ),
+                    None,
+                )
+                since = my_last_entry(items, uuid, participated_on)
+                if since is not None:
+                    outside = author_threads_after(
+                        items, pr["author"]["uuid"], uuid, since
+                    )
+                    try:
+                        push = push_after(
+                            repo, pr["id"], pr["source"]["commit"]["hash"], since
+                        )
+                    except (
+                        urllib.error.HTTPError,
+                        urllib.error.URLError,
+                        ActivityIncomplete,
+                    ):
+                        degraded = True
+            row = {
+                "repo": repo,
+                "id": pr["id"],
+                "title": pr["title"],
+                "author": pr["author"]["display_name"],
+                "branch": pr["source"]["branch"]["name"],
+                "head": pr["source"]["commit"]["hash"][:9],
+                "draft": bool(pr.get("draft")),
+                "updated": pr["updated_on"][:16],
+                "url": pr["links"]["html"]["href"],
+                "my_state": state,
+                "my_open": my_open,
+                "degraded": degraded,
+                "threads": waiting or answered_me,
+                "pushed_after_me": dataclasses.asdict(push) if push else None,
+            }
+            if authored_by_me:
+                if waiting:
+                    result["mine"].append(row)
+            else:
+                if answered_me or outside or push:
+                    result["replies"].append(
+                        dict(row, threads=answered_me + outside)
+                    )
+                if row["my_state"] is None:
+                    result["review"].append(dict(row, threads=[]))
+                elif row["my_state"] == "changes_requested" and not my_open and not degraded:
+                    result["approve"].append(dict(row, threads=[]))
+            if degraded:
+                result["degraded"].append(f"{repo}#{pr['id']}")
+    for key in ("mine", "review", "replies", "approve"):
+        result[key].sort(key=lambda r: r["updated"], reverse=True)
+    result["degraded"].sort()
+    return result
+
+
+def render(result: dict, sections: set[str]) -> None:
+    def header(title: str, rows: list[dict]) -> None:
+        print(f"\n{'=' * 72}\n{title}  ({len(rows)})\n{'=' * 72}")
+
+    if "mine" in sections:
+        rows = result["mine"]
+        header("MOJE PR-Y — wątki bez mojej odpowiedzi", rows)
+        for r in rows:
+            print(f"\n  {r['repo']}#{r['id']}  {r['title'][:58]}")
+            print(f"    {r['url']}")
+            for t in r["threads"]:
+                tag = " [bot]" if t.get("bot") else ""
+                print(
+                    f"    [{t['thread']}]{tag} {t['where']}  "
+                    f"— {t['last_by']} {t['last_on']}"
+                )
+                print(f"        {t['excerpt']}")
+        if any(t.get("bot") for r in rows for t in r["threads"]):
+            print("\n  [bot] = CodeRabbit — po odpowiedzi i poprawce zamknij wątek:")
+            print("        bb-sweep resolve <repo> <pr> <id>   |   bb-sweep resolve --answered")
+        if not rows:
+            print("\n  (nic nie czeka)")
+
+    if "review" in sections:
+        rows = result["review"]
+        header("DO REVIEW — otwarte PR-y bez mojego głosu", rows)
+        for r in rows:
+            draft = " [DRAFT]" if r["draft"] else ""
+            print(
+                f"  {r['repo']}#{r['id']}{draft}  {r['author']:<18} "
+                f"{r['head']}  {r['title'][:50]}"
+            )
+            print(f"    {r['url']}")
+        if not rows:
+            print("\n  (nic nie czeka)")
+
+    if "replies" in sections:
+        rows = result["replies"]
+        header("CUDZE PR-Y — ktoś odpowiedział albo pushnął po mnie", rows)
+        for r in rows:
+            print(
+                f"\n  {r['repo']}#{r['id']}  {r['title'][:58]}  "
+                f"[mój głos: {r['my_state']}, moje otwarte wątki: {r['my_open']}]"
+            )
+            print(f"    {r['url']}")
+            if r["pushed_after_me"]:
+                push = r["pushed_after_me"]
+                print(
+                    "    nowy push po moim ostatnim wpisie: "
+                    f"{push['head']} {push['pushed_on'][:16]}"
+                )
+            for t in r["threads"]:
+                tag = " [bot]" if t.get("bot") else ""
+                if t.get("outside"):
+                    tag += " [poza moimi wątkami]"
+                print(
+                    f"    [{t['thread']}]{tag} {t['where']}  "
+                    f"— {t['last_by']} {t['last_on']}"
+                )
+                print(f"        {t['excerpt']}")
+        if not rows:
+            print("\n  (nic nie czeka)")
+
+    if "approve" in sections:
+        rows = result["approve"]
+        header("DO APPROVE — moje wątki zamknięte, głos wciąż changes_requested", rows)
+        for r in rows:
+            print(
+                f"  {r['repo']}#{r['id']}  {r['author']:<18} {r['head']}  "
+                f"{r['title'][:50]}"
+            )
+            print(f"    {r['url']}")
+        if not rows:
+            print("\n  (nic nie czeka)")
+    broken = result.get("degraded") or []
+    if broken:
+        print(
+            f"\n  UWAGA: {len(broken)} PR-ów nie dało się w pełni sprawdzić "
+            f"(API zwróciło błąd): {', '.join(broken[:10])}"
+            f"{' …' if len(broken) > 10 else ''}"
+        )
+        print("  Te PR-y są pominięte w sekcji approve — powtórz skan przed głosowaniem.")
+    print()
+
+
+def resolve_thread(repo: str, pr_id: int, thread_id: int) -> str:
+    url = (
+        f"repositories/{WORKSPACE}/{repo}/pullrequests/{pr_id}"
+        f"/comments/{thread_id}/resolve"
+    )
+    try:
+        post_empty(url)
+    except urllib.error.HTTPError as err:
+        return f"BLAD {err.code}"
+    return "zamkniety"
+
+
+def answered_bot_threads(repos: list[str] | None, uuid: str) -> list[dict]:
+    prs = [
+        (repo, pr)
+        for repo, pr in my_open_prs(uuid)
+        if not pr.get("draft") and (repos is None or repo in repos)
+    ]
+
+    def scan_pr(entry: tuple[str, dict]) -> list[dict]:
+        repo, pr = entry
+        items = comments(repo, pr["id"]) if pr["comment_count"] else []
+        if items is None:
+            print(f"POMINIETO {repo}#{pr['id']}: nie udalo sie pobrac komentarzy", file=sys.stderr)
+            return []
+        out = []
+        for rid, chain in threads(items).items():
+            root = chain[0]
+            if not is_bot(root["user"]) or BOT_MARKER in root["content"]["raw"]:
+                continue
+            if chain[-1]["user"]["uuid"] != uuid:
+                continue
+            if is_resolved(repo, pr["id"], rid) is not False:
+                continue
+            out.append(
+                {
+                    "repo": repo,
+                    "pr": pr["id"],
+                    "thread": rid,
+                    "where": location(root),
+                    "excerpt": excerpt(root, 90),
+                }
+            )
+        return out
+
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        for got in pool.map(scan_pr, prs):
+            rows += got
+    return sorted(rows, key=lambda r: (r["repo"], r["pr"], r["thread"]))
+
+
+def cmd_resolve(argv: list[str]) -> int:
+    dry = "--dry-run" in argv
+    rest = [a for a in argv if not a.startswith("--")]
+    if "--answered" in argv:
+        only = None
+        for i, a in enumerate(argv):
+            if a == "--repos" and i + 1 < len(argv):
+                only = [s for s in argv[i + 1].split(",") if s]
+                rest = [a for a in rest if a not in only and a != argv[i + 1]]
+        user = me()
+        rows = answered_bot_threads(only, user["uuid"])
+        if not rows:
+            print("brak wątków CodeRabbita z moją odpowiedzią do zamknięcia")
+            return 0
+        for r in rows:
+            state = "do zamkniecia" if dry else resolve_thread(r["repo"], r["pr"], r["thread"])
+            print(f"{r['repo']}#{r['pr']} [{r['thread']}] {r['where']}  {state}")
+            print(f"    {r['excerpt']}")
+        return 0
+    if len(rest) < 3:
+        print("użycie: bb-sweep resolve REPO PR THREAD [THREAD ...]", file=sys.stderr)
+        return 2
+    repo, pr_id = rest[0], int(rest[1])
+    for raw in rest[2:]:
+        state = "do zamkniecia" if dry else resolve_thread(repo, pr_id, int(raw))
+        print(f"{repo}#{pr_id} [{raw}] {state}")
+    return 0
+
+
+HARVEST_STATE_NAME = "harvested.json"
+HARVEST_STATE_VERSION = 1
+HARVEST_DEFAULT_DAYS = 180
+HARVEST_PAGELEN = 50
+HARVEST_ROOT_LIMIT = 600
+HARVEST_REPLY_LIMIT = 300
+HARVEST_STATES = ("OPEN", "MERGED")
+HARVEST_SORT = "-updated_on"
+HARVEST_PR_FIELD_NAMES = (
+    "values.id",
+    "values.title",
+    "values.updated_on",
+    "values.destination.repository.full_name",
+    "values.links.html.href",
+    "next",
+)
+HARVEST_PR_FIELDS = ",".join(HARVEST_PR_FIELD_NAMES)
+HARVEST_TEMP_SUFFIX = ".tmp"
+HARVEST_ENCODING = "utf-8"
+HARVEST_USAGE_EXIT = 2
+HARVEST_OK_EXIT = 0
+HARVEST_MARK_USAGE = (
+    "użycie: bb-sweep harvest-mark REPO PR THREAD [THREAD ...]"
+)
+HARVEST_MARK_MIN_ARGS = 3
+HARVEST_DONE_USAGE = "użycie: bb-sweep harvest-done"
+HARVEST_LOCK_SUFFIX = ".lock"
+HARVEST_NO_CUTOFF = "brak"
+HARVEST_TIME_PREFIX = 16
+
+
+class HarvestStateCorruptError(Exception):
+    """The harvest state file exists but cannot be parsed."""
+
+
+@dataclass
+class HarvestState:
+    """Refs of review threads already turned into habits."""
+
+    last_harvest: str | None = None
+    refs: list[str] = dataclasses.field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class HarvestedThread:
+    """One review thread by someone else on one of my PRs."""
+
+    repo: str
+    pr: int
+    pr_title: str
+    pr_url: str
+    thread: int
+    ref: str
+    author: str
+    bot: bool
+    created_on: str
+    where: str
+    text: str
+    my_replies: list[str]
+    resolved: bool | None
+
+
+def harvest_today() -> date:
+    """Return today's local date."""
+    return datetime.now(UTC).astimezone().date()
+
+
+def harvest_state_path() -> Path:
+    """Return the harvest state file inside the cache directory."""
+    return Path(CACHE_DIR) / HARVEST_STATE_NAME
+
+
+def harvest_ref(repo: str, pr_id: int, thread_id: int) -> str:
+    """Return the ref that names one review thread."""
+    return f"{repo}#{pr_id}/{thread_id}"
+
+
+def read_harvest_state() -> HarvestState:
+    """Read the state file; a missing one is empty, a broken one raises."""
+    try:
+        text = harvest_state_path().read_text(encoding=HARVEST_ENCODING)
+    except FileNotFoundError:
+        return HarvestState()
+    except (OSError, UnicodeDecodeError) as err:
+        raise HarvestStateCorruptError(str(err)) from err
+    try:
+        record = json.loads(text)
+    except ValueError as err:
+        raise HarvestStateCorruptError(str(err)) from err
+    if not isinstance(record, dict):
+        raise HarvestStateCorruptError(HARVEST_STATE_NAME)
+    last = record.get("last_harvest")
+    refs = record.get("refs", [])
+    valid_refs = isinstance(refs, list) and all(
+        isinstance(ref, str) for ref in refs
+    )
+    if not valid_refs or not (last is None or isinstance(last, str)):
+        raise HarvestStateCorruptError(HARVEST_STATE_NAME)
+    return HarvestState(last_harvest=last, refs=refs)
+
+
+def write_harvest_state(state: HarvestState) -> None:
+    """Write the state file atomically (temp file and os.replace)."""
+    Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    record = {
+        "version": HARVEST_STATE_VERSION,
+        "last_harvest": state.last_harvest,
+        "refs": state.refs,
+    }
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding=HARVEST_ENCODING,
+        dir=CACHE_DIR,
+        prefix=HARVEST_STATE_NAME,
+        suffix=HARVEST_TEMP_SUFFIX,
+        delete=False,
+    ) as fh:
+        json.dump(record, fh, indent=1)
+        temp_path = Path(fh.name)
+    temp_path.replace(harvest_state_path())
+
+
+def harvest_since(
+    given: date | None, state: HarvestState, today: date
+) -> date:
+    """Pick --since, else the last harvest, else today minus 180 days."""
+    if given is not None:
+        return given
+    if state.last_harvest:
+        try:
+            return date.fromisoformat(state.last_harvest)
+        except ValueError:
+            pass
+    return today - timedelta(days=HARVEST_DEFAULT_DAYS)
+
+
+def my_recent_prs(uuid: str, since: date) -> list[tuple[str, dict]]:
+    """My OPEN and MERGED PRs updated on or after since, newest first."""
+    states = "&".join(f"state={state}" for state in HARVEST_STATES)
+    url = (
+        f"workspaces/{WORKSPACE}/pullrequests/{urllib.parse.quote(uuid)}"
+        f"?{states}&sort={HARVEST_SORT}&pagelen={HARVEST_PAGELEN}"
+        f"&fields={HARVEST_PR_FIELDS}"
+    )
+    out = []
+    for pr in pages(url):
+        if parse_ts(pr["updated_on"]).date() < since:
+            break
+        full_name = pr["destination"]["repository"]["full_name"]
+        out.append((full_name.split("/")[-1], pr))
+    return out
+
+
+def harvest_pr(
+    repo: str, pr: dict, uuid: str, marked: set[str]
+) -> list[HarvestedThread] | None:
+    """Collect review threads of others on one PR; None = fetch failed."""
+    items = comments(repo, pr["id"])
+    if items is None:
+        return None
+    out = []
+    for rid, chain in threads(items).items():
+        root = chain[0]
+        if root["user"].get("uuid") == uuid:
+            continue
+        ref = harvest_ref(repo, pr["id"], rid)
+        if ref in marked:
+            continue
+        out.append(
+            HarvestedThread(
+                repo=repo,
+                pr=pr["id"],
+                pr_title=pr.get("title") or "",
+                pr_url=pr.get("links", {}).get("html", {}).get("href", ""),
+                thread=rid,
+                ref=ref,
+                author=root["user"].get("display_name") or "",
+                bot=is_bot(root["user"]),
+                created_on=root["created_on"],
+                where=location(root),
+                text=excerpt(root, HARVEST_ROOT_LIMIT),
+                my_replies=[
+                    excerpt(reply, HARVEST_REPLY_LIMIT)
+                    for reply in chain[1:]
+                    if reply["user"].get("uuid") == uuid
+                ],
+                resolved=is_resolved(repo, pr["id"], rid),
+            )
+        )
+    return out
+
+
+def harvest_threads(
+    prs: list[tuple[str, dict]], uuid: str, marked: set[str]
+) -> tuple[list[HarvestedThread], list[str]]:
+    """Harvest every PR; return the threads and the PRs that failed."""
+
+    def scan(entry: tuple[str, dict]) -> list[HarvestedThread] | None:
+        """Harvest one PR."""
+        repo, pr = entry
+        return harvest_pr(repo, pr, uuid, marked)
+
+    rows: list[HarvestedThread] = []
+    broken: list[str] = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        for (repo, pr), got in zip(prs, pool.map(scan, prs), strict=True):
+            if got is None:
+                broken.append(f"{repo}#{pr['id']}")
+            else:
+                rows += got
+    return rows, broken
+
+
+def render_harvest(rows: list[HarvestedThread], since: date) -> None:
+    """Print the harvested threads grouped per PR."""
+    print(f"bb-sweep harvest — od {since.isoformat()} — {len(rows)} wątków")
+    current = None
+    for row in rows:
+        if (row.repo, row.pr) != current:
+            current = (row.repo, row.pr)
+            print(f"\n{row.repo}#{row.pr}  {row.pr_title}")
+            print(f"  {row.pr_url}")
+        tags = " [bot]" if row.bot else ""
+        if row.resolved:
+            tags += " [resolved]"
+        print(
+            f"  [{row.thread}]{tags} {row.where}  — {row.author} "
+            f"{row.created_on[:HARVEST_TIME_PREFIX]}"
+        )
+        print(f"      {row.text}")
+        for reply in row.my_replies:
+            print(f"      > ja: {reply}")
+    if not rows:
+        print("\n  (nic nowego)")
+
+
+def harvest_parser() -> argparse.ArgumentParser:
+    """Build the parser of the harvest subcommand."""
+    parser = argparse.ArgumentParser(prog="bb-sweep harvest")
+    parser.add_argument("--since", type=date.fromisoformat)
+    parser.add_argument("--repos")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--all", action="store_true")
+    return parser
+
+
+def cmd_harvest(argv: list[str]) -> int:
+    """List review threads of others on my PRs not yet turned into habits."""
+    args = harvest_parser().parse_args(argv)
+    try:
+        state = read_harvest_state()
+    except HarvestStateCorruptError:
+        state = HarvestState()
+    since = harvest_since(args.since, state, harvest_today())
+    only = {s for s in (args.repos or "").split(",") if s}
+    user = me()
+    prs = [
+        (repo, pr)
+        for repo, pr in my_recent_prs(user["uuid"], since)
+        if not only or repo in only
+    ]
+    marked = set() if args.all else set(state.refs)
+    rows, broken = harvest_threads(prs, user["uuid"], marked)
+    if args.json:
+        records = [dataclasses.asdict(row) for row in rows]
+        print(json.dumps(records, ensure_ascii=False, indent=1))
+    else:
+        render_harvest(rows, since)
+    if broken:
+        print(
+            f"\n  UWAGA: {len(broken)} PR-ów nie dało się sprawdzić "
+            f"(API zwróciło błąd): {', '.join(broken)}",
+            file=sys.stderr if args.json else sys.stdout,
+        )
+    return HARVEST_OK_EXIT
+
+
+@contextlib.contextmanager
+def harvest_state_lock() -> Iterator[None]:
+    """Hold an exclusive flock on the sidecar lock of the state file."""
+    path = harvest_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + HARVEST_LOCK_SUFFIX)
+    with lock_path.open("a", encoding=HARVEST_ENCODING) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def update_harvest_state(change: Callable[[HarvestState], None]) -> bool:
+    """Read, change and write the state under the lock; False if corrupt."""
+    with harvest_state_lock():
+        try:
+            state = read_harvest_state()
+        except HarvestStateCorruptError as err:
+            print(
+                f"uszkodzony {harvest_state_path()}: {err} — nie nadpisuję",
+                file=sys.stderr,
+            )
+            return False
+        change(state)
+        write_harvest_state(state)
+    return True
+
+
+def cmd_harvest_mark(argv: list[str]) -> int:
+    """Record review threads as processed; the cutoff stays unchanged."""
+    if len(argv) < HARVEST_MARK_MIN_ARGS:
+        print(HARVEST_MARK_USAGE, file=sys.stderr)
+        return HARVEST_USAGE_EXIT
+    repo, *numbers = argv
+    try:
+        pr_id, *thread_ids = [int(number) for number in numbers]
+    except ValueError:
+        print(HARVEST_MARK_USAGE, file=sys.stderr)
+        return HARVEST_USAGE_EXIT
+    wanted = dict.fromkeys(
+        harvest_ref(repo, pr_id, thread_id) for thread_id in thread_ids
+    )
+    new: list[str] = []
+
+    def add_refs(state: HarvestState) -> None:
+        """Add the refs that are not recorded yet."""
+        known = set(state.refs)
+        new.extend(ref for ref in wanted if ref not in known)
+        state.refs = sorted(known | set(new))
+
+    if not update_harvest_state(add_refs):
+        return HARVEST_USAGE_EXIT
+    print(f"oznaczono {len(new)} nowych wątków")
+    return HARVEST_OK_EXIT
+
+
+def cmd_harvest_done(argv: list[str]) -> int:
+    """Move the default harvest cutoff to today once every thread is marked."""
+    if argv:
+        print(HARVEST_DONE_USAGE, file=sys.stderr)
+        return HARVEST_USAGE_EXIT
+    today = harvest_today().isoformat()
+    previous: list[str | None] = []
+
+    def move_cutoff(state: HarvestState) -> None:
+        """Set last_harvest to today, remembering the old value."""
+        previous.append(state.last_harvest)
+        state.last_harvest = today
+
+    if not update_harvest_state(move_cutoff):
+        return HARVEST_USAGE_EXIT
+    old = previous[0] or HARVEST_NO_CUTOFF
+    print(f"last_harvest: {old} -> {today}")
+    return HARVEST_OK_EXIT
+
+
+STATIC_USAGE_EXIT = 2
+STATIC_OK_EXIT = 0
+STATIC_GIT_DIFF_ARGS = (
+    "-c",
+    "diff.renames=true",
+    "-c",
+    "core.quotePath=false",
+    "-c",
+    "diff.interHunkContext=0",
+    "-c",
+    "diff.context=0",
+    "diff",
+    "-M",
+    "-U0",
+    "--no-color",
+    "--no-ext-diff",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+)
+STATIC_HUNK = re.compile(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+STATIC_NEW_SIDE_PREFIX = "b/"
+STATIC_DEV_NULL = "/dev/null"
+STATIC_GIT_ESCAPE = re.compile(rb"\\(?:([0-7]{3})|(.))")
+STATIC_GIT_ESCAPES = {
+    b"t": b"\t",
+    b"n": b"\n",
+    b"r": b"\r",
+    b"a": b"\a",
+    b"b": b"\b",
+    b"f": b"\f",
+    b"v": b"\v",
+}
+STATIC_OCTAL_BASE = 8
+STATIC_FILE_HEADER = "diff --git "
+STATIC_NEW_SIDE_HEADER = "+++ "
+STATIC_SKIPPED_DIRS = frozenset(
+    {"node_modules", "dist", "build", "vendor", "migrations"}
+)
+STATIC_SKIPPED_SUFFIXES = ("_pb2.py", ".min.js")
+STATIC_ENCODING = "utf-8"
+STATIC_SNIPPET_LIMIT = 160
+STATIC_ATTR_MIN_ARGS = 2
+STATIC_ATTR_FUNCTIONS = frozenset({"getattr", "setattr", "hasattr", "delattr"})
+STATIC_RULE_PY_MAGIC = "ast-magic-number"
+STATIC_RULE_PY_ATTR = "ast-literal-attr"
+STATIC_RULE_PY_COMMENT = "ERA001"
+STATIC_RULE_LEXER_MAGIC = "token-magic-number"
+STATIC_RULE_RUFF_MAGIC = "PLR2004"
+STATIC_MAGIC_LABELS = {
+    MagicRule.COMPARISON: "magiczna liczba w porównaniu",
+    MagicRule.REPEATED: "powtórzona magiczna liczba",
+    MagicRule.DELAY: "opóźnienie bez stałej ani komentarza",
+}
+STATIC_MAGIC_JOINER = "; "
+STATIC_MAGIC_VALUE_JOINER = ", "
+STATIC_RUFF_VALUE = re.compile(r"`([^`]+)`")
+STATIC_RULE_LEXER_COMMENT = "token-commented-code"
+STATIC_RULE_LEXER_CATCH = "token-empty-catch"
+STATIC_RULE_JSCPD = "jscpd"
+STATIC_RUFF = "ruff"
+STATIC_JSCPD = "jscpd"
+STATIC_RUFF_TIMEOUT_S = 60.0
+STATIC_JSCPD_TIMEOUT_S = 60.0
+STATIC_RUFF_OK_EXITS = (0, 1)
+STATIC_ARGUMENT_LIMIT = 1_000_000
+STATIC_JSCPD_REPORT = "jscpd-report.json"
+STATIC_JSCPD_OPTIONS = (
+    "--min-lines",
+    "8",
+    "--min-tokens",
+    "80",
+    "--reporters",
+    "json",
+    "--silent",
+    "--absolute",
+)
+STATIC_CLONE_SUFFIXES = frozenset(
+    {".py", ".c", ".h", ".cpp", ".hpp", ".cc", ".ts", ".tsx", ".js", ".jsx"}
+)
+STATIC_RUFF_OPTIONS = (
+    "check",
+    "--isolated",
+    "--ignore-noqa",
+    "--no-cache",
+    "--config",
+    "lint.flake8-bandit.check-typed-exception = true",
+    "--output-format",
+    "json",
+)
+STATIC_COMMENT_DIRECTIVES = (
+    "eslint",
+    "prettier",
+    "istanbul",
+    "@ts-",
+    "nolint",
+    "clang-format",
+    "spdx",
+    "todo",
+    "fixme",
+    "note",
+    "xxx",
+    "hack",
+    "pylint",
+    "noqa",
+    "webpack",
+    "jshint",
+)
+STATIC_CODE_END = (";", "{", "}")
+STATIC_CODE_LIKE = (
+    re.compile(r"(?:if|for|while|switch)\s*\("),
+    re.compile(r"else\s*(?:\{|if\b|$)"),
+    re.compile(r"(?:const|let|var)\s+(?:[\w$]+|[\[{][^=]*)(?:\s*:[^=]+)?\s*="),
+    re.compile(r"import\s+(?:[\w${*][^;]*\s+from\s+|[\"'])"),
+    re.compile(
+        r"export\s+(?:default|const|let|var|function|class|async|type"
+        r"|interface|enum)\b"
+    ),
+    re.compile(r"await\s+[\w$(]"),
+    re.compile(r"function\s*\*?\s*[\w$]*\s*\("),
+    re.compile(r"#\s*(?:include|define|if|ifdef|ifndef|endif|else|pragma)\b"),
+    re.compile(r"[\w$.:>\-\[\]]+\(.*\)\s*$"),
+    re.compile(r"[\w$.\[\]>\-]+\s*(?:[-+*/|&^%]|<<|>>)?=\s*(?!=)\S"),
+)
+STATIC_JSX_LIKE = re.compile(r"</?[A-Za-z][\w.]*(?:\s[^>]*)?/?>")
+STATIC_PY_ENTRY = re.compile(r"[\w.]+(?:\[[^\]]*\])?\s*:\s*[\w.\"'()\[\]]+,")
+class StaticUsageError(Exception):
+    """The static check cannot run on the given repository or base."""
+
+
+class StaticCategory(StrEnum):
+    """The kinds of mechanical review candidates."""
+
+    MAGIC_NUMBER = "magic-number"
+    LITERAL_ATTR = "literal-attr"
+    COMMENTED_CODE = "commented-code"
+    EMPTY_CATCH = "empty-catch"
+    DUPLICATION = "duplication"
+    SWALLOWED_EXCEPTION = "swallowed-exception"
+    BARE_EXCEPT = "bare-except"
+    MUTABLE_DEFAULT = "mutable-default"
+    COMPARISON = "comparison"
+    NAMING = "naming"
+    UNUSED_VARIABLE = "unused-variable"
+
+
+STATIC_RUFF_LABELS = {
+    STATIC_RULE_RUFF_MAGIC: (
+        StaticCategory.MAGIC_NUMBER,
+        STATIC_MAGIC_LABELS[MagicRule.COMPARISON],
+    ),
+    "ERA001": (StaticCategory.COMMENTED_CODE, "zakomentowany kod"),
+    "BLE001": (
+        StaticCategory.SWALLOWED_EXCEPTION,
+        "zbyt szerokie except Exception",
+    ),
+    "S110": (StaticCategory.SWALLOWED_EXCEPTION, "połknięty wyjątek (pass)"),
+    "S112": (
+        StaticCategory.SWALLOWED_EXCEPTION,
+        "połknięty wyjątek (continue)",
+    ),
+    "E722": (StaticCategory.BARE_EXCEPT, "gołe except"),
+    "B006": (StaticCategory.MUTABLE_DEFAULT, "mutowalny argument domyślny"),
+    "E711": (StaticCategory.COMPARISON, "porównanie z None przez =="),
+    "E712": (StaticCategory.COMPARISON, "porównanie z True/False przez =="),
+    "N801": (StaticCategory.NAMING, "nazwa klasy niezgodna z PEP 8"),
+    "N802": (StaticCategory.NAMING, "nazwa funkcji niezgodna z PEP 8"),
+    "N803": (StaticCategory.NAMING, "nazwa argumentu niezgodna z PEP 8"),
+    "N806": (StaticCategory.NAMING, "nazwa zmiennej niezgodna z PEP 8"),
+    "N815": (StaticCategory.NAMING, "nazwa mixedCase w klasie"),
+    "N816": (StaticCategory.NAMING, "nazwa mixedCase w module"),
+    "F841": (StaticCategory.UNUSED_VARIABLE, "nieużywana zmienna"),
+}
+
+
+@dataclass(frozen=True)
+class StaticHit:
+    """A candidate located on one line of a file."""
+
+    line: int
+    category: StaticCategory
+    label: str
+    rule: str
+
+
+@dataclass(frozen=True)
+class StaticFinding:
+    """A candidate on an added line, ready to print."""
+
+    path: str
+    line: int
+    category: StaticCategory
+    label: str
+    rule: str
+    snippet: str
+
+
+@dataclass(frozen=True)
+class StaticSource:
+    """A changed file with the lines the PR adds to it."""
+
+    path: str
+    language: StaticLanguage
+    added: frozenset[int]
+    text: str
+
+
+@dataclass(frozen=True)
+class StaticReport:
+    """The findings and the checks that could not run."""
+
+    findings: list[StaticFinding]
+    not_checked: list[str]
+
+
+@dataclass(frozen=True)
+class CloneSide:
+    """One fragment of a jscpd clone."""
+
+    path: str
+    start: int
+    end: int
+
+
+def static_git(repo: Path, *args: str) -> str:
+    """Run git in the repository and return its stdout."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            check=False,
+        )
+    except OSError as err:
+        message = f"git unavailable: {err}"
+        raise StaticUsageError(message) from None
+    output = done.stdout.decode(STATIC_ENCODING, errors="replace")
+    if done.returncode != 0:
+        message = done.stderr.decode(STATIC_ENCODING, errors="replace")
+        raise StaticUsageError(message.strip() or "git failed")
+    return output
+
+
+def static_merge_base(repo: Path, base: str) -> str:
+    """Return the merge-base of the base ref and HEAD."""
+    try:
+        return static_git(repo, "merge-base", base, "HEAD").strip()
+    except StaticUsageError as err:
+        message = f"cannot resolve --base {base}: {err}"
+        raise StaticUsageError(message) from None
+
+
+def hunk_extent(match: re.Match[str]) -> tuple[int, int, int]:
+    """Return the old count, new count and new start of a hunk header."""
+    old = 1 if match.group(1) is None else int(match.group(1))
+    new = 1 if match.group(3) is None else int(match.group(3))
+    return old, new, int(match.group(2))
+
+
+def unquote_git_path(quoted: str) -> str:
+    """Decode a C-style quoted path as git prints it."""
+    raw = quoted[1:-1].encode(STATIC_ENCODING, errors="surrogateescape")
+
+    def decode(match: re.Match[bytes]) -> bytes:
+        """Turn one escape sequence into its byte."""
+        octal, char = match.groups()
+        if octal:
+            return bytes([int(octal, STATIC_OCTAL_BASE)])
+        return STATIC_GIT_ESCAPES.get(char, char)
+
+    return STATIC_GIT_ESCAPE.sub(decode, raw).decode(
+        STATIC_ENCODING, errors="replace"
+    )
+
+
+def new_side_path(header: str) -> str | None:
+    """Return the new-side path of a +++ header, None when deleted."""
+    name = header[len(STATIC_NEW_SIDE_HEADER) :].split("\t", 1)[0]
+    if name.startswith('"'):
+        name = unquote_git_path(name)
+    if name == STATIC_DEV_NULL:
+        return None
+    return name.removeprefix(STATIC_NEW_SIDE_PREFIX)
+
+
+def parse_added_lines(patch: str) -> dict[str, frozenset[int]]:
+    """Return the new-side lines each file adds in a -U0 patch."""
+    added: dict[str, set[int]] = {}
+    path: str | None = None
+    old_left = new_left = new_line = 0
+    for text in patch.split("\n"):
+        if old_left or new_left:
+            if text.startswith("+") and path is not None:
+                added.setdefault(path, set()).add(new_line)
+            old_left, new_left, new_line = advance_hunk(
+                text, old_left, new_left, new_line
+            )
+        elif text.startswith(STATIC_FILE_HEADER):
+            path = None
+        elif text.startswith(STATIC_NEW_SIDE_HEADER):
+            path = new_side_path(text)
+        elif match := STATIC_HUNK.match(text):
+            old_left, new_left, new_line = hunk_extent(match)
+    return {name: frozenset(lines) for name, lines in added.items() if lines}
+
+
+def advance_hunk(
+    text: str, old_left: int, new_left: int, new_line: int
+) -> tuple[int, int, int]:
+    """Move the hunk counters past one body line."""
+    if text.startswith("-"):
+        return old_left - 1, new_left, new_line
+    if text.startswith("+"):
+        return old_left, new_left - 1, new_line + 1
+    if text.startswith(" "):
+        return old_left - 1, new_left - 1, new_line + 1
+    return old_left, new_left, new_line
+
+
+def static_is_skipped(path: str) -> bool:
+    """Tell whether a path is generated or vendored."""
+    pure = PurePosixPath(path)
+    if STATIC_SKIPPED_DIRS & set(pure.parts[:-1]):
+        return True
+    return pure.name.endswith(STATIC_SKIPPED_SUFFIXES)
+
+
+def head_text(repo: Path, path: str) -> str | None:
+    """Return the text of a file at HEAD, None when unreadable."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(repo), "cat-file", "blob", f"HEAD:{path}"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if done.returncode != 0:
+        return None
+    text = done.stdout.decode(STATIC_ENCODING, errors="replace")
+    return text.replace("\r\n", "\n")
+
+
+def load_sources(
+    repo: Path, added: dict[str, frozenset[int]]
+) -> tuple[list[StaticSource], list[str]]:
+    """Read the changed files at HEAD, listing the unreadable ones."""
+    sources: list[StaticSource] = []
+    not_checked: list[str] = []
+    for path, lines in sorted(added.items()):
+        language = static_language(path)
+        if language is None or static_is_skipped(path) or static_is_test(path):
+            continue
+        text = head_text(repo, path)
+        if text is None:
+            not_checked.append(f"{path}: nie da się odczytać z HEAD")
+            continue
+        sources.append(StaticSource(path, language, lines, text))
+    return sources, not_checked
+
+
+def changed_lines(repo: Path, base: str) -> dict[str, frozenset[int]]:
+    """Return the lines the PR adds, per file, against the merge-base."""
+    merge_base = static_merge_base(repo, base)
+    patch = static_git(repo, *STATIC_GIT_DIFF_ARGS, merge_base, "HEAD")
+    return parse_added_lines(patch)
+
+
+def magic_static_hits(hits: list[MagicHit], rule: str) -> list[StaticHit]:
+    """Turn magic-number hits into static hits."""
+    return [
+        StaticHit(
+            hit.line,
+            StaticCategory.MAGIC_NUMBER,
+            f"{STATIC_MAGIC_LABELS[hit.rule]} {', '.join(hit.values)}",
+            rule,
+        )
+        for hit in hits
+    ]
+
+
+def magic_label_parts(label: str) -> tuple[str, list[str]]:
+    """Split a magic-number label into its prefix and its values."""
+    for prefix in STATIC_MAGIC_LABELS.values():
+        if label.startswith(prefix):
+            rest = label[len(prefix) :].strip()
+            values = rest.split(STATIC_MAGIC_VALUE_JOINER) if rest else []
+            return prefix, values
+    return label, []
+
+
+def magic_label(prefix: str, values: list[str]) -> str:
+    """Build a magic-number label from its prefix and values."""
+    return " ".join(
+        filter(None, [prefix, STATIC_MAGIC_VALUE_JOINER.join(values)])
+    )
+
+
+def merge_magic_hits(hits: list[StaticHit]) -> list[StaticHit]:
+    """Join the magic-number hits of one line into a single hit."""
+    first: dict[int, StaticHit] = {}
+    parts: dict[int, dict[str, list[str]]] = {}
+    others: list[StaticHit] = []
+    for hit in hits:
+        if hit.category is not StaticCategory.MAGIC_NUMBER:
+            others.append(hit)
+            continue
+        first.setdefault(hit.line, hit)
+        prefix, values = magic_label_parts(hit.label)
+        known = parts.setdefault(hit.line, {}).setdefault(prefix, [])
+        known.extend(v for v in values if v not in known)
+    merged = [
+        dataclasses.replace(
+            first[line],
+            label=STATIC_MAGIC_JOINER.join(
+                magic_label(prefix, values)
+                for prefix, values in by_prefix.items()
+            ),
+        )
+        for line, by_prefix in parts.items()
+    ]
+    return others + merged
+
+
+def literal_attr_hits(tree: ast.Module) -> list[StaticHit]:
+    """Find getattr-family calls whose attribute name is a literal."""
+    hits: list[StaticHit] = []
+    for node in ast.walk(tree):
+        if (
+            not isinstance(node, ast.Call)
+            or len(node.args) < STATIC_ATTR_MIN_ARGS
+        ):
+            continue
+        func, name = node.func, node.args[1]
+        if (
+            not isinstance(func, ast.Name)
+            or func.id not in STATIC_ATTR_FUNCTIONS
+        ):
+            continue
+        if isinstance(name, ast.Constant) and isinstance(name.value, str):
+            label = f"{func.id} na znanym polu"
+            hits.append(
+                StaticHit(
+                    name.lineno,
+                    StaticCategory.LITERAL_ATTR,
+                    label,
+                    STATIC_RULE_PY_ATTR,
+                )
+            )
+    return hits
+
+
+def python_comment_hits(source: StaticSource) -> list[StaticHit]:
+    """Find comments holding a commented-out dict entry."""
+    hits: list[StaticHit] = []
+    readline = io.StringIO(source.text).readline
+    try:
+        for token in tokenize.generate_tokens(readline):
+            text = token.string.lstrip("#").strip()
+            if token.type == tokenize.COMMENT and STATIC_PY_ENTRY.fullmatch(
+                text
+            ):
+                hits.append(
+                    StaticHit(
+                        token.start[0],
+                        StaticCategory.COMMENTED_CODE,
+                        "zakomentowany kod",
+                        STATIC_RULE_PY_COMMENT,
+                    )
+                )
+    except (tokenize.TokenError, SyntaxError):
+        return hits
+    return hits
+
+
+def python_source_hits(
+    source: StaticSource, tree: ast.Module
+) -> list[StaticHit]:
+    """Return the AST hits of a parsed Python file."""
+    hits = literal_attr_hits(tree) + python_comment_hits(source)
+    hits += magic_static_hits(
+        python_magic_hits(tree, source.added, source.text),
+        STATIC_RULE_PY_MAGIC,
+    )
+    return hits
+
+
+def comment_lines(token: Token) -> Iterator[tuple[int, str]]:
+    """Yield the (line, text) pairs a comment token spans."""
+    if token.text.startswith("///"):
+        return
+    if token.text.startswith("//"):
+        yield token.line, token.text[2:].lstrip("/!").strip()
+        return
+    inner = token.text[2:-2] if token.text.endswith("*/") else token.text[2:]
+    for offset, raw in enumerate(inner.split("\n")):
+        yield token.line + offset, raw.strip().lstrip("*").strip()
+
+
+def looks_like_code(text: str) -> bool:
+    """Tell whether comment text reads like commented-out code."""
+    if not text or text.lower().startswith(STATIC_COMMENT_DIRECTIVES):
+        return False
+    if text.endswith(STATIC_CODE_END):
+        return True
+    if text.startswith("<"):
+        return STATIC_JSX_LIKE.fullmatch(text) is not None
+    return any(pattern.match(text) for pattern in STATIC_CODE_LIKE)
+
+
+def commented_code_hits(
+    tokens: list[Token], added: frozenset[int]
+) -> list[StaticHit]:
+    """Find comments on added lines that look like code."""
+    return [
+        StaticHit(
+            line,
+            StaticCategory.COMMENTED_CODE,
+            "zakomentowany kod",
+            STATIC_RULE_LEXER_COMMENT,
+        )
+        for token in tokens
+        if token.kind is TokenKind.COMMENT
+        for line, text in comment_lines(token)
+        if line in added and looks_like_code(text)
+    ]
+
+
+def catch_body_start(code: list[Token], index: int) -> int | None:
+    """Return the index of the brace opening a catch body."""
+    cursor = index + 1
+    if cursor < len(code) and code[cursor].text == "(":
+        depth = 0
+        while cursor < len(code):
+            depth += {"(": 1, ")": -1}.get(code[cursor].text, 0)
+            cursor += 1
+            if depth == 0:
+                break
+    if cursor < len(code) and code[cursor].text == "{":
+        return cursor
+    return None
+
+
+def empty_catch_hits(
+    code: list[Token], added: frozenset[int]
+) -> list[StaticHit]:
+    """Find catch blocks with an empty body on added lines."""
+    hits: list[StaticHit] = []
+    for index, token in enumerate(code):
+        if token.kind is not TokenKind.IDENT or token.text != "catch":
+            continue
+        open_index = catch_body_start(code, index)
+        if open_index is None or open_index + 1 >= len(code):
+            continue
+        closing = code[open_index + 1]
+        if closing.text != "}":
+            continue
+        line = next(
+            (n for n in range(token.line, closing.line + 1) if n in added),
+            None,
+        )
+        if line is not None:
+            hits.append(
+                StaticHit(
+                    line,
+                    StaticCategory.EMPTY_CATCH,
+                    "pusty catch — błąd zostaje połknięty",
+                    STATIC_RULE_LEXER_CATCH,
+                )
+            )
+    return hits
+
+
+def native_source_hits(source: StaticSource) -> list[StaticHit]:
+    """Return the tokenizer hits of a C-family or script file."""
+    tokens = tokenize_source(source.text, source.language)
+    code = [token for token in tokens if token.kind is not TokenKind.COMMENT]
+    hits = commented_code_hits(tokens, source.added)
+    hits += empty_catch_hits(code, source.added)
+    hits += magic_static_hits(
+        token_magic_hits(tokens, source.language, source.added),
+        STATIC_RULE_LEXER_MAGIC,
+    )
+    return hits
+
+
+def ruff_run(
+    executable: str, repo: Path, source: StaticSource
+) -> list[dict[str, Any]]:
+    """Run the curated ruff rules over one file's HEAD text."""
+    argv = [
+        executable,
+        *STATIC_RUFF_OPTIONS,
+        "--select",
+        ",".join(STATIC_RUFF_LABELS),
+        "--stdin-filename",
+        source.path,
+        "-",
+    ]
+    done = subprocess.run(
+        argv,
+        cwd=repo,
+        input=source.text,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=STATIC_RUFF_TIMEOUT_S,
+    )
+    if done.returncode not in STATIC_RUFF_OK_EXITS:
+        raise StaticUsageError(done.stderr.strip()[:200])
+    records: list[dict[str, Any]] = json.loads(done.stdout)
+    return records
+
+
+def ruff_hits(
+    repo: Path, sources: list[StaticSource]
+) -> tuple[dict[str, list[StaticHit]], str | None]:
+    """Run the curated ruff rules, returning hits and a skip reason."""
+    executable = shutil.which(STATIC_RUFF)
+    if executable is None:
+        return {}, "ruff: brak w PATH"
+    records: list[dict[str, Any]] = []
+    try:
+        for source in sources:
+            records += ruff_run(executable, repo, source)
+    except StaticUsageError as err:
+        return {}, f"ruff: błąd uruchomienia ({err})"
+    except subprocess.TimeoutExpired:
+        return {}, "ruff: przekroczono limit czasu"
+    except (OSError, json.JSONDecodeError):
+        return {}, "ruff: nieczytelny wynik"
+    explained = {
+        source.path: python_explained_lines(source.text) for source in sources
+    }
+    return ruff_records(repo, records, explained), None
+
+
+def relative_path(repo: Path, name: str) -> str | None:
+    """Return a path relative to the repo root, None when outside."""
+    path = Path(name)
+    if not path.is_absolute():
+        path = repo / path
+    try:
+        return path.resolve().relative_to(repo.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def ruff_records(
+    repo: Path,
+    records: list[dict[str, Any]],
+    explained: dict[str, frozenset[int]],
+) -> dict[str, list[StaticHit]]:
+    """Convert ruff JSON records into hits per path."""
+    hits: dict[str, list[StaticHit]] = {}
+    for record in records:
+        rule = record.get("code")
+        path = relative_path(repo, record.get("filename", ""))
+        if rule not in STATIC_RUFF_LABELS or path is None:
+            continue
+        line = record["location"]["row"]
+        if rule == STATIC_RULE_RUFF_MAGIC and line in explained.get(path, ()):
+            continue
+        category, label = STATIC_RUFF_LABELS[rule]
+        if rule == STATIC_RULE_RUFF_MAGIC:
+            value = STATIC_RUFF_VALUE.search(record.get("message", ""))
+            label = f"{label} {value.group(1)}" if value else label
+        hits.setdefault(path, []).append(
+            StaticHit(line, category, label, rule)
+        )
+    return hits
+
+
+def clone_side(repo: Path, raw: dict[str, Any]) -> CloneSide | None:
+    """Convert a jscpd file entry into a clone side."""
+    path = relative_path(repo, raw["name"])
+    if path is None:
+        return None
+    return CloneSide(path, int(raw["start"]), int(raw["end"]))
+
+
+def clone_hits(
+    repo: Path,
+    duplicates: list[dict[str, Any]],
+    added: dict[str, frozenset[int]],
+) -> dict[str, list[StaticHit]]:
+    """Report each clone fragment that overlaps added lines."""
+    hits: dict[str, list[StaticHit]] = {}
+    for item in duplicates:
+        first = clone_side(repo, item["firstFile"])
+        second = clone_side(repo, item["secondFile"])
+        if first is None or second is None:
+            continue
+        for mine, other in ((first, second), (second, first)):
+            overlap = sorted(
+                set(range(mine.start, mine.end + 1))
+                & added.get(mine.path, frozenset())
+            )
+            if overlap:
+                label = f"zduplikowany kod — jak w {other.path}:{other.start}"
+                hits.setdefault(mine.path, []).append(
+                    StaticHit(
+                        overlap[0],
+                        StaticCategory.DUPLICATION,
+                        label,
+                        STATIC_RULE_JSCPD,
+                    )
+                )
+    return hits
+
+
+def tracked_clone_files(repo: Path) -> list[str]:
+    """List the tracked files jscpd should compare."""
+    listing = static_git(repo, "ls-files", "-z").split("\0")
+    return [
+        name
+        for name in listing
+        if PurePosixPath(name).suffix in STATIC_CLONE_SUFFIXES
+        and not static_is_skipped(name)
+        and not static_is_test(name)
+    ]
+
+
+def jscpd_hits(
+    repo: Path, added: dict[str, frozenset[int]]
+) -> tuple[dict[str, list[StaticHit]], str | None]:
+    """Run jscpd over tracked files, returning hits and a skip reason."""
+    executable = shutil.which(STATIC_JSCPD)
+    if executable is None:
+        return {}, "jscpd: brak w PATH"
+    files = tracked_clone_files(repo)
+    if sum(len(name) + 1 for name in files) > STATIC_ARGUMENT_LIMIT:
+        return {}, "jscpd: zbyt wiele plików"
+    with tempfile.TemporaryDirectory() as scratch:
+        argv = [executable, *STATIC_JSCPD_OPTIONS, "--output", scratch, *files]
+        try:
+            subprocess.run(
+                argv,
+                cwd=repo,
+                capture_output=True,
+                check=False,
+                timeout=STATIC_JSCPD_TIMEOUT_S,
+            )
+            report = json.loads(
+                (Path(scratch) / STATIC_JSCPD_REPORT).read_text(
+                    encoding=STATIC_ENCODING
+                )
+            )
+            return clone_hits(repo, report["duplicates"], added), None
+        except subprocess.TimeoutExpired:
+            return {}, "jscpd: przekroczono limit czasu"
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            return {}, "jscpd: nieczytelny wynik"
+
+
+def merge_hits(
+    target: dict[str, list[StaticHit]], extra: dict[str, list[StaticHit]]
+) -> None:
+    """Add the hits of extra to target."""
+    for path, hits in extra.items():
+        target.setdefault(path, []).extend(hits)
+
+
+def unique_hits(hits: list[StaticHit]) -> list[StaticHit]:
+    """Drop hits repeating a rule on the same line."""
+    seen: set[tuple[int, str]] = set()
+    unique: list[StaticHit] = []
+    for hit in hits:
+        key = (hit.line, hit.rule)
+        if key not in seen:
+            seen.add(key)
+            unique.append(hit)
+    return unique
+
+
+def build_findings(
+    sources: dict[str, StaticSource], hits: dict[str, list[StaticHit]]
+) -> list[StaticFinding]:
+    """Turn hits on added lines into findings with snippets."""
+    findings: list[StaticFinding] = []
+    for path in sorted(hits):
+        source = sources.get(path)
+        if source is None:
+            continue
+        lines = source.text.split("\n")
+        kept = [h for h in hits[path] if h.line in source.added]
+        for hit in sorted(
+            unique_hits(merge_magic_hits(kept)),
+            key=lambda item: (item.line, item.category),
+        ):
+            snippet = lines[hit.line - 1].strip()[:STATIC_SNIPPET_LIMIT]
+            findings.append(
+                StaticFinding(
+                    path, hit.line, hit.category, hit.label, hit.rule, snippet
+                )
+            )
+    return findings
+
+
+def static_report(repo: Path, base: str) -> StaticReport:
+    """List the mechanical review candidates on the lines a PR adds."""
+    added = changed_lines(repo, base)
+    sources, not_checked = load_sources(repo, added)
+    hits: dict[str, list[StaticHit]] = {}
+    parsed: list[StaticSource] = []
+    for source in sources:
+        if source.language is StaticLanguage.PYTHON:
+            tree = parse_python(source.text)
+            if tree is None:
+                not_checked.append(f"{source.path}: błąd składni, pominięto")
+                continue
+            parsed.append(source)
+            hits[source.path] = python_source_hits(source, tree)
+        else:
+            hits[source.path] = native_source_hits(source)
+    if parsed:
+        found, reason = ruff_hits(repo, parsed)
+        merge_hits(hits, found)
+        not_checked += [reason] if reason else []
+    if any(
+        PurePosixPath(s.path).suffix in STATIC_CLONE_SUFFIXES for s in sources
+    ):
+        found, reason = jscpd_hits(repo, added)
+        merge_hits(hits, found)
+        not_checked += [reason] if reason else []
+    by_path = {source.path: source for source in sources}
+    return StaticReport(build_findings(by_path, hits), not_checked)
+
+
+def static_parser() -> argparse.ArgumentParser:
+    """Build the parser of the static subcommand."""
+    parser = argparse.ArgumentParser(prog="bb-sweep static")
+    parser.add_argument("--repo", default=".")
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--json", action="store_true")
+    return parser
+
+
+def render_static(report: StaticReport, *, as_json: bool) -> None:
+    """Print the static report as JSON or one text line per finding."""
+    if as_json:
+        document = {
+            "findings": [dataclasses.asdict(f) for f in report.findings],
+            "not_checked": report.not_checked,
+        }
+        print(json.dumps(document, ensure_ascii=False, indent=1))
+        return
+    for finding in report.findings:
+        print(
+            f"{finding.path}:{finding.line} {finding.category}"
+            f" — {finding.label}"
+        )
+    for entry in report.not_checked:
+        print(f"nie sprawdzono: {entry}")
+
+
+def cmd_static(argv: list[str]) -> int:
+    """List mechanical review candidates on the lines a PR adds."""
+    args = static_parser().parse_args(argv)
+    try:
+        report = static_report(Path(args.repo), args.base)
+    except StaticUsageError as err:
+        print(f"bb-sweep static: {err}", file=sys.stderr)
+        return STATIC_USAGE_EXIT
+    render_static(report, as_json=args.json)
+    return STATIC_OK_EXIT
+
+
+SUBCOMMANDS = {
+    "resolve": cmd_resolve,
+    "harvest": cmd_harvest,
+    "harvest-mark": cmd_harvest_mark,
+    "harvest-done": cmd_harvest_done,
+    "static": cmd_static,
+}
+OFFLINE_SUBCOMMANDS = frozenset({"static"})
+
+
+def main(argv: list[str]) -> int:
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
+        return 0
+    if argv and argv[0] in OFFLINE_SUBCOMMANDS:
+        return SUBCOMMANDS[argv[0]](argv[1:])
+    if not os.path.exists(CRED_PATH):
+        print(f"brak poświadczeń: {CRED_PATH}", file=sys.stderr)
+        return 2
+    handler = SUBCOMMANDS.get(argv[0]) if argv else None
+    if handler is not None:
+        return handler(argv[1:])
+    as_json = "--json" in argv
+    refresh = "--refresh-repos" in argv
+    only = None
+    for i, a in enumerate(argv):
+        if a == "--repos" and i + 1 < len(argv):
+            only = [s for s in argv[i + 1].split(",") if s]
+    known = {"mine", "review", "replies", "approve"}
+    sections = {a for a in argv if a in known} or set(known)
+    if "all" in argv:
+        sections = set(known)
+
+    if not os.path.exists(CRED_PATH):
+        print(f"brak poświadczeń: {CRED_PATH}", file=sys.stderr)
+        return 2
+
+    user = me()
+    sections_needing_repos = sections & {"review", "replies", "approve"}
+    RESOLVED_IDS.update(load_cache(RESOLVED_CACHE, []))
+    if only:
+        repos = only
+    elif sections_needing_repos:
+        repos = candidate_repos(repo_index(refresh), "--deep" in argv)
+    else:
+        repos = []
+    result = collect(
+        repos,
+        user["uuid"],
+        include_drafts="--include-drafts" in argv,
+        need_review=bool(sections_needing_repos),
+    )
+    save_cache(RESOLVED_CACHE, sorted(RESOLVED_IDS))
+    if as_json:
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+    else:
+        drafts = " (z draftami)" if "--include-drafts" in argv else ""
+        scope = f"{len(repos)} repozytoriów w skanie" if repos else "moje PR-y"
+        print(f"bb-sweep — {user['display_name']} — {scope}{drafts}")
+        render(result, sections)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
