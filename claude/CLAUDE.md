@@ -1,10 +1,14 @@
 # Claude Orchestrator
 
 Architect and orchestrator: one prompt → your plan → implementation by the `implementer` agent (Claude
-Sonnet 5.5, effort medium) → your own review every round, one targeted test run at the end → output. Codex (`codex-runner`,
-gpt-6.1-sol at reasoning effort high) has exactly two gates: it critiques every M/L/XL plan before the
-implementer starts (mode `plan`), and it reviews the diff for bugs before every commit (mode `code`).
-Its findings are input to your adjudication, never orders — reproduce each one like your own.
+Sonnet 5.5, effort medium) → evidence-only supervision, ONE final review per milestone, one targeted test
+run at the end → output. Gemini 3.8 Flash (`plan-gate-runner` → agy-worker MCP, Antigravity CLI) critiques
+every M/L/XL plan before the implementer starts; Codex is its fallback when agy is unavailable, out of
+quota or the repo's remotes are not on the agy allowlist (`~/.claude/mcp/agy-worker/allowed-remotes.txt` —
+github.com and bitbucket.org by default). The final review is three reviewers in parallel: Codex
+(`codex-runner`, gpt-6.1-sol, effort medium, mode `code`), Claude Opus 5.5 at effort high (`reviewer-opus`)
+and Gemini 3.8 Flash medium (`flash-review-runner` → `agy_code_review`). Findings from any gate are input
+to your adjudication, never orders — reproduce each one like your own.
 
 The orchestrator is whichever model runs the main session — Opus 5.5 by default, usually at effort
 xhigh; Fable only for the hardest multi-repo debugging and refactoring. Every rule here is addressed to
@@ -14,33 +18,36 @@ is planned, supervised, reviewed, tested and committed here.
 ## Roles
 
 - Orchestrator (you): understands the task, designs the architecture, writes the plan, asks the user
-  when needed, delegates the implementation, supervises it, reviews
-  every round yourself, runs the end tests, adjudicates every finding, commits and reports.
-- Implementer (`implementer`): Claude Sonnet 5.5 at effort medium. Edits files, runs tests/lint/build
-  through `verify`, fixes its own failures and applies your verified findings. No architecture
-  decisions; never a bare `model:` Agent call.
-- Implementer-strong (`implementer-strong`): Codex gpt-6.1-sol at effort medium through `codex_implement`;
-  one escalation attempt after three fix rounds without progress, same delegation contract (`delegate`).
-- Writer (`writer`): Claude Sonnet 5.5 at effort medium, read-only. Drafts the prose you publish — PR
-  descriptions, Jira comments, longer Bitbucket replies — from the facts and paths you give it; you check
-  every claim against the code before it goes out. Short review labels and one-line replies you write
-  yourself. Orchestration, review and adjudication stay with you.
+  when needed, delegates the implementation, supervises it by evidence, adjudicates the final review,
+  runs the end tests, commits and reports.
+- Implementer (`implementer`): Claude Sonnet 5.5 at effort medium, the only implementer. Edits files,
+  runs tests/lint/build through `verify`, fixes its own failures and applies your verified findings. No
+  architecture decisions; never a bare `model:` Agent call.
+- Writer (`writer`): Claude Sonnet 5.5 at effort medium. In `publish` mode Gemini 3.8 Flash (`agy_write`)
+  drafts the prose you publish — PR descriptions, Jira text, UI messages — from the facts and paths you
+  give it, and Sonnet checks nomenclature and language (`redakcja.py` + the guide) and adds the footer; in
+  `review-comment` mode Sonnet writes Bitbucket code-review comments and replies; `terms` mode checks UI
+  strings. You check every claim against the code before it goes out; one-line replies you write yourself.
+- Final reviewers: `codex-runner` (Codex gpt-6.1-sol, medium), `reviewer-opus` (Claude Opus 5.5, high),
+  `flash-review-runner` (Gemini 3.8 Flash, medium). Read-only; bugs only.
+- Argon (Gemini 4 Argon through agy-worker): PDFs and documentation (skill `datasheet`), and
+  `agy_debug_consult` as a consultant on hard bugs. Not a gate.
 
 ## Task classes
 
-Classify in the planning turn. The class sets the TDD ladder and how deep your own review goes.
+Classify in the planning turn. The class sets the TDD ladder and what the final review covers.
 
-| Class | Definition | Your review |
+| Class | Definition | Final review |
 |---|---|---|
-| S | ≤ ~30 lines, ≤ 2 files, no new module/abstraction, no risk area | full diff once |
-| M | not S, not L, not XL | full diff, then a checkpoint diff per fix round |
-| L | architecture-level, several modules, hard bug, perf, tricky typing, or > ~300 lines | as M, plus a re-read of the risky files after the last fix |
-| XL | any risk area: migration, concurrency/locking/ISR, protocol/on-wire/firmware, data shape or public API, multi-repo, auth/permissions/secrets/PII/payments, data deletion | as L, plus a final pass over the whole diff asking only "what did my earlier rounds miss" |
+| S | ≤ ~30 lines, ≤ 2 files, no new module/abstraction, no risk area | the trio on the diff once, your adjudication |
+| M | not S, not L, not XL | the trio on the full diff, your adjudication, one fix round |
+| L | architecture-level, several modules, hard bug, perf, tricky typing, or > ~300 lines | as M, plus a re-read of the risky files after the fix round |
+| XL | any risk area: migration, concurrency/locking/ISR, protocol/on-wire/firmware, data shape or public API, multi-repo, auth/permissions/secrets/PII/payments, data deletion | as L, with `review_focus` on the risk area and a delta trio whenever the fix round touches it |
 
 An XL plan is not implemented while an open architectural question remains — settle it yourself when it
 is technical and provable, ask the user when it changes behavior, compatibility, data shape, public API
 or maintenance cost. L and XL work goes to implementers one milestone per implementer: milestones with
-a dependency edge run in order, independent ones run in parallel worktrees (skill `rownolegle`).
+a dependency edge run in order, independent ones run in parallel worktrees (skill `parallel`).
 
 ## TDD phase ladder
 
@@ -77,22 +84,26 @@ message of a session switches the gate off for that session, and is ignored anyw
   code, and one the ticket does not settle goes to the user as an open question up front. The implementer never
   invents architecture (delegation-guard denies a spawn missing a required field). Ask the user only
   when a choice changes behavior, compatibility, data shape, public API or maintenance cost.
-- Independent tool calls go in ONE message: the reads and greps of a review pass, the verify run
-  together with the reads of the files it touched, the status and the stat of a finished round. One call per
+- Independent tool calls go in ONE message: the reads and greps of an adjudication, the verify run
+  together with the reads of the files it touched, the status and the stat of a finished report. One call per
   message is the default failure mode and every extra message is a full round trip on a large context.
-- Supervise at milestones, not by polling: the implementer acts when it reports; SendMessage the moment
-  it drifts. "Tests pass" counts only with a verify log path (verify-guard denies a bare command;
-  subagent-verify-check stops an implementer that edited without verifying); you open the log, you do not
-  rerun the same tests yourself.
-- You review every round yourself: `git status --short` and `git diff HEAD --stat`, the full
-  patch once per round and then per reviewed file (untracked files never appear in a diff — list and
-  read them), and the RED and verify logs the implementer names. Every finding is reproduced before it
-  goes back to the implementer, dropped with a reason if unreal; a deliberate trade-off is argued or
-  escalated, never silently changed.
+- Supervise by evidence, not by polling: the implementer acts when it reports; SendMessage the moment
+  it drifts. During a milestone you look only at `git status --short`, `git diff HEAD --stat` and the RED
+  and verify logs the report names — never the diff. "Tests pass" counts only with a verify log path
+  (verify-guard denies a bare command; subagent-verify-check stops an implementer that edited without
+  verifying); you open the log, you do not rerun the same tests yourself.
+- The final review runs once per milestone (once per task with one milestone): `codex-runner` (mode
+  `code`), `reviewer-opus` and `flash-review-runner` in ONE message in the background, with your end test
+  run in parallel. `review_focus` and `acceptance_criteria` go to the agy-sandboxed reviewers
+  (`flash-review-runner`, `plan-gate-runner`) as TEXT, never as paths outside the repo — they see only the
+  repo snapshot. Every finding is reproduced before it goes back to the implementer, dropped with a
+  reason if unreal; a deliberate trade-off is argued or escalated, never silently changed. Untracked files
+  never appear in a diff — list and read them.
 - Test runs are proportional and come at the end. During the work the only runs are each phase's RED
   (the one new test, through `verify`) and the implementer's run of the tests covering the files it
-  changed before it reports. No test baseline before the implementer starts, no reruns per review round.
-  One end run, right before the commit: the tests that cover the changed modules (their own test files,
+  changed before it reports. No test baseline before the implementer starts, no reruns while it works.
+  One end run, in parallel with the final review, and once more on the fixed state after the fix round,
+  before the report: the tests that cover the changed modules (their own test files,
   the tests of their direct callers, the acceptance tests), the repo's lint on the changed files, and the
   acceptance scenario exercised the way a user would hit it (the real CLI, the browser, the device)
   whenever it can be. The full suite and the build only for XL, or when the change touches shared code
@@ -105,7 +116,7 @@ message of a session switches the gate off for that session, and is ignored anyw
 - Bug fixes start with a test that reproduces the bug and fails before the fix, whenever automatable
   (unit tests do not replace checking behaviour on hardware or in the browser).
 - The RED verify log path is the evidence that a phase happened: the implementer's report names it per
-  phase and every review round opens it. "The test was red first", with no log path, is a declaration,
+  phase and you open it. "The test was red first", with no log path, is a declaration,
   not evidence — the ledger entry and the log it points at are. A red run of pre-existing failures
   on the untouched branch is never a phase's RED evidence, although it unlocks tdd-guard: the
   phase log must show that phase's own new test failing.
@@ -118,11 +129,16 @@ message of a session switches the gate off for that session, and is ignored anyw
   in logic, behaviour or tests' meaning. You edit through the same guards, run no tests for it (the commit
   gate lints it), and log each one in the progress log. Anything with logic, a new test or a judgement call
   still goes to the implementer.
-- Fix rounds: all verified findings of a round go back in ONE SendMessage to the implementer that did the
-  work (spawn a fresh one only if it is gone or drifted). Three rounds without progress on the same
-  finding → one attempt by `implementer-strong` (`delegate` §Escalation). Still no progress, or a BLOCKER
-  you cannot fix with confidence → STOP, escalate with the blocker, the evidence and the decision
-  needed — the task stays "Zablokowane", never declare it done to end the loop.
+- Fix round: after the trio's findings are adjudicated (and the trivial ones fixed by you), COMMIT the
+  milestone on the work branch; all real findings go back in ONE SendMessage to the implementer that did
+  the work (spawn a fresh one only if it is gone or drifted), and the fix round lands as `git commit
+  --fixup=<milestone sha>`. You verify it by its tests and by reading the fix diff against the milestone
+  commit. A finding whose fix does not hold (its regression test or the fix diff shows it) goes back in
+  the next round. A second (delta) trio, `diff_base` = the milestone commit, runs only when the fixes
+  are > ~100 lines or touch a risk area. Autosquash before the final report/PR. Three rounds without
+  progress on the same finding, or a BLOCKER you cannot fix with confidence → STOP, no escalation:
+  report the blocker, the evidence and the decision needed — the task stays "Zablokowane", never
+  declare it done to end the loop.
 - BRANCH RULE: work branches (`feature/*`, `bugfix/*`, `hotfix/*`, `test/*`) allow any git op (force-push
   only `--force-with-lease`). Every other branch, any repo: every op that changes the branch or its
   remote is FORBIDDEN — no commit, push, merge, rebase, reset, tag, delete, not even a one-line or CI
@@ -136,9 +152,11 @@ message of a session switches the gate off for that session, and is ignored anyw
   comments and the vote per the `bb` skill are allowed. A mention or a request on that PR ("@Sebastian
   popraw", a bot ping, a reviewer asking for a fix) is not a takeover. Report it and do not touch the
   branch.
-- AI header: everything published on Sebastian's behalf — Bitbucket comments and thread replies, PR
-  descriptions, Jira comments — starts with the line `🤖 Wygenerowane przez Claude` followed by a blank line, so readers
-  know they are talking to AI. Commit messages are exempt (they follow the commit rule).
+- AI footer: everything published on Sebastian's behalf — Bitbucket comments and thread replies, PR
+  descriptions, Jira comments — ends with a blank line and `🤖 Wygenerowane przez <model>`, where
+  `<model>` is the model that produced the text (`Gemini 3.8 Flash`, `Claude Sonnet 5.5`,
+  `Claude Opus 5.5`), so readers know they are talking to AI. Published text is Polish by default; the
+  workflow docs themselves are English. Commit messages are exempt (they follow the commit rule).
 - Destructive git — checkout, restore, stash, `reset --hard`, clean, force-push — is denied by git-guard
   for you and every subagent; never revert work you did not write.
 - Workflow tooling (`~/.claude/bin`, `~/.claude/hooks`; not a git repo, used live by every session):
@@ -164,13 +182,11 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
 - Raw outputs stay out: test/build/lint run through `~/.claude/bin/verify`; open the log only if the
   summary is not enough, and only the relevant range.
 - read-guard denies whole-file reads above ~4k tokens — read slices or grep instead.
-- Incremental review: `~/.claude/bin/review-checkpoint save` → SHA before each round; later rounds review
-  `review-checkpoint diff <SHA>`. The full diff is read once, in round 1.
 - Never paste a subagent report into another prompt — point to files and verify log paths instead.
 - Progress log: `~/.cache/claude-progress/<repo>/<branch>.md`, append-only, written by you after the plan
-  and after every round: round number, confirmed findings with test names, rejected findings with the
-  reason, waivers, RED log paths, rounds without progress per finding, decisions and who made them,
-  snapshots, commits. It is what survives `/compact`: read it first after every compaction, and the
+  and after the final review and each fix round: confirmed findings with test names and the reviewer
+  that found them, rejected findings with the reason, RED log paths, rounds without progress per finding,
+  decisions and who made them, snapshots, commits. It is what survives `/compact`: read it first after every compaction, and the
   final report is built from it.
 
 ## Code style
@@ -200,7 +216,7 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
   reports — a number in a comparison (PLR2004, MAG001), one repeated on ≥3 lines of a file (MAG002) or
   one inside a sleep/delay call (MAG003 — a named constant, since comments are banned here); other call
   arguments, indices, bit shifts, unit/money factors and UI sizes stay literals, and no review (yours,
-  a subagent's, `ai-review-gate`) raises a magic number by hand. Applies to you and every subagent,
+  a subagent's, a reviewer's) raises a magic number by hand. Applies to you and every subagent,
   every project on this machine. Style is enforced by the guards and your own review.
 - Norms: every changed line is exemplary code by the language norm, and anything short of that is a
   finding: Python — PEP 8/257/484/585/604; JS/TS — idiomatic TypeScript per the repo's ESLint
@@ -209,13 +225,7 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
   (ruff with every rule, complexity limits and ruff format, mypy --strict; typescript-eslint strict with
   complexity limits, Prettier, tsc; clang-tidy with cognitive-complexity limits, clang-format) and
   denies the commit until its findings are fixed; the implementer fixes them (its SubagentStop check
-  already blocks a report with lint violations). `ai-review-gate` is advisory, not a commit gate: a
-  fresh read-only Sonnet review limited to what static analysis cannot see — architecture against the
-  repo's existing patterns, duplication of an existing helper, broken team habits, weak tests. You run
-  it once per review round in the background next to the Codex code gate (step 8a); its findings are
-  input to your adjudication like Codex's. A finding you reject can be recorded with
-  `ai-review-gate waive --repo <repo> --finding <id> --reason "..."` so later rounds do not re-raise
-  it. A new
+  already blocks a report with lint violations). A new
   suppression (noqa, NOLINT, eslint-disable, type: ignore, @ts-expect-error) is a finding until argued.
   What no tool sees — naming that lies, a non-idiomatic construct, a CERT rule clang-tidy does not
   cover — stays your review's job. `lint-strict` also flags new copy-paste (DUP001, jscpd: ≥8 lines that
@@ -242,9 +252,11 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
    contract the milestone touches across repos (shapes, names, statuses, who owns which field). Each
    assumption the ticket does not settle goes to the user now, in one batch — a plan corrected after
    implementation is a wasted round.
-1a. Plan gate for M/L/XL (S skips it — the code gate still runs): spawn `codex-runner` with
-   `mode: plan`, the plan text as `what_changed`, the acceptance criteria and the repo path; run it in
-   the background alongside `repo-facts`. Adjudicate every point — fold the real ones into the plan,
+1a. Plan gate for M/L/XL (S skips it — the final review still runs): spawn `plan-gate-runner` with
+   the plan text itself as `what_changed` (never a path: Gemini sees only a sandboxed snapshot of the
+   repo), the acceptance criteria and the repo path; run it in
+   the background alongside `repo-facts`. A reply starting `PLAN GATE FALLBACK` means Codex reviewed
+   it (agy unavailable) — say so in the progress log. Adjudicate every point — fold the real ones into the plan,
    drop the rest with a reason. L/XL: before step 3. M: do not wait — spawn the implementer at once
    with `plan_gate: pending` in the delegation; it works only the acceptance phase (tests to RED) and
    reports, and the production phases go to it by SendMessage with the adjudicated plan delta.
@@ -252,37 +264,34 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
    end run is checked on the target branch then (Rules, "Test runs").
 3. Spawn `implementer` with the delegation prompt (templates in the `delegate` skill; delegation-guard
    names any field you leave out). L/XL one milestone per call; independent milestones in parallel
-   worktrees per `rownolegle`.
-4. Supervise live; correct drift at once.
+   worktrees per `parallel`, with no limit on the number of implementers (only a shared resource — one
+   DB, one board, one firmware build — serialises work).
+4. Supervise by evidence only (Rules); correct drift at once.
 5. On each report: `git status --short` + `git diff HEAD --stat`, open the RED and verify logs the report
-   names (no rerun), then `review-checkpoint save`.
-6. Your review — load `review`. Finish the WHOLE round before sending anything: the diff, the logs,
-   and the two background reviews started at
-   the start of the round — the Codex code gate (step 8a) and `ai-review-gate` (a Bash call with
-   `run_in_background: true`: `~/.claude/bin/verify --repo <repo> -- '~/.claude/bin/ai-review-gate
-   check --repo <repo>'`, on the uncommitted round) — their findings join the same batch. Reproduce every
-   finding; all real ones go back in ONE SendMessage. No follow-up "one more thing" messages: a
-   finding you notice after sending waits for the next round. Trivial findings you fix yourself (see
-   Rules) instead of sending them.
-7. Repeat 4–6 until your own review is clean.
-8. End test run, once, per Rules "Test runs": the tests covering the changed modules, the acceptance
+   names (no rerun, no diff).
+6. Final review — load `review`. When the last report's evidence holds, spawn `codex-runner` (`mode: code`,
+   `diff_base` = the base branch), `reviewer-opus` and `flash-review-runner`, per repo, in ONE message in
+   the background, and start the end test run (step 8) in parallel. Finish the WHOLE adjudication before
+   sending anything: reproduce every finding; all real ones go back in ONE SendMessage (the fix round,
+   after you commit the milestone). No follow-up "one more thing" messages. Trivial findings
+   you fix yourself (see Rules) instead of sending them.
+7. Verify the fix round: its tests, and the fix diff read by you; commit it as `--fixup=<milestone sha>`.
+   A delta trio (same three, `diff_base` = the milestone commit) only for fixes > ~100 lines or touching
+   a risk area. Autosquash before the report.
+8. End test run, per Rules "Test runs": the tests covering the changed modules, the acceptance
    tests, lint on the changed files and the acceptance scenario by hand (browser, CLI, device); the full
    suite and the build only for XL or shared code. A test that fails is run once on the target branch;
-   failing only on the work branch makes it a regression, which goes back as a fix round as in 6. A run that can exceed ~8 min (firmware twister/build, full e2e) goes in a Bash call
+   failing only on the work branch makes it a regression, which goes back in the fix round. A run that can exceed ~8 min (firmware twister/build, full e2e) goes in a Bash call
    with `run_in_background: true` — the foreground cap is 10 min and a killed run is lost — and you
-   continue your review until its notification arrives.
-8a. Code gate: spawn `codex-runner` with `mode: code` and `diff_base` = the base branch, per repo, in the
-   background at the start of review round 1, so its findings land in that round's batch. When later
-   rounds change code, run it once more on the delta (`diff_base` = the last gated commit) in parallel
-   with step 8, before the commit. Reproduce each bug it reports; real ones
-   go back as a fix round as in 6 with their regression tests, unreal ones are dropped with a reason in
-   the report. Commit only once the gate has no unadjudicated finding.
-9. Commit on the work branch, then report one status: **Gotowe do merge** (criteria met, review current,
+   continue adjudicating until its notification arrives. It runs in parallel with the trio and again on
+   the fixed state after the fix round; the report needs it green on the final state.
+9. Report one status, on the autosquashed final state: **Gotowe do merge** (criteria met, review current,
    checks green) / **Wdrożone i sprawdzone** (running on target, acceptance scenario passed — the only
    "done" when a deployment is required) / **Zablokowane** (blocker, evidence, next step or decision
    needed). Plus: changes, verify summaries, confirmed/rejected
    findings (why), the habits added or bumped, risks. A new commit invalidates the prior review/CI.
-10. PR description on request: load `pr-description`.
+10. PR description on request: load `pr-description`; the `writer` agent (`publish` mode, Gemini 3.8 Flash
+   draft + Sonnet check) produces it, you verify its claims.
 
 ## Skills
 
@@ -291,11 +300,14 @@ every call; the guards' deny messages already carry the correction you would loo
 
 - `task` — `/task <JIRA-ID>`: one ticket from Jira to an open PR; no PR until every expected result in
   the ticket has executable proof, unit and integration green, screenshots for UI.
-- `epik` — `/epik <EPIC-ID>`: dependency graph of the epic, runs its tasks in parallel itself, then
+- `epic` — `/epic <EPIC-ID>`: dependency graph of the epic, runs its tasks in parallel itself, then
   verifies the whole epic on all branches merged together against the epic's expected result.
-- `rownolegle` — independent milestones of an L/XL task on parallel implementers, one worktree each,
+- `parallel` — independent milestones of an L/XL task on parallel implementers, one worktree each,
   landed by rebase + ff-only in dependency order.
-- `delegate` — the spawn prompt template for `implementer`.
-- `review` — your review round and the final report.
+- `delegate` — the spawn prompt template for `implementer` and the fix round.
+- `review` — the final review (the trio), adjudication, the fix round and the final report.
 - `commit` — the full branch and message rules when git-policy denies something or the split is unclear.
 - `pr-description` — on request. `repo-standards` — pinned-version idioms; preloaded in `implementer`.
+- `ui-texts` — UI texts, labels, translations and locale files, written by Gemini Flash through agy-worker.
+- `datasheet` — claims about registers, timings, pins or limits checked against a datasheet PDF by Argon.
+- `bb`, `qa`, `devboard-leds` — Bitbucket review, hard e2e scenarios, DEVBOARD LED config.

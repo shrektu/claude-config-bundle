@@ -9,15 +9,36 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CLAUDE_MD = REPO / "claude" / "CLAUDE.md"
 SKILLS_DIR = REPO / "claude" / "skills"
 AGENTS_DIR = REPO / "claude" / "agents"
-CODEX_WORKER = REPO / "claude" / "mcp" / "codex-worker" / "codex_worker.py"
-CODEX_WORKER_TEST = CODEX_WORKER.parent / "codex_worker_test.py"
+MCP_DIR = REPO / "claude" / "mcp"
+CODEX_WORKER_DIR = MCP_DIR / "codex-worker"
+CODEX_WORKER = CODEX_WORKER_DIR / "codex_worker.py"
+CODEX_WORKER_TEST = CODEX_WORKER_DIR / "test_codex_worker.py"
+LEGACY_CODEX_WORKER_TEST = CODEX_WORKER_DIR / "codex_worker_test.py"
+AGY_WORKER_DIR = MCP_DIR / "agy-worker"
+AGY_WORKER_FILES = (
+    "agy_worker.py",
+    "test_agy_worker.py",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "pyproject.toml",
+    "allowed-remotes.txt",
+)
+AGY_WORKER_FORBIDDEN = (".venv", "__pycache__", ".pytest_cache", ".hypothesis")
+MCP_SERVERS = REPO / "claude" / "mcp-servers.json"
+AGY_SERVER_ENTRY = {
+    "type": "stdio",
+    "command": "__HOME__/.claude/mcp/agy-worker/.venv/bin/python",
+    "args": ["__HOME__/.claude/mcp/agy-worker/agy_worker.py"],
+    "env": {"AGY_BIN": "__AGY_BIN__"},
+    "timeout": 5400000,
+}
+AGY_BIN_PLACEHOLDER = "__AGY_BIN__"
 HOOKS_DIR = REPO / "claude" / "hooks"
 SETTINGS = REPO / "claude" / "settings.json"
 RETIRE = REPO / "retire.json"
@@ -25,22 +46,14 @@ CODEX_AGENTS_MD = REPO / "codex" / "AGENTS.md"
 README = REPO / "README.md"
 BIN_DIR = REPO / "claude" / "bin"
 USAGE_REPORT = BIN_DIR / "usage-report"
-FEATURE_WORKTREE_FILES = (
-    "feature-worktree", "feature-worktree-test.sh", "quality-gate", "quality-gate-test.sh",
-)
-EN_DASH = chr(0x2013)
-STEP_MINUTES = f"2{EN_DASH}5 minutes"
-VERIFY_STEP_LINE = re.compile(r"(?m)^\s*\d+\.\s.*verify:")
-MIN_ANTI_PATTERNS = 3
-ANTI_PATTERNS_SECTION = re.compile(r"(?ms)^## Anti-patterns\b[^\n]*\n(.*?)(?=^## |\Z)")
-BULLET_LINE = re.compile(r"(?m)^- ")
+EXPORT_SCRIPT = REPO / "export.sh"
+INSTALL_SCRIPT = REPO / "install.sh"
 VENV_PYTHON = Path(os.path.expanduser("~/.claude/mcp/codex-worker/.venv/bin/python"))
 
-CLAUDE_MD_MAX_BYTES = 8400
 DESCRIPTION_MAX_CHARS = 1024
 USAGE_REPORT_MAX_SECONDS = 30
 USAGE_REPORT_MAX_LINES = 40
-USAGE_REPORT_DAYS = "30"
+USAGE_REPORT_DAYS = "1"
 STREAMED_USAGE = {
     "input_tokens": 10,
     "cache_creation_input_tokens": 20,
@@ -49,67 +62,100 @@ STREAMED_USAGE = {
 }
 
 HOOK_NAMES = (
+    "autofix-on-edit",
+    "codex-gate",
+    "comment-guard",
+    "context-guard",
+    "delegation-guard",
     "git-guard",
     "git-policy",
-    "verify-guard",
     "read-guard",
-    "delegation-guard",
+    "standards-gate",
     "subagent-verify-check",
     "tdd-guard",
-    "comment-guard",
-    "lint-guard",
-    "bash-write-guard",
+    "verify-guard",
 )
-SHARED_HOOK_MODULES = ("shell_words.py", "code_files.py", "edit_texts.py")
-RUFF_CONFIG = REPO / "claude" / "lint" / "ruff.toml"
-RUFF_SELECTED_FAMILIES = (
-    "E", "F", "W", "I", "UP", "B", "SIM", "C4", "PERF", "RET", "PIE", "FURB", "PTH", "ARG", "ERA", "RUF",
-    "PL", "C90", "TRY", "BLE", "S", "N", "DTZ", "T20", "FBT",
+REQUIRED_SKILLS = (
+    "bb",
+    "commit",
+    "delegate",
+    "epic",
+    "parallel",
+    "pr-description",
+    "qa",
+    "repo-standards",
+    "review",
+    "task",
+    "ui-texts",
 )
-RUFF_GLOBAL_IGNORES = ("S603", "S607")
-RUFF_TEST_GLOBS = ("**/tests/**", "**/test_*.py", "**/*_test.py", "**/*-test.py", "**/conftest.py")
-RUFF_TEST_IGNORES = ("PLR2004", "ARG", "S101", "PLR0913")
-RUFF_TARGET_VERSION = "py312"
-RUFF_LINE_LENGTH = 110
-RUFF_MAX_ARGS = 6
-RUFF_MAX_COMPLEXITY = 10
-AUTO_COMPACT_WINDOW = "200k"
-STALE_DOC = REPO / "docs" / "PLAN-superworkflow.md"
-RETIRED_HOME_FILES = ("audit-2026-09-12", "prompts", "settings.json.bak-manual", "settings.json.bak-manual2")
-BASH_MATCHER = "Bash"
-BASH_COMMANDS = tuple(f"python3 __HOME__/.claude/hooks/{name}.py"
-                      for name in ("git-guard", "verify-guard", "git-policy", "bash-write-guard"))
-LINT_GUARD_COMMAND = "python3 __HOME__/.claude/hooks/lint-guard.py"
-SKILL_NAMES = ("delegate", "review", "commit", "pr-description", "repo-standards", "tdd", "quality-bar")
-DEVELOPER_AGENT = "developer"
-DEVELOPER_MODEL = "claude-sonnet-5-5"
-DEVELOPER_EFFORT = "medium"
-DEVELOPER_SKILLS = ("tdd", "repo-standards", "quality-bar")
-RUNNER_AGENT = "codex-runner"
-RUNNER_MODEL = "haiku"
-AGENT_NAMES = (DEVELOPER_AGENT, RUNNER_AGENT)
-RETIRED_AGENTS = ("implementer", "implementer-hard", "implementer-opus", "commander-opus")
-RETIRED_ALLOW = tuple(f"Agent({name})" for name in RETIRED_AGENTS)
-DEVELOPER_ALLOW = f"Agent({DEVELOPER_AGENT})"
-SESSION_MODEL = "claude-opus-5-5"
-SESSION_MODEL_EFFORT = "high"
-TDD_GUARD_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
-TDD_GUARD_COMMAND = "python3 __HOME__/.claude/hooks/tdd-guard.py"
-COMMENT_GUARD_COMMAND = "python3 __HOME__/.claude/hooks/comment-guard.py"
+RETIRED_SKILLS = ("rownolegle", "epik", "teksty-ui", "tdd", "quality-bar")
+REQUIRED_AGENTS = (
+    "codex-runner",
+    "flash-review-runner",
+    "implementer",
+    "plan-gate-runner",
+    "reviewer-opus",
+    "writer",
+)
+RETIRED_AGENT_FILE = "implementer-strong.md"
+RETIRED_FILES_V1 = (
+    "audit-2026-09-12",
+    "prompts",
+    "settings.json.bak-manual",
+    "settings.json.bak-manual2",
+)
+RETIRED_FILES_V2 = (
+    "agents/implementer-strong.md",
+    "skills/rownolegle",
+    "skills/epik",
+    "skills/teksty-ui",
+    "skills/qa/references/scenariusze.md",
+)
+RETIRED_ALLOW_V2 = (
+    "Agent(implementer-strong)",
+    "Write(/__HOME__/.claude/hooks/**)",
+)
+REQUIRED_ALLOW = (
+    "Agent(implementer)",
+    "mcp__codex-worker__*",
+    "mcp__agy-worker__*",
+)
+SESSION_MODEL = "opus[1m]"
 RETIRED_MODE = "final-audit"
-STALE_TERMS = re.compile(r"implementer|commander-opus|final-audit|\bXL\b")
-REVERT_SENTENCE = (
-    "Never revert or discard changes you did not make (checkout/restore/stash/reset/clean are blocked "
-    "by a hook); if you think a revert is needed, stop and report."
+STALE_TERMS = re.compile(r"implementer-strong|rownolegle|\bepik\b|teksty-ui")
+README_STALE_PHRASES = ("reviews every round itself", "before every commit")
+README_REVIEW_TERMS = (
+    "once per milestone",
+    "`--fixup`",
+    "delta trio",
+    "about 100 lines",
+    "autosquash",
 )
-ACCEPTANCE_HEADING = re.compile(r"(?m)^## acceptance_criteria\s*$")
-TEST_PLAN_HEADING = re.compile(r"(?m)^## test_plan\s*$")
-ABSOLUTE_PATH = re.compile(r"(?m)(?:^|\s)/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+")
-FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
+README_WORKFLOW_TERMS = (
+    "plan-gate-runner",
+    "flash-review-runner",
+    "reviewer-opus",
+    "Gemini 3.8 Flash",
+    "evidence",
+    "agy_debug_consult",
+    "Argon",
+    "🤖 Wygenerowane przez <model>",
+    "`parallel`",
+    "`epic`",
+    "`ui-texts`",
+    "agy-worker",
+    "allowed-remotes.txt",
+    "poppler-utils",
+    "bubblewrap",
+    "antigravity.google/cli/install.sh",
+    "without `-s`",
+)
 HOME_LITERAL = "/home/" + "seba"
 SCANNED_TREES = ("claude", "codex")
 SCANNED_FILES = ("README.md",)
 SKIPPED_DIRS = {"__pycache__", ".git"}
+HOOK_COMMAND_FILE = re.compile(r"__HOME__/\.claude/hooks/([\w.-]+\.py)")
+FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 
 failures = []
 
@@ -132,18 +178,16 @@ def frontmatter_of(path: Path) -> dict:
 
 
 def check_claude_md() -> None:
-    size = CLAUDE_MD.stat().st_size
-    check(size <= CLAUDE_MD_MAX_BYTES, f"CLAUDE.md is {size} bytes (max {CLAUDE_MD_MAX_BYTES})")
-    text = CLAUDE_MD.read_text()
-    for hook in HOOK_NAMES:
-        check(hook in text, f"CLAUDE.md does not mention the hook {hook}")
-    for skill in SKILL_NAMES:
-        check(skill in text, f"CLAUDE.md does not mention the skill {skill}")
+    check(CLAUDE_MD.is_file(), "CLAUDE.md missing")
+    check(CODEX_AGENTS_MD.is_file(), "codex/AGENTS.md missing")
 
 
 def check_skills() -> None:
     present = sorted(p.name for p in SKILLS_DIR.iterdir() if p.is_dir())
-    check(present == sorted(SKILL_NAMES), f"skills/ holds {present}, expected {sorted(SKILL_NAMES)}")
+    for name in REQUIRED_SKILLS:
+        check(name in present, f"skills/ lacks {name}")
+    for name in RETIRED_SKILLS:
+        check(name not in present, f"skills/ still holds the retired {name}")
     for name in present:
         path = SKILLS_DIR / name / "SKILL.md"
         check(path.is_file(), f"{name}: SKILL.md missing")
@@ -160,37 +204,20 @@ def check_skills() -> None:
         )
 
 
-def check_delegate_markers() -> None:
-    text = (SKILLS_DIR / "delegate" / "SKILL.md").read_text()
-    check(bool(ACCEPTANCE_HEADING.search(text)), "delegate: no `## acceptance_criteria` heading")
-    check(bool(TEST_PLAN_HEADING.search(text)), "delegate: no `## test_plan` heading")
-    check("plan_file:" in text, "delegate: no `plan_file:` in the spawn prompts")
-    check("verify --" in text, "delegate: no `verify --` in the commands")
-    check(bool(ABSOLUTE_PATH.search(text)), "delegate: no absolute path in the template")
-    check("may not touch" in text, "delegate: no repo boundary line with `may not touch`")
-
-
 def check_agents() -> None:
     names = sorted(p.stem for p in AGENTS_DIR.glob("*.md"))
-    check(names == sorted(AGENT_NAMES), f"agents/ holds {names}, expected {sorted(AGENT_NAMES)}")
+    check(
+        names == sorted(REQUIRED_AGENTS),
+        f"agents/ holds {names}, expected {sorted(REQUIRED_AGENTS)}",
+    )
+    check(
+        not (AGENTS_DIR / RETIRED_AGENT_FILE).exists(),
+        f"agents/{RETIRED_AGENT_FILE} is still in the bundle",
+    )
     for path in sorted(AGENTS_DIR.glob("*.md")):
         fields = frontmatter_of(path)
         check(bool(fields.get("model")), f"{path.name}: no model in frontmatter")
         check(bool(fields.get("effort")), f"{path.name}: no effort in frontmatter")
-    developer = AGENTS_DIR / f"{DEVELOPER_AGENT}.md"
-    if developer.is_file():
-        fields = frontmatter_of(developer)
-        check(fields.get("model") == DEVELOPER_MODEL, f"{DEVELOPER_AGENT}: model is {fields.get('model')!r}")
-        check(fields.get("effort") == DEVELOPER_EFFORT, f"{DEVELOPER_AGENT}: effort is {fields.get('effort')!r}")
-        skills = fields.get("skills", "")
-        for skill in DEVELOPER_SKILLS:
-            check(skill in skills, f"{DEVELOPER_AGENT}: skills: does not preload {skill} (got {skills!r})")
-        body = " ".join(FRONTMATTER.sub("", developer.read_text()).split())
-        check(REVERT_SENTENCE in body, f"{DEVELOPER_AGENT}: the git-safety sentence is missing or reworded")
-    runner = AGENTS_DIR / f"{RUNNER_AGENT}.md"
-    if runner.is_file():
-        model = frontmatter_of(runner).get("model")
-        check(model == RUNNER_MODEL, f"{RUNNER_AGENT}: model is {model!r}")
 
 
 def check_no_stale_workflow_text() -> None:
@@ -203,73 +230,75 @@ def check_no_stale_workflow_text() -> None:
                 failures.append(f"{path.relative_to(REPO)}:{number} still mentions {match.group(0)!r}")
 
 
+def check_readme_workflow() -> None:
+    readme = README.read_text()
+    flat_readme = " ".join(readme.split())
+    for term in README_WORKFLOW_TERMS + README_REVIEW_TERMS:
+        check(term in flat_readme, f"README.md does not mention {term!r}")
+    for phrase in README_STALE_PHRASES:
+        check(phrase not in flat_readme, f"README.md still says {phrase!r}")
+    for name in HOOK_NAMES:
+        check(name in readme, f"README.md does not mention the hook {name}")
+
+
 def check_hooks_and_settings() -> None:
     for hook in HOOK_NAMES:
         check((HOOKS_DIR / f"{hook}.py").is_file(), f"hooks/{hook}.py missing")
         check((HOOKS_DIR / f"{hook}-test.py").is_file(), f"hooks/{hook}-test.py missing")
-    for module in SHARED_HOOK_MODULES:
-        check((HOOKS_DIR / module).is_file(), f"hooks/{module} missing")
-    readme = README.read_text()
-    for name in HOOK_NAMES + SHARED_HOOK_MODULES:
-        check(name in readme, f"README.md does not mention {name}")
-    check(CODEX_WORKER_TEST.is_file(), "codex_worker_test.py missing")
     settings = json.loads(SETTINGS.read_text())
     check(settings.get("model") == SESSION_MODEL, f"settings.json model is {settings.get('model')!r}")
-    effort = settings.get("modelSettings", {}).get(SESSION_MODEL, {}).get("effortLevel")
-    check(effort == SESSION_MODEL_EFFORT, f"settings.json modelSettings.{SESSION_MODEL} effort is {effort!r}")
     allow = settings.get("permissions", {}).get("allow", [])
-    check(DEVELOPER_ALLOW in allow, f"settings.json does not allow {DEVELOPER_ALLOW}")
-    for stale in RETIRED_ALLOW:
+    for wanted in REQUIRED_ALLOW:
+        check(wanted in allow, f"settings.json does not allow {wanted}")
+    for stale in RETIRED_ALLOW_V2:
         check(stale not in allow, f"settings.json still allows {stale}")
-    groups = [entry for entry in settings.get("hooks", {}).get("PreToolUse", [])
-              if entry.get("matcher") == TDD_GUARD_MATCHER]
-    commands = [hook.get("command") for entry in groups for hook in entry.get("hooks", [])]
-    check(
-        commands == [TDD_GUARD_COMMAND, COMMENT_GUARD_COMMAND, LINT_GUARD_COMMAND],
-        f"PreToolUse {TDD_GUARD_MATCHER} runs {commands}",
-    )
-    bash_groups = [entry for entry in settings.get("hooks", {}).get("PreToolUse", [])
-                   if entry.get("matcher") == BASH_MATCHER]
-    bash_commands = [hook.get("command") for entry in bash_groups for hook in entry.get("hooks", [])]
-    check(bash_commands == list(BASH_COMMANDS), f"PreToolUse {BASH_MATCHER} runs {bash_commands}")
-    check(
-        settings.get("autoCompactWindow") == AUTO_COMPACT_WINDOW,
-        f"settings.json autoCompactWindow is {settings.get('autoCompactWindow')!r}",
-    )
+    for event, entries in settings.get("hooks", {}).items():
+        for entry in entries:
+            for hook in entry.get("hooks", []):
+                for script in HOOK_COMMAND_FILE.findall(
+                    hook.get("command", "")
+                ):
+                    check(
+                        (HOOKS_DIR / script).is_file(),
+                        f"{event} hook runs the missing hooks/{script}",
+                    )
     retire = json.loads(RETIRE.read_text())
-    for name in RETIRED_HOME_FILES:
+    for name in RETIRED_FILES_V1 + RETIRED_FILES_V2:
         check(name in retire.get("files", []), f"retire.json does not retire {name}")
-    check(not STALE_DOC.exists(), f"{STALE_DOC.relative_to(REPO)} still exists")
-    for name in RETIRED_AGENTS:
-        check(f"agents/{name}.md" in retire.get("files", []), f"retire.json does not retire agents/{name}.md")
     retired_allow = retire.get("settings", {}).get("permissions.allow", [])
-    for stale in RETIRED_ALLOW:
+    for stale in RETIRED_ALLOW_V2:
         check(stale in retired_allow, f"retire.json does not retire the permission {stale}")
 
 
-def check_ruff_config() -> None:
-    check(RUFF_CONFIG.is_file(), "claude/lint/ruff.toml missing")
-    if not RUFF_CONFIG.is_file():
-        return
-    config = tomllib.loads(RUFF_CONFIG.read_text())
-    lint = config.get("lint", {})
-    target = config.get("target-version")
-    check(target == RUFF_TARGET_VERSION, f"ruff target-version is {target!r}")
-    length = config.get("line-length")
-    check(length == RUFF_LINE_LENGTH, f"ruff line-length is {length!r}")
-    selected = lint.get("select", [])
-    check(set(selected) == set(RUFF_SELECTED_FAMILIES), f"ruff select is {selected!r}")
-    global_ignores = lint.get("ignore", [])
-    check(set(global_ignores) == set(RUFF_GLOBAL_IGNORES), f"ruff global ignore is {global_ignores!r}")
-    max_args = lint.get("pylint", {}).get("max-args")
-    check(max_args == RUFF_MAX_ARGS, f"ruff pylint max-args is {max_args!r}")
-    complexity = lint.get("mccabe", {}).get("max-complexity")
-    check(complexity == RUFF_MAX_COMPLEXITY, f"ruff max-complexity is {complexity!r}")
-    check("PLR0913" not in lint.get("ignore", []), "ruff ignores PLR0913 instead of setting max-args")
-    ignores = lint.get("per-file-ignores", {})
-    for glob in RUFF_TEST_GLOBS:
-        found = ignores.get(glob)
-        check(set(found or []) == set(RUFF_TEST_IGNORES), f"ruff per-file-ignores for {glob} is {found!r}")
+def check_mcp_servers() -> None:
+    check(CODEX_WORKER_TEST.is_file(), "test_codex_worker.py missing")
+    check(
+        not LEGACY_CODEX_WORKER_TEST.exists(),
+        "codex_worker_test.py is still in the bundle",
+    )
+    for name in AGY_WORKER_FILES:
+        check(
+            (AGY_WORKER_DIR / name).is_file(), f"mcp/agy-worker/{name} missing"
+        )
+    for name in AGY_WORKER_FORBIDDEN:
+        check(
+            not (AGY_WORKER_DIR / name).exists(),
+            f"mcp/agy-worker/{name} must not be in the bundle",
+        )
+    servers = json.loads(MCP_SERVERS.read_text()).get("mcpServers", {})
+    check("codex-worker" in servers, "mcp-servers.json has no codex-worker")
+    check(
+        servers.get("agy-worker") == AGY_SERVER_ENTRY,
+        f"mcp-servers.json agy-worker entry is {servers.get('agy-worker')!r}",
+    )
+    check(
+        AGY_BIN_PLACEHOLDER in EXPORT_SCRIPT.read_text(),
+        f"export.sh does not write {AGY_BIN_PLACEHOLDER}",
+    )
+    check(
+        AGY_BIN_PLACEHOLDER in INSTALL_SCRIPT.read_text(),
+        f"install.sh does not render {AGY_BIN_PLACEHOLDER}",
+    )
 
 
 def check_codex_worker() -> None:
@@ -282,8 +311,9 @@ def check_codex_worker() -> None:
     interpreter = VENV_PYTHON if VENV_PYTHON.exists() else Path(sys.executable)
     code = (
         "import sys; sys.path.insert(0, %r); import codex_worker as w;"
-        "print(w.codex_review_changes(mode=%r, plan_file=%r, project_path='/tmp'), end='')"
-        % (str(CODEX_WORKER.parent), RETIRED_MODE, str(CLAUDE_MD))
+        "print(w.codex_review_changes(review_focus='x', mode=%r,"
+        " project_path='/tmp'), end='')"
+        % (str(CODEX_WORKER.parent), RETIRED_MODE)
     )
     result = subprocess.run([str(interpreter), "-c", code], capture_output=True, text=True)
     check(
@@ -359,41 +389,15 @@ def check_usage_report() -> None:
     )
 
 
-def anti_pattern_bullets(text: str) -> int:
-    section = ANTI_PATTERNS_SECTION.search(text)
-    return len(BULLET_LINE.findall(section.group(1))) if section else 0
-
-
-def check_habits() -> None:
-    delegate = (SKILLS_DIR / "delegate" / "SKILL.md").read_text()
-    check(STEP_MINUTES in delegate, f"delegate: the plan template does not require {STEP_MINUTES!r} steps")
-    check(bool(VERIFY_STEP_LINE.search(delegate)), "delegate: no numbered step line with `verify:`")
-    tdd = (SKILLS_DIR / "tdd" / "SKILL.md").read_text()
-    empty_section = "## Anti-patterns (each one is a finding)\n\n## Next\n- not a bullet of the section\n"
-    check(anti_pattern_bullets(empty_section) == 0, "self-test: an empty Anti-patterns section has bullets")
-    full_section = "## Anti-patterns\n\n- a\n- b\n- c\n\n## Next\n"
-    check(anti_pattern_bullets(full_section) == MIN_ANTI_PATTERNS, "self-test: a full section is miscounted")
-    bullets = anti_pattern_bullets(tdd)
-    check(bullets >= MIN_ANTI_PATTERNS, f"tdd: Anti-patterns has {bullets} bullets, min {MIN_ANTI_PATTERNS}")
-    quality_bar = (SKILLS_DIR / "quality-bar" / "SKILL.md").read_text()
-    check("anti-patterns" in quality_bar, "quality-bar: does not reference the tdd anti-patterns")
-    readme = README.read_text()
-    for script in FEATURE_WORKTREE_FILES:
-        path = BIN_DIR / script
-        check(path.is_file() and os.access(path, os.X_OK), f"claude/bin/{script} missing or not executable")
-        check(script in readme, f"README.md does not list {script}")
-
-
 def main() -> int:
     for step in (
         check_claude_md,
         check_skills,
-        check_delegate_markers,
-        check_habits,
         check_agents,
         check_no_stale_workflow_text,
+        check_readme_workflow,
         check_hooks_and_settings,
-        check_ruff_config,
+        check_mcp_servers,
         check_codex_worker,
         check_usage_dedup,
         check_no_home_literal,

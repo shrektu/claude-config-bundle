@@ -3,10 +3,10 @@ usage() {
   cat <<'USAGE'
 usage: export.sh [OUT_DIR]      (default: ~/claude-config-bundle; also writes OUT_DIR.tar.gz)
 Packs the portable Claude Code + Codex setup of this machine: CLAUDE.md, settings.json (without autoMode),
-agents, skills, prompts, templates, bin, hooks, lint (ruff.toml), the codex-worker MCP server, statusline, Codex AGENTS.md and the
-codex-worker entries for ~/.claude.json and ~/.codex/config.toml, plus retire.json so the retirement
-list travels with the bundle. Paths are replaced by __HOME__ and
-__CODEX_BIN__ so install.sh can render them on any machine. Credentials, sessions, memory and caches stay out.
+agents, skills, prompts, templates, bin, hooks, lint (ruff.toml), the codex-worker and agy-worker MCP servers, statusline, Codex AGENTS.md and the
+MCP entries for ~/.claude.json and ~/.codex/config.toml, plus retire.json so the retirement
+list travels with the bundle. Paths are replaced by __HOME__, __CODEX_BIN__ and
+__AGY_BIN__ so install.sh can render them on any machine. Credentials, sessions, memory and caches stay out.
 USAGE
 }
 set -euo pipefail
@@ -76,8 +76,14 @@ done
 cp "$HOME/.claude/CLAUDE.md" "$HOME/.claude/statusline-command.sh" "$OUT/claude/"
 cp "$HOME/.claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/requirements.txt" \
   "$OUT/claude/mcp/codex-worker/"
-[ ! -f "$HOME/.claude/mcp/codex-worker/codex_worker_test.py" ] \
-  || cp "$HOME/.claude/mcp/codex-worker/codex_worker_test.py" "$OUT/claude/mcp/codex-worker/"
+[ ! -f "$HOME/.claude/mcp/codex-worker/test_codex_worker.py" ] \
+  || cp "$HOME/.claude/mcp/codex-worker/test_codex_worker.py" "$OUT/claude/mcp/codex-worker/"
+if [ -d "$HOME/.claude/mcp/agy-worker" ]; then
+  mkdir -p "$OUT/claude/mcp/agy-worker"
+  find "$HOME/.claude/mcp/agy-worker" -maxdepth 1 -type f \
+    \( -name '*.py' -o -name 'requirements*.txt' -o -name pyproject.toml -o -name allowed-remotes.txt \) \
+    -exec cp {} "$OUT/claude/mcp/agy-worker/" \;
+fi
 cp "$HOME/.codex/AGENTS.md" "$OUT/codex/AGENTS.md"
 python3 - "$HOME/.claude/settings.json" "$OUT/claude/settings.json" <<'PY'
 import json, sys
@@ -99,10 +105,26 @@ cat > "$OUT/claude/mcp-servers.json" <<'JSON'
       ],
       "env": {},
       "timeout": 5400000
+    },
+    "agy-worker": {
+      "type": "stdio",
+      "command": "__HOME__/.claude/mcp/agy-worker/.venv/bin/python",
+      "args": ["__HOME__/.claude/mcp/agy-worker/agy_worker.py"],
+      "env": {"AGY_BIN": "__AGY_BIN__"},
+      "timeout": 5400000
     }
   }
 }
 JSON
+[ -d "$HOME/.claude/mcp/agy-worker" ] || python3 - "$OUT/claude/mcp-servers.json" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+data = json.load(open(path))
+del data["mcpServers"]["agy-worker"]
+json.dump(data, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
 cat > "$OUT/codex/config.fragment.toml" <<'TOML'
 
 [mcp_servers.codex-worker]

@@ -29,7 +29,12 @@
     "lint",
     "mcp/codex-worker/codex_worker_test.py",
     "skills/quality-bar",
-    "skills/tdd"
+    "skills/tdd",
+    "agents/implementer-strong.md",
+    "skills/rownolegle",
+    "skills/epik",
+    "skills/teksty-ui",
+    "skills/qa/references/scenariusze.md"
   ],
   "settings": {
     "env": [
@@ -41,7 +46,9 @@
       "Agent(claude-reviewer)",
       "Agent(implementer-hard)",
       "Agent(implementer-opus)",
-      "Agent(commander-opus)"
+      "Agent(commander-opus)",
+      "Agent(implementer-strong)",
+      "Write(/__HOME__/.claude/hooks/**)"
     ]
   }
 }

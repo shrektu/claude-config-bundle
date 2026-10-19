@@ -1,6 +1,6 @@
 ---
 name: commit
-description: Zasady gałęzi i commitów na tej maszynie. Załaduj, gdy git-policy coś odrzuci albo gdy podział na commity jest niejasny — nie przed każdym commitem.
+description: Branch and commit rules on this machine. Load when git-policy rejects something or the commit split is unclear — not before every commit.
 ---
 
 - Commits and pushes land only on `feature/*`, `bugfix/*`, `hotfix/*`, `test/*`. Create the branch from

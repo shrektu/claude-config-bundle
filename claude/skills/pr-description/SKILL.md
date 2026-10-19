@@ -1,6 +1,6 @@
 ---
 name: pr-description
-description: Gotowy do wklejenia opis PR na Bitbucket dla skończonego zadania. Użyj, gdy Sebastian prosi o opis PR, „przygotuj PR” albo pull request description.
+description: A ready-to-paste Bitbucket PR description for a finished task. Use when Sebastian asks for a PR description, says "przygotuj PR", or asks for a pull request description.
 ---
 
 Trigger: the task is finished and the user asks for a PR description. Return a ready-to-paste,
@@ -20,12 +20,16 @@ so it goes straight to ready-for-review.
 
 ## Description
 
-The orchestrator does not write it itself: spawn `writer` with the diff range, the repo path, the Jira
-ID, the confirmed findings with their test names and this skill as the template; check every claim in
-the draft against the code, then publish. Write it in Polish, in full sentences, concrete and concise. Bitbucket renders Markdown — use `##`
-headings. The description always opens with the line `🤖 Wygenerowane przez Claude` and a blank line, before the first
-section, so readers know it was written by AI. Include only the sections that apply; drop the optional ones instead of writing "N/A" or
-leaving them empty. Sections, in this order:
+The orchestrator does not write it itself: spawn `writer` in `publish` mode with the diff range, the repo
+path, the Jira ID, the confirmed findings with their test names and this skill as the template. The writer
+has Gemini 3.8 Flash draft it (`agy_write`, kind `pr_description`), checks the nomenclature and language
+(`redakcja.py` plus the style guide) and adds the footer; check every claim in the draft against the code,
+then publish. The text is Polish by default, in full sentences, concrete and concise. Bitbucket renders
+Markdown — use `##` headings. The description always ends with a blank line and the footer
+`🤖 Wygenerowane przez <model>`, where `<model>` is the model that produced the text (`Gemini 3.8 Flash`,
+or `Claude Sonnet 5.5` when the writer fell back to writing it itself), so readers know it was written by
+AI. Include only the sections that apply; drop the optional ones instead of writing "N/A" or leaving them
+empty. Sections, in this order:
 
 - `## Powiązane PR` — Multi PR only: links to all the other PRs in the group.
 - `## Co zostało zmienione` — the real change in the code and the effect it introduces. Not a list of
@@ -95,8 +99,6 @@ Template to emit:
 [ABC-123] Krótki opis zmian
 Target branch: develop
 
-🤖 Wygenerowane przez Claude
-
 ## Co zostało zmienione
 ...
 
@@ -105,4 +107,6 @@ Target branch: develop
 
 ## Jak
 ...
+
+🤖 Wygenerowane przez Gemini 3.8 Flash
 ```

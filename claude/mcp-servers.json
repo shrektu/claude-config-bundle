@@ -10,6 +10,13 @@
       ],
       "env": {},
       "timeout": 5400000
+    },
+    "agy-worker": {
+      "type": "stdio",
+      "command": "__HOME__/.claude/mcp/agy-worker/.venv/bin/python",
+      "args": ["__HOME__/.claude/mcp/agy-worker/agy_worker.py"],
+      "env": {"AGY_BIN": "__AGY_BIN__"},
+      "timeout": 5400000
     }
   }
 }

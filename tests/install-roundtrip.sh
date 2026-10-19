@@ -47,11 +47,16 @@ printf '#!/bin/sh\necho "codex-cli 0.0.0-test"\n' > "$FAKEBIN/codex"
 chmod 755 "$FAKEBIN/codex"
 
 stub_venv() {
-  local venv=$1/.claude/mcp/codex-worker/.venv
-  mkdir -p "$venv/bin"
-  printf '#!/bin/sh\nexit 0\n' > "$venv/bin/python"
-  chmod 755 "$venv/bin/python"
-  cp "$ROOT/claude/mcp/codex-worker/requirements.txt" "$venv/.installed-requirements"
+  local source=${2:-$ROOT/claude} server venv
+  for server in codex-worker agy-worker; do
+    venv=$1/.claude/mcp/$server/.venv
+    mkdir -p "$venv/bin"
+    printf '#!/bin/sh\nexit 0\n' > "$venv/bin/python"
+    chmod 755 "$venv/bin/python"
+  done
+  cp "$source/mcp/codex-worker/requirements.txt" "$1/.claude/mcp/codex-worker/.venv/.installed-requirements"
+  cat "$source/mcp/agy-worker/requirements.txt" "$source/mcp/agy-worker/requirements-dev.txt" \
+    > "$1/.claude/mcp/agy-worker/.venv/.installed-requirements" 2>/dev/null
 }
 
 mkdir -p "$H1/.claude/prompts" "$H1/.claude/skills/orchestrate" "$H1/.claude/agents" "$H2"
@@ -66,7 +71,8 @@ cat > "$H1/.claude/settings.json" <<'JSON'
   "env": { "MAX_MCP_OUTPUT_TOKENS": "1000000", "LOCAL_ONLY": "keep-me" },
   "permissions": {
     "allow": ["mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)", "Bash(ls*)",
-              "Agent(implementer)", "Agent(implementer-hard)", "Agent(implementer-opus)", "Agent(commander-opus)"],
+              "Agent(implementer)", "Agent(implementer-hard)", "Agent(implementer-opus)", "Agent(commander-opus)",
+              "Agent(implementer-strong)", "Write(/__H1__/.claude/hooks/**)"],
     "defaultMode": "auto"
   },
   "effortLevel": "xhigh",
@@ -79,7 +85,9 @@ cat > "$H1/.claude/settings.json" <<'JSON'
   }
 }
 JSON
-RETIRED_HOME_ENTRIES="audit-2026-09-12 settings.json.bak-manual settings.json.bak-manual2"
+sed -i "s#/__H1__#/$H1#" "$H1/.claude/settings.json"
+RETIRED_HOME_ENTRIES="audit-2026-09-12 settings.json.bak-manual settings.json.bak-manual2 \
+  skills/rownolegle skills/epik skills/teksty-ui"
 mkdir -p "$H1/.claude/audit-2026-09-12" "$H1/.claude/lint" "$H1/.claude/backups/unrelated"
 echo "old audit" > "$H1/.claude/audit-2026-09-12/report.md"
 echo "{}" > "$H1/.claude/settings.json.bak-manual"
@@ -89,7 +97,9 @@ echo "$CUSTOM_RUFF" > "$H1/.claude/lint/ruff.toml"
 RETIRED_HOME_FILES="bin/feature-worktree bin/feature-worktree-test.sh bin/quality-gate bin/quality-gate-test.sh \
   bin/review-checkpoint-test.sh hooks/bash-write-guard.py hooks/bash-write-guard-test.py hooks/code_files.py \
   hooks/edit_texts.py hooks/lint-guard.py hooks/lint-guard-test.py hooks/shell_words.py \
-  mcp/codex-worker/codex_worker_test.py skills/quality-bar/SKILL.md skills/tdd/SKILL.md"
+  mcp/codex-worker/codex_worker_test.py skills/quality-bar/SKILL.md skills/tdd/SKILL.md \
+  agents/implementer-strong.md skills/rownolegle/SKILL.md skills/epik/SKILL.md skills/teksty-ui/SKILL.md \
+  skills/qa/references/scenariusze.md"
 for f in $RETIRED_HOME_FILES; do
   mkdir -p "$(dirname "$H1/.claude/$f")"
   echo "retired content" > "$H1/.claude/$f"
@@ -156,10 +166,17 @@ for a in $RETIRED_AGENTS; do
 done
 CHECKS=$((CHECKS + 1))
 AGENTS_LEFT=$(cd "$H1/.claude/agents" && ls | LC_ALL=C sort | tr '\n' ' ')
-[ "$AGENTS_LEFT" = "codex-runner.md implementer-strong.md implementer.md writer.md " ] || fail "agents left after install: $AGENTS_LEFT"
+[ "$AGENTS_LEFT" = "codex-runner.md flash-review-runner.md implementer.md plan-gate-runner.md reviewer-opus.md writer.md " ] || fail "agents left after install: $AGENTS_LEFT"
 check_grep "$WORK/install1.log" "for t in tdd-guard " "install log: post-install hint runs the tdd-guard matrix"
 check_grep "$WORK/install1.log" " comment-guard " "install log: post-install hint runs the comment-guard matrix"
-check_grep "$WORK/install1.log" "codex_worker_test.py" "install log: post-install hint names the worker test"
+check_grep "$WORK/install1.log" "test_codex_worker.py" "install log: post-install hint names the worker test"
+check_grep "$WORK/install1.log" "and agy-worker must show Connected" "install log: checklist asks for agy-worker Connected"
+check_grep "$WORK/install1.log" "agy-worker/.venv/bin/python -m pytest" "install log: checklist runs the agy-worker tests"
+check_file "$ROOT/claude/mcp/agy-worker/agy_worker.py"
+check_file "$H1/.claude/mcp/agy-worker/agy_worker.py"
+check_file "$H1/.claude/mcp/agy-worker/requirements-dev.txt"
+check_file "$H1/.claude/mcp/agy-worker/allowed-remotes.txt"
+for skill in parallel epic ui-texts; do check_file "$H1/.claude/skills/$skill/SKILL.md"; done
 
 for f in prompts/haiku-task.md prompts/codex-review.md skills/orchestrate agents/sonnet-worker.md \
          agents/claude-reviewer.md agents/haiku-worker.md; do
@@ -176,6 +193,8 @@ CHECKS=$((CHECKS + 1))
 CHECKS=$((CHECKS + 1))
 grep -qF "__HOME__" "$H1/.claude/bundle/export.sh" || fail "installed export.sh lost its __HOME__ placeholders"
 check_grep "$H1/.claude.json" "$H1/.claude/mcp/codex-worker/codex_worker.py" ".claude.json: rendered mcp path"
+check_grep "$H1/.claude.json" "$H1/.claude/mcp/agy-worker/agy_worker.py" ".claude.json: agy-worker not registered"
+check_grep "$H1/.claude.json" "$H1/.local/bin/agy" ".claude.json: AGY_BIN not rendered"
 check_grep "$H1/.codex/config.toml" "$H1/.claude/mcp/codex-worker/codex_worker.py" "codex config: rendered path"
 check_grep "$WORK/install1.log" "retired: $H1/.claude/skills/orchestrate" "install log: retirement of the old skill"
 check_grep "$WORK/install1.log" "retired settings entries" "install log: retirement of stale settings"
@@ -205,8 +224,11 @@ for stale in ("mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)",
               "Agent(implementer-hard)", "Agent(implementer-opus)", "Agent(commander-opus)"):
     if stale in allow:
         problems.append(f"stale allow {stale}")
-for wanted in ("Agent(implementer)", "Agent(implementer-strong)", "Agent(codex-runner)", "Bash(ls*)",
-               "mcp__codex-worker__*"):
+for stale in ("Agent(implementer-strong)", f"Write(/{home}/.claude/hooks/**)"):
+    if stale in allow:
+        problems.append(f"stale allow {stale}")
+for wanted in ("Agent(implementer)", "Agent(codex-runner)", "Bash(ls*)",
+               "mcp__codex-worker__*", "mcp__agy-worker__*"):
     if wanted not in allow:
         problems.append(f"missing allow {wanted}")
 if settings.get("autoMode", {}).get("environment") != "local":
@@ -266,6 +288,9 @@ check_file "$EXPORTED/claude/hooks/tdd-guard.py"
 check_file "$EXPORTED/claude/hooks/comment-guard.py"
 check_gone "$EXPORTED/claude/lint"
 check_gone "$EXPORTED/claude/mcp/codex-worker/codex_worker_test.py"
+check_file "$EXPORTED/claude/mcp/agy-worker/agy_worker.py"
+check_file "$EXPORTED/claude/mcp/agy-worker/allowed-remotes.txt"
+check_gone "$EXPORTED/claude/mcp/agy-worker/.venv"
 check_file "$EXPORTED/manifest.txt"
 CHECKS=$((CHECKS + 1))
 if grep -q "\./\.git/" "$EXPORTED/manifest.txt"; then fail "manifest lists .git entries"; fi
@@ -314,6 +339,269 @@ check "install with ruff present, exit status" $?
 check_gone "$UVBIN/uv-called"
 CHECKS=$((CHECKS + 1))
 if grep -q "is not installed" "$WORK/install-ruff.log"; then fail "warned about a tool that is installed"; fi
+
+BUNDLE=$WORK/bundle
+FAKEMCP=$WORK/fakemcp
+FAKECLAUDE=$WORK/claudebin
+NOPDFBIN=$WORK/nopdfbin
+AGYBIN=$WORK/agybin
+H3=$WORK/home3
+H4=$WORK/home4
+LOCAL_ALLOWLIST='local.example/*'
+BUNDLE_ALLOWLIST='github.com/*'
+RUNTIME_REQUIREMENTS='--prefer-binary'
+DEV_REQUIREMENTS='--pre'
+mkdir -p "$BUNDLE" "$FAKEMCP/mcp" "$FAKECLAUDE" "$NOPDFBIN" "$AGYBIN" "$H3" "$H4"
+touch "$FAKEMCP/mcp/__init__.py"
+for f in /usr/bin/* /bin/*; do
+  name=$(basename "$f")
+  case $name in uv|uvx|ruff|mypy|vulture|pylint|pdf*) continue ;; esac
+  ln -sf "$f" "$NOPDFBIN/$name"
+done
+printf '#!/bin/sh\nexit 0\n' > "$AGYBIN/agy"
+chmod 755 "$AGYBIN/agy"
+cat > "$FAKECLAUDE/claude" <<'SH'
+#!/usr/bin/env python3
+import json, os, sys
+home = os.environ["HOME"]
+with open(os.path.join(home, "claude-calls.log"), "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\n")
+path = os.path.join(home, ".claude.json")
+data = json.load(open(path)) if os.path.exists(path) else {}
+servers = data.setdefault("mcpServers", {})
+if sys.argv[1:3] == ["mcp", "remove"]:
+    servers.pop(sys.argv[3], None)
+elif sys.argv[1:3] == ["mcp", "add-json"]:
+    servers[sys.argv[3]] = json.loads(sys.argv[4])
+json.dump(data, open(path, "w"), indent=2)
+SH
+chmod 755 "$FAKECLAUDE/claude"
+cp -a "$ROOT/install.sh" "$ROOT/export.sh" "$ROOT/retire.json" "$ROOT/README.md" "$ROOT/codex" "$ROOT/claude" "$BUNDLE/"
+rm -rf "$BUNDLE/claude/mcp/agy-worker"
+mkdir -p "$BUNDLE/claude/mcp/agy-worker"
+for f in agy_worker.py test_agy_worker.py; do echo "pass" > "$BUNDLE/claude/mcp/agy-worker/$f"; done
+echo "$RUNTIME_REQUIREMENTS" > "$BUNDLE/claude/mcp/agy-worker/requirements.txt"
+echo "$DEV_REQUIREMENTS" > "$BUNDLE/claude/mcp/agy-worker/requirements-dev.txt"
+echo "[tool.pytest.ini_options]" > "$BUNDLE/claude/mcp/agy-worker/pyproject.toml"
+echo "$BUNDLE_ALLOWLIST" > "$BUNDLE/claude/mcp/agy-worker/allowed-remotes.txt"
+echo "$RUNTIME_REQUIREMENTS" > "$BUNDLE/claude/mcp/codex-worker/requirements.txt"
+echo "pass" > "$BUNDLE/claude/mcp/codex-worker/test_codex_worker.py"
+cat > "$BUNDLE/claude/mcp-servers.json" <<'JSON'
+{
+  "mcpServers": {
+    "codex-worker": {
+      "type": "stdio",
+      "command": "env",
+      "args": [
+        "CODEX_BIN=__CODEX_BIN__",
+        "__HOME__/.claude/mcp/codex-worker/.venv/bin/python",
+        "__HOME__/.claude/mcp/codex-worker/codex_worker.py"
+      ],
+      "env": {},
+      "timeout": 5400000
+    },
+    "agy-worker": {
+      "type": "stdio",
+      "command": "__HOME__/.claude/mcp/agy-worker/.venv/bin/python",
+      "args": ["__HOME__/.claude/mcp/agy-worker/agy_worker.py"],
+      "env": {"AGY_BIN": "__AGY_BIN__"},
+      "timeout": 5400000
+    }
+  }
+}
+JSON
+MISSING_INTERPRETER=/nonexistent/pyenv/bin/python3
+MISSING_INTERPRETER_HOOK=standards-gate.py
+python3 - "$BUNDLE/claude/settings.json" "$MISSING_INTERPRETER" "$MISSING_INTERPRETER_HOOK" <<'PY'
+import json, sys
+MISSING_INTERPRETER, MISSING_INTERPRETER_HOOK = sys.argv[2], sys.argv[3]
+settings = json.load(open(sys.argv[1]))
+allow = settings["permissions"]["allow"]
+settings["permissions"]["allow"] = [
+    e for e in allow if e != "Agent(implementer-strong)" and not e.startswith("Write(/__HOME__/.claude/hooks")
+]
+settings["hooks"]["PreToolUse"].append({"matcher": "Bash", "hooks": [
+    {"type": "command", "command": f"{MISSING_INTERPRETER} __HOME__/.claude/hooks/{MISSING_INTERPRETER_HOOK}"}]})
+json.dump(settings, open(sys.argv[1], "w"), indent=2)
+PY
+
+run_bundle_install() { env -i HOME="$1" PATH="$2" PYTHONPATH="$FAKEMCP" USER="${USER:-tester}" TERM=dumb \
+  bash "$BUNDLE/install.sh" >"$3" 2>&1; }
+
+mkdir -p "$H3/.claude/mcp/agy-worker" "$H3/.claude/agents" "$H3/.claude/skills/rownolegle" \
+  "$H3/.claude/skills/epik" "$H3/.claude/skills/teksty-ui" "$H3/.claude/skills/qa/references"
+echo "$LOCAL_ALLOWLIST" > "$H3/.claude/mcp/agy-worker/allowed-remotes.txt"
+echo '{"userMarker": 1}' > "$H3/.claude.json"
+V1_RETIRED="agents/implementer-strong.md skills/rownolegle/SKILL.md skills/epik/SKILL.md skills/teksty-ui/SKILL.md \
+  skills/qa/references/scenariusze.md"
+for f in $V1_RETIRED; do echo "v1 content" > "$H3/.claude/$f"; done
+cat > "$H3/.claude/settings.json" <<JSON
+{
+  "permissions": {
+    "allow": ["Bash(ls*)", "Agent(implementer-strong)", "Write(/$H3/.claude/hooks/**)", "Agent(implementer)"]
+  }
+}
+JSON
+
+run_bundle_install "$H3" "$FAKECLAUDE:$FAKEBIN:$NOPDFBIN" "$WORK/install-v2a.log"
+check "v2 install on a home with v1 leftovers, exit status (see $WORK/install-v2a.log)" $?
+for f in agy_worker.py test_agy_worker.py pyproject.toml requirements.txt requirements-dev.txt; do
+  check_file "$H3/.claude/mcp/agy-worker/$f"
+done
+CHECKS=$((CHECKS + 1))
+[ "$(cat "$H3/.claude/mcp/agy-worker/allowed-remotes.txt" 2>/dev/null)" = "$LOCAL_ALLOWLIST" ] \
+  || fail "a machine's own allowed-remotes.txt was overwritten"
+check_grep "$WORK/install-v2a.log" "allowed-remotes.txt differs" "no note that the local allowlist differs from the bundle's"
+for server in codex-worker agy-worker; do
+  check_exec "$H3/.claude/mcp/$server/.venv/bin/python"
+  check_grep "$WORK/install-v2a.log" "building venv: $H3/.claude/mcp/$server/.venv" "$server venv was not built"
+  check_grep "$H3/claude-calls.log" "mcp add-json $server " "claude mcp add-json was not called for $server"
+  check_grep "$H3/.claude.json" "$H3/.claude/mcp/$server/" "$server registration lacks its rendered path"
+done
+CHECKS=$((CHECKS + 1))
+[ "$(cat "$H3/.claude/mcp/agy-worker/.venv/.installed-requirements" 2>/dev/null)" = "$(printf '%s\n%s' "$RUNTIME_REQUIREMENTS" "$DEV_REQUIREMENTS")" ] \
+  || fail "agy-worker venv marker is not requirements.txt followed by requirements-dev.txt"
+check_grep "$H3/.claude.json" "$H3/.local/bin/agy" "AGY_BIN did not fall back to ~/.local/bin/agy"
+check_grep "$WORK/install-v2a.log" "falling back to $H3/.local/bin/agy" "no note about the AGY_BIN fallback"
+check_file "$H3/.claude/mcp/codex-worker/test_codex_worker.py"
+check_grep "$WORK/install-v2a.log" "WARNING: hook interpreter $MISSING_INTERPRETER does not exist ($MISSING_INTERPRETER_HOOK)" "no warning about a hook interpreter missing on this machine"
+CLAUDE_JSON_BACKUP=$(compgen -G "$H3/.claude/backups/bundle-*/.claude.json" | head -1)
+check_grep "$CLAUDE_JSON_BACKUP" "userMarker" "the .claude.json backup lost the original content"
+CHECKS=$((CHECKS + 1))
+if grep -qF "worker" "$CLAUDE_JSON_BACKUP" 2>/dev/null; then fail ".claude.json was backed up after a server was already registered"; fi
+for f in $V1_RETIRED; do
+  check_gone "$H3/.claude/$f"
+  CHECKS=$((CHECKS + 1))
+  compgen -G "$H3/.claude/backups/bundle-*/.claude/$f" >/dev/null || fail "no backup of retired $f"
+done
+for dir in skills/rownolegle skills/epik skills/teksty-ui; do check_gone "$H3/.claude/$dir"; done
+check_grep "$WORK/install-v2a.log" "retired settings entries" "no retirement of the v1 settings entries"
+CHECKS=$((CHECKS + 1))
+python3 - "$H3/.claude/settings.json" "$H3" <<'PY' || fail "settings entries of v1 were not retired"
+import json, sys
+allow = json.load(open(sys.argv[1]))["permissions"]["allow"]
+problems = [e for e in ("Agent(implementer-strong)", f"Write(/{sys.argv[2]}/.claude/hooks/**)") if e in allow]
+problems += [f"lost {e}" for e in ("Bash(ls*)", "Agent(implementer)") if e not in allow]
+for problem in problems:
+    print("  settings problem:", problem)
+sys.exit(1 if problems else 0)
+PY
+check_grep "$WORK/install-v2a.log" "WARNING: agy is not on PATH" "no warning about the missing agy"
+check_grep "$WORK/install-v2a.log" "antigravity.google/cli/install.sh" "no install hint for agy"
+check_grep "$WORK/install-v2a.log" "WARNING: pdfinfo, pdfseparate or pdfunite not found" "no warning about missing poppler"
+check_grep "$WORK/install-v2a.log" "poppler-utils" "no install hint for poppler"
+for sandbox_tool in bwrap xdg-dbus-proxy; do
+  CHECKS=$((CHECKS + 1))
+  if [ -e "/usr/bin/$sandbox_tool" ]; then
+    if grep -qF "WARNING: /usr/bin/$sandbox_tool not found" "$WORK/install-v2a.log"; then
+      fail "warned about /usr/bin/$sandbox_tool although it exists"
+    fi
+  else
+    grep -qF "WARNING: /usr/bin/$sandbox_tool not found" "$WORK/install-v2a.log" \
+      || fail "no warning about the missing /usr/bin/$sandbox_tool"
+  fi
+done
+
+CALLS_BEFORE=$(wc -l < "$H3/claude-calls.log")
+run_bundle_install "$H3" "$FAKECLAUDE:$FAKEBIN:$NOPDFBIN" "$WORK/install-v2b.log"
+check "second v2 install exit status (see $WORK/install-v2b.log)" $?
+check_grep "$WORK/install-v2b.log" "files changed: 0" "second v2 install: files changed"
+check_grep "$WORK/install-v2b.log" "agy-worker already registered" "second v2 install: agy-worker registered again"
+check_grep "$WORK/install-v2b.log" "codex-worker already registered" "second v2 install: codex-worker registered again"
+CHECKS=$((CHECKS + 1))
+[ "$(wc -l < "$H3/claude-calls.log")" = "$CALLS_BEFORE" ] || fail "second v2 install called claude mcp again"
+CHECKS=$((CHECKS + 1))
+[ "$(cat "$H3/.claude/mcp/agy-worker/allowed-remotes.txt")" = "$LOCAL_ALLOWLIST" ] \
+  || fail "second v2 install overwrote the local allowlist"
+
+python3 - "$H3/.claude.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["mcpServers"]["agy-worker"]["env"]["AGY_BIN"] = "/stale/agy"
+json.dump(data, open(sys.argv[1], "w"))
+PY
+run_bundle_install "$H3" "$FAKECLAUDE:$FAKEBIN:$NOPDFBIN" "$WORK/install-v2c.log"
+check "install over a changed registration exit status (see $WORK/install-v2c.log)" $?
+check_grep "$H3/claude-calls.log" "mcp remove agy-worker" "a changed agy-worker registration was not removed first"
+check_grep "$H3/.claude.json" "$H3/.local/bin/agy" "a changed agy-worker registration was not rewritten"
+CHECKS=$((CHECKS + 1))
+if grep -qF "/stale/agy" "$H3/.claude.json"; then fail "stale AGY_BIN survived the re-registration"; fi
+check_grep "$WORK/install-v2c.log" "codex-worker already registered" "the unchanged codex-worker was re-registered"
+
+stub_venv "$H4" "$BUNDLE/claude"
+run_bundle_install "$H4" "$AGYBIN:$FAKEBIN:$SYSBIN" "$WORK/install-v2d.log"
+check "v2 install on a fresh home with agy, exit status (see $WORK/install-v2d.log)" $?
+CHECKS=$((CHECKS + 1))
+[ "$(cat "$H4/.claude/mcp/agy-worker/allowed-remotes.txt" 2>/dev/null)" = "$BUNDLE_ALLOWLIST" ] \
+  || fail "the bundle's allowed-remotes.txt was not installed on a fresh home"
+CHECKS=$((CHECKS + 1))
+if grep -qF "WARNING: agy is not on PATH" "$WORK/install-v2d.log"; then fail "warned about agy although it is on PATH"; fi
+check_grep "$WORK/install-v2d.log" "agy-worker registered (python merge" "no python-merge registration of agy-worker"
+check_grep "$H4/.claude.json" "$H4/.claude/mcp/agy-worker/agy_worker.py" "fresh home: agy-worker not in .claude.json"
+check_grep "$H4/.claude.json" "$AGYBIN/agy" "AGY_BIN is not the agy found on PATH"
+
+SPECIAL_AGY_DIR="$WORK/cli&tools$(printf '\043')bin"
+SPECIAL_AGY=$SPECIAL_AGY_DIR/agy
+H6=$WORK/home6
+mkdir -p "$SPECIAL_AGY_DIR" "$H6"
+cp "$AGYBIN/agy" "$SPECIAL_AGY"
+stub_venv "$H6" "$BUNDLE/claude"
+run_bundle_install "$H6" "$SPECIAL_AGY_DIR:$FAKEBIN:$SYSBIN" "$WORK/install-v2f.log"
+check "install with agy under a path with & and the hash sign, exit status (see $WORK/install-v2f.log)" $?
+CHECKS=$((CHECKS + 1))
+python3 - "$H6/.claude.json" "$SPECIAL_AGY" <<'PY' || fail "AGY_BIN with special characters was corrupted by the renderer"
+import json, sys
+registered = json.load(open(sys.argv[1]))["mcpServers"]["agy-worker"]["env"]["AGY_BIN"]
+if registered != sys.argv[2]:
+    print("  registered AGY_BIN:", registered)
+    sys.exit(1)
+PY
+
+BUNDLE_WITHOUT_AGY=$WORK/bundle-without-agy
+H7=$WORK/home7
+mkdir -p "$H7"
+cp -a "$BUNDLE" "$BUNDLE_WITHOUT_AGY"
+rm -rf "$BUNDLE_WITHOUT_AGY/claude/mcp/agy-worker"
+python3 - "$BUNDLE_WITHOUT_AGY/claude/mcp-servers.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+del data["mcpServers"]["agy-worker"]
+json.dump(data, open(sys.argv[1], "w"), indent=2)
+PY
+stub_venv "$H7" "$BUNDLE_WITHOUT_AGY/claude"
+env -i HOME="$H7" PATH="$FAKEBIN:$SYSBIN" PYTHONPATH="$FAKEMCP" USER="${USER:-tester}" TERM=dumb \
+  bash "$BUNDLE_WITHOUT_AGY/install.sh" >"$WORK/install-v2g.log" 2>&1
+check "install of a bundle without agy-worker, exit status (see $WORK/install-v2g.log)" $?
+check_grep "$H7/.claude.json" "codex-worker" "bundle without agy-worker: codex-worker not registered"
+CHECKS=$((CHECKS + 1))
+if grep -qF "agy-worker" "$H7/.claude.json"; then fail "bundle without agy-worker registered it anyway"; fi
+
+OLD_PYTHON_BIN=$WORK/oldpython
+H5=$WORK/home5
+mkdir -p "$OLD_PYTHON_BIN" "$H5"
+printf '#!/bin/sh\ncase "$2" in *"version_info < (3, 12)"*) exit 1 ;; esac\nexec /usr/bin/python3 "$@"\n' > "$OLD_PYTHON_BIN/python3"
+chmod 755 "$OLD_PYTHON_BIN/python3"
+run_bundle_install "$H5" "$OLD_PYTHON_BIN:$AGYBIN:$FAKECLAUDE:$FAKEBIN:$SYSBIN" "$WORK/install-v2e.log"
+check "install with python below 3.12, exit status (see $WORK/install-v2e.log)" $?
+check_grep "$WORK/install-v2e.log" "WARNING: python3 is older than 3.12, skipping agy-worker" "no warning that agy-worker needs python 3.12"
+check_gone "$H5/.claude/mcp/agy-worker/.venv"
+check_grep "$H5/.claude.json" "codex-worker" "codex-worker must still be registered with an old python"
+CHECKS=$((CHECKS + 1))
+if grep -qF "agy-worker" "$H5/.claude.json"; then fail "agy-worker registered although its venv was skipped"; fi
+
+CHECKS=$((CHECKS + 1))
+python3 - "$ROOT/retire.json" <<'PY' || fail "retire.json lacks the v2 entries"
+import json, sys
+spec = json.load(open(sys.argv[1]))
+files = ("agents/implementer-strong.md", "skills/rownolegle", "skills/epik", "skills/teksty-ui",
+         "skills/qa/references/scenariusze.md")
+allow = ("Agent(implementer-strong)", "Write(/__HOME__/.claude/hooks/**)")
+problems = [f"file {f}" for f in files if f not in spec["files"]]
+problems += [f"allow {e}" for e in allow if e not in spec["settings"]["permissions.allow"]]
+for problem in problems:
+    print("  retire.json is missing", problem)
+sys.exit(1 if problems else 0)
+PY
 
 echo "checks: $CHECKS, FAILURES: $FAILURES"
 if [ "$FAILURES" != 0 ]; then

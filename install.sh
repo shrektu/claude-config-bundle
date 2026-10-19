@@ -8,7 +8,7 @@ README.md and retire.json are copied to ~/.claude/bundle/ verbatim, so their __H
 and settings entries are backed up and removed). settings.json is MERGED (bundle wins for workflow keys, this
 machine keeps env and autoMode, allow/deny lists are unioned, hooks are replaced per event+matcher so a hook
 is never registered twice; local-only matchers stay). ~/.claude.json
-gets the codex-worker MCP server, ~/.codex/config.toml gets the codex-worker block appended if missing.
+gets the codex-worker and agy-worker MCP servers, ~/.codex/config.toml gets the codex-worker block appended if missing.
 claude/lint/ruff.toml is always installed to ~/.claude/lint/ruff.toml (a changed copy is backed up first). After
 the run only the 5 newest ~/.claude/backups/bundle-* directories are kept. When ruff, mypy, vulture or pylint
 is not on PATH it is installed with `uv tool install <tool>`, or a warning says what is inactive (lint-guard
@@ -22,12 +22,22 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 STAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP=$HOME/.claude/backups/bundle-$STAMP
 CODEX_BIN=$(command -v codex || true)
+AGY_BIN=$(command -v agy || true)
+AGY_BIN_MISSING=0
+if [ -z "$AGY_BIN" ]; then AGY_BIN=$HOME/.local/bin/agy; AGY_BIN_MISSING=1; fi
+AGY_PYTHON_OK=1
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))' || AGY_PYTHON_OK=0
+CLAUDE_JSON_BACKED_UP=0
 [ -n "$CODEX_BIN" ] || { echo "codex CLI not found on PATH - install it first (https://chatgpt.com/codex/install.sh)"; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
 BACKUPS_KEPT=5
 CHANGED=0
 
-render() { sed -e "s#__CODEX_BIN__#$CODEX_BIN#g" -e "s#__HOME__#$HOME#g" "$1"; }
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\&#]/\\&/g'; }
+render() {
+  sed -e "s#__CODEX_BIN__#$(sed_escape "$CODEX_BIN")#g" -e "s#__AGY_BIN__#$(sed_escape "$AGY_BIN")#g" \
+    -e "s#__HOME__#$(sed_escape "$HOME")#g" "$1"
+}
 backup() {
   [ -e "$1" ] || return 0
   mkdir -p "$BACKUP/$(dirname "${1#"$HOME"/}")"
@@ -71,8 +81,23 @@ done
 [ ! -f "$HERE/claude/lint/ruff.toml" ] || install_file "$HERE/claude/lint/ruff.toml" "$HOME/.claude/lint/ruff.toml"
 install_file "$HERE/claude/mcp/codex-worker/codex_worker.py" "$HOME/.claude/mcp/codex-worker/codex_worker.py" 755
 [ ! -f "$HERE/claude/mcp/codex-worker/codex_worker_test.py" ] || install_file "$HERE/claude/mcp/codex-worker/codex_worker_test.py" "$HOME/.claude/mcp/codex-worker/codex_worker_test.py"
+[ ! -f "$HERE/claude/mcp/codex-worker/test_codex_worker.py" ] || install_file "$HERE/claude/mcp/codex-worker/test_codex_worker.py" "$HOME/.claude/mcp/codex-worker/test_codex_worker.py"
 install_file "$HERE/claude/mcp/codex-worker/requirements.txt" "$HOME/.claude/mcp/codex-worker/requirements.txt"
 printf 'CODEX_BIN=%s\n' "$CODEX_BIN" > "$HOME/.claude/mcp/codex-worker/.env"
+AGY_SRC=$HERE/claude/mcp/agy-worker
+AGY_DST=$HOME/.claude/mcp/agy-worker
+if [ -d "$AGY_SRC" ]; then
+  while IFS= read -r -d '' f; do
+    name=$(basename "$f")
+    [ "$name" != allowed-remotes.txt ] || continue
+    install_file "$f" "$AGY_DST/$name" "$([ "$name" = agy_worker.py ] && echo 755 || echo 644)"
+  done < <(find "$AGY_SRC" -maxdepth 1 -type f -print0)
+  if [ ! -e "$AGY_DST/allowed-remotes.txt" ]; then
+    install_file "$AGY_SRC/allowed-remotes.txt" "$AGY_DST/allowed-remotes.txt"
+  elif ! cmp -s "$AGY_SRC/allowed-remotes.txt" "$AGY_DST/allowed-remotes.txt"; then
+    echo "note: $AGY_DST/allowed-remotes.txt differs from the bundle's, keeping this machine's allowlist"
+  fi
+fi
 install_file "$HERE/codex/AGENTS.md" "$HOME/.codex/AGENTS.md"
 for f in export.sh install.sh README.md retire.json; do
   [ -f "$HERE/$f" ] || continue
@@ -119,6 +144,7 @@ if not os.path.exists(settings_path):
 settings = json.load(open(settings_path))
 dropped = []
 for dotted, names in spec.get("settings", {}).items():
+    names = [name.replace("__HOME__", home) for name in names]
     node = settings
     for part in dotted.split("."):
         node = node.get(part) if isinstance(node, dict) else None
@@ -141,16 +167,47 @@ if dropped:
 PY
 fi
 
-VENV=$HOME/.claude/mcp/codex-worker/.venv
-REQ=$HOME/.claude/mcp/codex-worker/requirements.txt
-if [ ! -x "$VENV/bin/python" ] || ! cmp -s "$REQ" "$VENV/.installed-requirements" 2>/dev/null; then
-  echo "building venv: $VENV"
-  if python3 -m venv "$VENV" 2>/dev/null && "$VENV/bin/pip" install -q -r "$REQ"; then :
-  elif command -v uv >/dev/null; then uv venv -q "$VENV" && uv pip install -q --python "$VENV/bin/python" -r "$REQ"
-  else echo "could not build the venv (python3 -m venv failed and uv is missing)"; exit 1; fi
-  cp "$REQ" "$VENV/.installed-requirements"
+build_venv() {
+  local server=$1 venv marker req
+  shift
+  venv=$HOME/.claude/mcp/$server/.venv
+  marker=$(mktemp)
+  cat "$@" > "$marker"
+  local args=()
+  for req in "$@"; do args+=(-r "$req"); done
+  if [ ! -x "$venv/bin/python" ] || ! cmp -s "$marker" "$venv/.installed-requirements" 2>/dev/null; then
+    echo "building venv: $venv"
+    if python3 -m venv "$venv" 2>/dev/null && "$venv/bin/pip" install -q "${args[@]}"; then :
+    elif command -v uv >/dev/null; then uv venv -q "$venv" && uv pip install -q --python "$venv/bin/python" "${args[@]}"
+    else echo "could not build the venv (python3 -m venv failed and uv is missing)"; exit 1; fi
+    cp "$marker" "$venv/.installed-requirements"
+  fi
+  rm -f "$marker"
+  "$venv/bin/python" -c "import mcp" || { echo "venv is missing the mcp package"; exit 1; }
+}
+CODEX_MCP_DIR=$HOME/.claude/mcp/codex-worker
+build_venv codex-worker "$CODEX_MCP_DIR/requirements.txt"
+if [ -d "$AGY_SRC" ] && [ "$AGY_PYTHON_OK" = 0 ]; then
+  echo "WARNING: python3 is older than 3.12, skipping agy-worker (venv and registration)"
+elif [ -d "$AGY_SRC" ]; then
+  build_venv agy-worker "$AGY_DST/requirements.txt" "$AGY_DST/requirements-dev.txt"
 fi
-"$VENV/bin/python" -c "import mcp" || { echo "venv is missing the mcp package"; exit 1; }
+
+warn_agy_prerequisites() {
+  local tool missing=()
+  if [ "$AGY_BIN_MISSING" = 1 ]; then
+    echo "WARNING: agy is not on PATH, falling back to $AGY_BIN in the registration"
+    echo "  install: curl -fsSL https://antigravity.google/cli/install.sh | bash, then run agy once to sign in"
+  fi
+  for tool in bwrap xdg-dbus-proxy; do
+    [ -e "/usr/bin/$tool" ] || echo "WARNING: /usr/bin/$tool not found, the agy-worker sandbox cannot start (apt install bubblewrap xdg-dbus-proxy)"
+  done
+  for tool in pdfinfo pdfseparate pdfunite; do command -v "$tool" >/dev/null || missing+=("$tool"); done
+  if [ "${#missing[@]}" != 0 ]; then
+    echo "WARNING: pdfinfo, pdfseparate or pdfunite not found, the PDF tools of agy-worker are off (apt install poppler-utils)"
+  fi
+}
+[ ! -d "$AGY_SRC" ] || warn_agy_prerequisites
 
 ensure_tool() {
   local tool=$1 consequence=$2
@@ -208,26 +265,57 @@ else:
 PY
 rm -f "$RENDERED_SETTINGS"
 
-MCP_JSON=$(render "$HERE/claude/mcp-servers.json" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["mcpServers"]["codex-worker"]))')
-CURRENT=$(python3 -c 'import json,os,sys; p=os.path.expanduser("~/.claude.json"); d=json.load(open(p)) if os.path.exists(p) else {}; print(json.dumps(d.get("mcpServers",{}).get("codex-worker")))')
-if [ "$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]),sort_keys=True))' "$MCP_JSON")" = "$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]),sort_keys=True))' "$CURRENT")" ]; then
-  echo "~/.claude.json: codex-worker already registered"
-else
+warn_missing_hook_interpreters() {
+  [ -f "$SETTINGS" ] || return 0
+  python3 - "$SETTINGS" <<'PY'
+import json, os, sys
+
+seen = set()
+for entries in json.load(open(sys.argv[1])).get("hooks", {}).values():
+    for entry in entries:
+        for hook in entry.get("hooks", []):
+            words = hook.get("command", "").split()
+            if not words or not words[0].startswith("/") or os.path.exists(words[0]) or words[0] in seen:
+                continue
+            seen.add(words[0])
+            script = next((os.path.basename(w) for w in words if w.endswith(".py")), hook["command"])
+            print(f"WARNING: hook interpreter {words[0]} does not exist ({script}), that hook will not run")
+PY
+}
+warn_missing_hook_interpreters
+
+canonical_json() { python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]),sort_keys=True))' "$1"; }
+backup_claude_json_once() {
+  [ "$CLAUDE_JSON_BACKED_UP" = 0 ] || return 0
   backup "$HOME/.claude.json"
+  CLAUDE_JSON_BACKED_UP=1
+}
+RENDERED_MCP=$(mktemp)
+render "$HERE/claude/mcp-servers.json" > "$RENDERED_MCP"
+while IFS= read -r server; do
+  if [ "$server" = agy-worker ] && [ "$AGY_PYTHON_OK" = 0 ]; then continue; fi
+  MCP_JSON=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["mcpServers"][sys.argv[2]]))' "$RENDERED_MCP" "$server")
+  CURRENT=$(python3 -c 'import json,os,sys; p=os.path.expanduser("~/.claude.json"); d=json.load(open(p)) if os.path.exists(p) else {}; print(json.dumps(d.get("mcpServers",{}).get(sys.argv[1])))' "$server")
+  if [ "$(canonical_json "$MCP_JSON")" = "$(canonical_json "$CURRENT")" ]; then
+    echo "~/.claude.json: $server already registered"
+    continue
+  fi
+  backup_claude_json_once
   if command -v claude >/dev/null; then
-    claude mcp remove codex-worker -s user >/dev/null 2>&1 || true
-    claude mcp add-json codex-worker "$MCP_JSON" -s user
+    claude mcp remove "$server" -s user >/dev/null 2>&1 || true
+    claude mcp add-json "$server" "$MCP_JSON" -s user
   else
-    python3 - "$MCP_JSON" <<'PY'
+    python3 - "$server" "$MCP_JSON" <<'PY'
 import json, os, sys
 p = os.path.expanduser("~/.claude.json")
 d = json.load(open(p)) if os.path.exists(p) else {}
-d.setdefault("mcpServers", {})["codex-worker"] = json.loads(sys.argv[1])
+d.setdefault("mcpServers", {})[sys.argv[1]] = json.loads(sys.argv[2])
 json.dump(d, open(p, "w"), indent=2)
-print("~/.claude.json: codex-worker registered (python merge; claude CLI not on PATH)")
+print(f"~/.claude.json: {sys.argv[1]} registered (python merge; claude CLI not on PATH)")
 PY
   fi
-fi
+done < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["mcpServers"]))' "$RENDERED_MCP")
+rm -f "$RENDERED_MCP"
 
 CODEX_CFG=$HOME/.codex/config.toml
 if [ -e "$CODEX_CFG" ] && grep -q '^\[mcp_servers.codex-worker\]' "$CODEX_CFG"; then
@@ -249,9 +337,10 @@ echo
 echo "done. files changed: $CHANGED$( [ -d "$BACKUP" ] && echo "; backups in $BACKUP" )"
 echo "next:"
 echo "  - restart Claude Code (agents, hooks and MCP servers load at session start)"
-echo "  - claude mcp list            -> codex-worker must show Connected"
+echo "  - claude mcp list            -> codex-worker and agy-worker must show Connected"
 echo '  - for t in tdd-guard comment-guard lint-guard bash-write-guard git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
-echo '  - ~/.claude/mcp/codex-worker/.venv/bin/python ~/.claude/mcp/codex-worker/codex_worker_test.py'
+echo '  - cd ~/.claude/mcp/agy-worker && .venv/bin/python -m pytest -q'
+echo '  - cd ~/.claude/mcp/codex-worker && ../agy-worker/.venv/bin/python -m pytest -q test_codex_worker.py'
 echo "  - bash ~/.claude/bin/verify-test.sh"
 echo "  - bash ~/.claude/bin/review-checkpoint-test.sh"
 echo "  - bash ~/.claude/bin/feature-worktree-test.sh"

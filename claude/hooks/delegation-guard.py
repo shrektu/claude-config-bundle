@@ -6,7 +6,7 @@ import re
 import sys
 from typing import Callable, NamedTuple
 
-IMPLEMENTER_TYPES = ("implementer", "implementer-strong")
+IMPLEMENTER_TYPES = ("implementer",)
 ACCEPTANCE_MARKERS = ("acceptance_criteria", "acceptance criteria")
 VERIFY_MARKER = "verify --"
 REPO_BOUNDARY_MARKERS = (

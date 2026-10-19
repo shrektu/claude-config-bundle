@@ -8,11 +8,14 @@
       "Bash(git log*)",
       "Agent(codex-runner)",
       "Agent(implementer)",
-      "Agent(implementer-strong)",
+      "Agent(reviewer-opus)",
+      "Agent(flash-review-runner)",
+      "Agent(writer)",
+      "Agent(plan-gate-runner)",
       "mcp__codex-worker__*",
+      "mcp__agy-worker__*",
       "Bash(python3 __HOME__/.claude/hooks/*)",
-      "Edit(/__HOME__/.claude/hooks/**)",
-      "Write(/__HOME__/.claude/hooks/**)"
+      "Edit(/__HOME__/.claude/hooks/**)"
     ],
     "deny": [
       "Bash(codex *)"

@@ -7877,14 +7877,18 @@ MISSING_IMPORT = (
 )
 
 
-def make_venv_with_untyped_library(repo: Path) -> None:
+def make_venv(repo: Path) -> Path:
     write(repo, ".gitignore", ".venv/\n")
     subprocess.run(
         [sys.executable, "-m", "venv", "--without-pip", str(repo / ".venv")],
         check=True,
         timeout=60,
     )
-    site = next((repo / ".venv/lib").glob("python*/site-packages"))
+    return next((repo / ".venv/lib").glob("python*/site-packages"))
+
+
+def make_venv_with_untyped_library(repo: Path) -> None:
+    site = make_venv(repo)
     (site / "untypedlib").mkdir()
     (site / "untypedlib/__init__.py").write_text(UNTYPED_LIBRARY)
 
@@ -7906,6 +7910,21 @@ DUPLICATE_PACKAGE_TEST = (
     '"""Test."""\n\nfrom tests.x.helper import VALUE\n\nVALUE\n'
 )
 DUPLICATE_HELPER_PATH = "services/app/tests/x/helper.py"
+
+
+@NEEDS_UVX
+def test_mypy_runs_when_project_dir_has_a_mypy_directory(
+    repo: Path, log_dir: Path
+) -> None:
+    make_venv(repo)
+    write(repo, "services/svc/pyproject.toml", SUBPROJECT_PYPROJECT)
+    write(repo, "services/svc/mypy/override.ini", "[mypy]\n")
+    write(repo, "services/svc/pkg/b.py", '"""B."""\n\nVALUE: int = "x"\n')
+
+    run = lint(repo, log_dir, "--json", extra_env=REAL_MYPY)
+
+    assert ("services/svc/pkg/b.py", "mypy") not in not_checked_reasons(run)
+    assert ("services/svc/pkg/b.py", 3, "mypy:assignment") in mypy_rules(run)
 
 
 @NEEDS_UVX

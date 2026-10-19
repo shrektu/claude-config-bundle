@@ -101,21 +101,20 @@ deny = [
     },
     {"model": "sonnet", "prompt": "do it without naming an agent"},
     {"model": "opus", "prompt": FULL},
-    {"subagent_type": STRONG_AGENT, "prompt": "just fix the bug please"},
-    {
-        "subagent_type": STRONG_AGENT,
-        "prompt": without("acceptance_criteria: the matrix passes.\n"),
-    },
-    {"subagent_type": STRONG_AGENT, "prompt": without(GIT_SAFETY + "\n")},
-    {"subagent_type": STRONG_AGENT, "prompt": without("class: M\n")},
     {"subagent_type": AGENT, "prompt": without(REUSE_LINE)},
-    {"subagent_type": STRONG_AGENT, "prompt": without(REUSE_LINE)},
     {
         "subagent_type": AGENT,
         "prompt": without(REUSE_LINE, PROSE_FINDINGS_LINE),
     },
 ]
 allow = [
+    {"subagent_type": STRONG_AGENT, "prompt": "just fix the bug please"},
+    {
+        "subagent_type": STRONG_AGENT,
+        "prompt": without("acceptance_criteria: the matrix passes.\n"),
+    },
+    {"subagent_type": STRONG_AGENT, "prompt": without(GIT_SAFETY + "\n")},
+    {"subagent_type": STRONG_AGENT, "prompt": without(REUSE_LINE)},
     {"subagent_type": AGENT, "prompt": FULL},
     {"subagent_type": AGENT, "prompt": FIX_ROUND},
     {"subagent_type": STRONG_AGENT, "prompt": FULL},
@@ -277,11 +276,7 @@ if not spot3:
     print(f"SPOT3 FAIL -> {out[:200]}")
 
 rc, out, err = run({"subagent_type": STRONG_AGENT, "prompt": "fix it"})
-spot4 = (
-    '"deny"' in out
-    and f"`{STRONG_AGENT}`" in out
-    and "acceptance_criteria" in out
-)
+spot4 = rc == 0 and out == ""
 bad += not spot4
 if not spot4:
     print(f"SPOT4 FAIL -> {out[:300]}")

@@ -242,8 +242,9 @@ UVX_TOOL = "uvx"
 UVX_PYTHON_OPTION = "--python"
 SYSTEM_PYTHON = "python3"
 VENV_PYTHON = Path(".venv") / "bin" / "python"
-MYPY_IMPORT_PROBE = ("-c", "import mypy")
-MYPY_MODULE_ARGUMENTS = ("-m", MYPY_TOOL)
+PYTHON_SAFE_PATH_OPTION = "-P"
+MYPY_IMPORT_PROBE = (PYTHON_SAFE_PATH_OPTION, "-c", "import mypy")
+MYPY_MODULE_ARGUMENTS = (PYTHON_SAFE_PATH_OPTION, "-m", MYPY_TOOL)
 PYTHON_EXECUTABLE_OPTION = "--python-executable"
 MYPY_OPTIONS = (
     "--strict",

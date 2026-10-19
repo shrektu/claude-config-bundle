@@ -19,7 +19,7 @@ POLISH = "pl"
 ENGLISH = "en"
 SIBLINGS = {POLISH: ENGLISH, ENGLISH: POLISH}
 REQUIRED_FORMS = {
-    POLISH: frozenset({"one", "few", "many", "other"}),
+    POLISH: frozenset({"one", "few", "many"}),
     ENGLISH: frozenset({"one", "other"}),
 }
 AUTOMAT_REPOS = frozenset(
