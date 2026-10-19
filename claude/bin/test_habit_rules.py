@@ -856,6 +856,15 @@ def test_complete_plural_family_is_not_hab023() -> None:
     assert locale_codes(EN, EN_FAMILY, sibling_text=PL_FAMILY) == []
 
 
+def test_polish_family_without_other_is_not_hab023() -> None:
+    text = (
+        '{\n  "k_one": "{{count}} a",\n  "k_few": "{{count}} b",\n'
+        '  "k_many": "{{count}} c"\n}\n'
+    )
+
+    assert locale_codes(PL, text, sibling_text=EN_FAMILY) == []
+
+
 def test_hab023_flags_every_entry_of_an_incomplete_family() -> None:
     text = '{\n  "k_one": "{{count}} a",\n  "k_other": "{{count}} b"\n}\n'
 

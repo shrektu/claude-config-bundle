@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Szablon promptu dla `implementer` i `implementer-strong`, runda poprawek i eskalacja. Załaduj, gdy spawnujesz implementera i nie napiszesz promptu z pamięci, albo gdy delegation-guard odrzuci spawn.
+description: Spawn prompt template for `implementer` and the fix round. Load when you spawn an implementer and cannot write the prompt from memory, or when delegation-guard rejects a spawn.
 ---
 
 ## Before the spawn
@@ -64,7 +64,7 @@ rules
   annotation, docstring, import)
 - zero comments in the code you write
 - batch independent tool calls in one message; the round trips cost far more than the commands
-- do not create branches, commit, or push (the orchestrator commits after review)
+- do not create branches, commit, or push (the orchestrator commits after the final review)
 
 Never revert or discard changes you did not make (checkout/restore/stash/reset/clean are blocked by a hook); if you think a revert is needed, stop and report.
 
@@ -80,46 +80,37 @@ checks NOT run and why, versions/idioms verified against (from repo-facts), gate
 ```
 
 For L/XL hand over ONE milestone per spawn or SendMessage; a milestone that depends on another waits
-until that one has landed. Independent milestones run at the same time, each in its own worktree — skill
-`rownolegle` (project path = the worktree, `Repos:` = that worktree only).
+until that one has landed. Independent milestones run at the same time, each in its own worktree, with
+no limit on their number — skill `parallel` (project path = the worktree, `Repos:` = that worktree only).
 
 ## Fix round
 
-SendMessage to the implementer that did the work — its context is intact — with all verified findings of
-the round: the defect, file:line, how you reproduced it. Every finding requires its own regression test
-named after the bug, unit AND integration against mocks/fakes of the external boundaries, red without
-the fix — say so explicitly. Spawn a fresh implementer (with a `findings` section in place of
-`tdd_phases`) only when the old one is gone or has drifted.
-
-## Escalation: `implementer-strong`
-
-Three fix rounds without progress on the same finding, before anything is declared **Zablokowane**:
-one attempt by `implementer-strong` — Codex gpt-6.1-sol at effort medium, through `codex_implement`
-(workspace-write sandbox, no network). Same delegation template and fields (delegation-guard checks
-them), plus a `history` section: the finding, the three rounds' attempts and why each failed, the
-progress log path. The tool returns a snapshot (HEAD sha + tree sha of the pre-run working tree):
-note it in the progress log — `git read-tree` / `git checkout-index` from that tree recovers anything
-Codex damaged. Codex's edits bypass the edit-time hooks (comment-guard, tdd-guard), so its round gets
-the full review, not a checkpoint diff: comments and docstrings checked by reading, RED logs opened,
-lint-strict before the commit as always, and the advisory `ai-review-gate` in your round. Still no progress after it → STOP,
-**Zablokowane**, with both implementers' evidence.
+All real findings of the trio go back in ONE round, after you committed the milestone. SendMessage to
+the implementer that did the work — its context is intact — with all verified findings (Codex, Opus,
+Flash): the defect, file:line, how you reproduced it. Every finding requires its own regression test named
+after the bug, unit AND integration against mocks/fakes of the external boundaries, red without the fix
+— say so explicitly. The implementer leaves the changes uncommitted; you verify them and commit them as
+`git commit --fixup=<milestone sha>`. A finding whose fix does not hold (its regression test or the fix
+diff shows it) goes back in the next round. Spawn a fresh implementer (with a `findings` section in place
+of `tdd_phases`) only when the old one is gone or has drifted. Three rounds without progress on the same
+finding end in **Zablokowane**, with the evidence — there is no escalation to another implementer.
 
 ## Final check
 
-Once your own review is clean, run the end test run once (CLAUDE.md, Rules "Test runs"): the tests
-covering the changed modules, the acceptance tests and lint on the changed files through `verify`; the
-full suite and the build only for XL or shared code. A failing test is run once on the target branch
-before it counts as a regression. The Codex code gate already ran with review round 1; if later rounds
-changed code, its delta run goes in parallel with this end run (CLAUDE.md step 8a).
+The end test run (CLAUDE.md, Rules "Test runs") runs in parallel with the final trio and once more on
+the fixed state after the fix round: the tests covering the changed modules, the acceptance tests, lint
+on the changed files and the acceptance scenario; the full suite and the build only for XL or shared
+code. A failing test is run once on the target branch before it counts as a regression. A delta trio
+(`diff_base` = the milestone commit) runs only under the conditions in the `review` skill.
 
-## review_focus per class (your own review)
+## review_focus per class (final trio)
 
 | Class | Focus |
 |---|---|
 | S | the one behaviour that changed, its red test, and whether anything else was touched |
 | M | plan conformance, acceptance criteria evidence, meaningful tests, callers and signatures |
 | L | module boundaries, integration tests against the fakes, perf and typing claims, regressions in every caller |
-| XL | the risk area itself: migration and rollback, on-wire/protocol compatibility, concurrency and ISR paths, auth and tenancy, irreversible steps — plus a final pass asking only what the earlier rounds missed |
+| XL | the risk area itself: migration and rollback, on-wire/protocol compatibility, concurrency and ISR paths, auth and tenancy, irreversible steps |
 
 ## Explore first?
 

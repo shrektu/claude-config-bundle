@@ -1,135 +1,155 @@
 ---
 name: task
-description: Jedno zadanie z Jiry od ID do otwartego PR-a. Załaduj, gdy Sebastian pisze /task z ID zadania (np. /task TICKET-1274) albo prosi o zrobienie konkretnego ticketa z Jiry.
+description: One Jira task from ID to an open PR. Load when Sebastian writes /task with a task ID (e.g. /task TICKET-1274) or asks you to do a specific Jira ticket.
 ---
 
-Wejście: jedno ID zadania (`TICKET-1274`). Bez ID — zapytaj, nie zgaduj z gałęzi.
+Input: one task ID (`TICKET-1274`). Without an ID, ask — do not guess from the branch.
 
-Ten skill jest procedurą, nie drugim zbiorem zasad: klasy zadań, delegacja, review i commity
-działają dokładnie tak, jak opisuje `~/.claude/CLAUDE.md`. Tutaj jest tylko to, co dochodzi
-specyficznie dla zadania z Jiry: skąd wziąć zakres, jak przetestować i jak otworzyć PR-a.
+This skill is a procedure, not a second set of rules: task classes, delegation, review and commits work
+exactly as `~/.claude/CLAUDE.md` describes. Here is only what is specific to a Jira task: where the scope
+comes from, how to test, and how to open the PR.
 
-## 1. Ticket jest źródłem zakresu
+## 1. The ticket is the source of scope
 
 `getJiraIssue` (Atlassian MCP), cloudId `00000000-0000-0000-0000-000000000000`, site `example.atlassian.net`,
-`responseContentFormat: markdown`. Przeczytaj też epik-rodzica i zadania powiązane (`issuelinks`) — one
-mówią, na czym to zadanie stoi i co po nim idzie. Opis w Jirze wygrywa z Twoją interpretacją tytułu;
-sprzeczność między ticketem a kodem jest pytaniem do Sebastiana, nie miejscem na własną decyzję.
+`responseContentFormat: markdown`. Read the parent epic and the linked tasks (`issuelinks`) too — they
+say what this task builds on and what comes after it. The Jira description wins over your interpretation
+of the title; a conflict between the ticket and the code is a question for Sebastian, not room for your
+own decision.
 
-Z ticketu wyciągnij: co ma działać po zmianie, których repozytoriów dotyka, czy rusza UI, czy rusza
-dane/protokół/migracje (to podbija klasę do XL wg tabeli w CLAUDE.md).
+From the ticket extract: what must work after the change, which repositories it touches, whether it
+touches the UI, whether it touches data/protocol/migrations (that raises the class to XL per the table in
+CLAUDE.md).
 
-## 2. Repozytoria i gałąź
+## 2. Repositories and branch
 
-Zadania w tym projekcie regularnie dotykają wielu repozytoriów naraz — nie zakładaj jednego. Gdy nie
-widać z ticketu, gdzie leży kod, wyślij `Explore`, zanim cokolwiek zaplanujesz.
+Tasks in this project regularly touch several repositories at once — do not assume one. When the ticket
+does not show where the code lives, send `Explore` before you plan anything.
 
-Gałąź: `feature/<ID>-<krótki-slug>` z `develop` (hotfix z `master`), ta sama nazwa we wszystkich repo
-zadania. Gdy zadanie stoi na innym niepozmergowanym zadaniu, bazą jest gałąź tamtego zadania, nie
-`develop` — wtedy PR celuje w tamtą gałąź. Jeśli checkout Sebastiana stoi na innej gałęzi albo ma
-niezacommitowaną pracę, pracuj w worktree (`__HOME__/projects/cloud/.worktrees/<repo>-<ID>`),
-nigdy przez `checkout` w jego katalogu.
+Branch: `feature/<ID>-<short-slug>` from `develop` (hotfix from `master`), the same name in every repo of
+the task. When the task stands on another unmerged task, the base is that task's branch, not `develop` —
+and the PR targets that branch. If Sebastian's checkout is on another branch or has uncommitted work,
+work in a worktree (`__HOME__/projects/cloud/.worktrees/<repo>-<ID>`), never by `checkout` in his
+directory.
 
 ## 3. Workflow
 
-Plan i klasa w jednej turze. W planie sekcja `reuse`: zanim cokolwiek zaprojektujesz, grepnij repo i
-biblioteki wspólne (albo zapytaj LSP o referencje) i wypisz istniejące helpery, typy, stałe, komponenty i
-fixture'y z file:line, na których milestone ma się oprzeć. Potem wszystko jak w CLAUDE.md: implementację robi `implementer` (Sonnet 5.5,
-effort medium), każdą rundę sprawdzasz i testujesz sam, poprawki jedną paczką na rundę przez
-SendMessage, bez linterów w review; bramki Codexa (`codex-runner`, mode plan przed implementacją L/XL, a dla M równolegle z fazą testów akceptacyjnych implementera — S jej nie ma — i mode code przed każdym commitem) jak w CLAUDE.md. Commity
-milestone'owe, wiadomość: jedno zdanie w trybie rozkazującym, max 7 słów, bez trailerów. Nic tu nie jest wyjątkiem od tamtych reguł.
-Zadanie L/XL z co najmniej dwoma niezależnymi milestone'ami: graf w planie i równoległe worktree wg skilla `rownolegle`.
+Plan and class in one turn. The plan has a `reuse` section: before you design anything, grep the repo and
+the shared libraries (or ask the LSP for references) and list the existing helpers, types, constants,
+components and fixtures, with file:line, that the milestone must build on. Then everything as in
+CLAUDE.md: the `implementer` (Sonnet 5.5, effort medium) does the implementation; during a milestone you
+check evidence only (git status, RED and verify logs), never the diff; the plan gate
+(`plan-gate-runner`: Gemini 3.8 Flash, Codex as fallback — before implementation for L/XL, and for M in
+parallel with the implementer's acceptance-test phase; S has none); the final review once per milestone —
+`codex-runner` (mode code), `reviewer-opus` and `flash-review-runner` in one message, with your end test
+run in parallel (`review_focus` and `acceptance_criteria` as text, never as paths outside the repo);
+every finding reproduced, then the milestone is committed and all real findings go back in ONE fix round
+via SendMessage; a finding whose fix does not hold goes back in the next round, three rounds without
+progress mean Zablokowane. The fix round lands as `git commit --fixup=<milestone sha>`, a delta trio
+(`diff_base` = the milestone commit) only under the conditions in the `review` skill, the end test run
+repeats on the fixed state, and you autosquash before the report and the PR. Milestone commits, message: one sentence in the
+imperative, at most 7 words, no trailers. Nothing here is an exception to those rules. A task of class
+L/XL with at least two independent milestones: the graph goes in the plan and the milestones run in
+parallel worktrees per the `parallel` skill, with no limit on the number of implementers.
 
-## 4. Testy — to jest bramka do PR-a
+Everything you publish (PR description, Jira text, Bitbucket comments, UI texts) is Polish by default and
+ends with the footer `🤖 Wygenerowane przez <model>` per CLAUDE.md; UI strings and translations go
+through the `ui-texts` skill.
 
-PR powstaje dopiero, gdy **każdy oczekiwany rezultat z ticketu ma wykonywalny dowód**, a oba poziomy
-testów są zielone. Nie „testy przeszły", tylko „funkcjonalność robi to, co ticket obiecał".
+## 4. Tests — this is the gate to the PR
 
-### 4a. Macierz pokrycia
+The PR is created only when **every expected result from the ticket has executable proof** and both test
+levels are green. Not "the tests passed", but "the functionality does what the ticket promised".
 
-Zanim uruchomisz cokolwiek, rozpisz z opisu i kryteriów akceptacji w Jirze listę oczekiwanych
-zachowań — jeden wiersz na zachowanie, słowami z ticketu, nie Twoją parafrazą. Pod nimi osobne
-wiersze na scenariusze błędów z planu (puste, granica, współbieżność, uprawnienia, strefa czasowa…) —
-każdy z nazwanym testem; scenariusz, którego ticket nie rozstrzyga, idzie od razu do Sebastiana jako
-NIEJASNE, nie jako Twoja decyzja. Do każdego wiersza
-dopisujesz konkretny dowód: nazwa testu jednostkowego, scenariusz integracyjny albo (dla wierszy
-czysto wizualnych) zrzut ekranu — **i ścieżkę logu czerwonego przebiegu**, tego, w którym ten test padał
-przed zmianą (`~/.claude/bin/verify --repo <repo> -- '<komenda>'`, wpis `red` w
-`~/.cache/claude-verify/ledger.jsonl`). Wiersz bez ścieżki logu RED jest deklaracją, nie dowodem;
-przebieg, który się wysypał (błąd importu, błąd zbierania, literówka w komendzie) nie jest czerwony. Wiersz bez dowodu ma dwie możliwe przyczyny i obie mają akcję:
-brakuje testu — dopisz go; brakuje implementacji — wraca do pętli poprawek. **Żadnego wiersza nie
-zamykasz zdaniem „kod wygląda poprawnie"** ani jednorazową obserwacją, której nie da się powtórzyć.
+### 4a. Coverage matrix
 
-„Pokryte w 100%" znaczy tu: każdy oczekiwany rezultat ma dowód — nie procent pokrycia linii. Te dwie
-rzeczy potrafią się mijać w obie strony i mylenie ich jest właśnie tym, co przepuszcza defekty.
+Before you run anything, list the expected behaviours from the Jira description and acceptance
+criteria — one row per behaviour, in the ticket's words, not your paraphrase. Below them, separate rows
+for the error scenarios of the plan (empty, boundary, concurrency, permissions, timezone…) — each with a
+named test; a scenario the ticket does not settle goes straight to Sebastian as NIEJASNE, not as your
+decision. Next to every row you write concrete evidence: the name of a unit test, an integration scenario
+or (for purely visual rows) a screenshot — **and the path of the red run's log**, the one in which this
+test failed before the change (`~/.claude/bin/verify --repo <repo> -- '<command>'`, a `red` entry in
+`~/.cache/claude-verify/ledger.jsonl`). A row without a RED log path is a declaration, not evidence; a
+run that errored out (import error, collection error, a typo in the command) is not red. A row without
+evidence has two possible causes and both have an action: a test is missing — write it; the
+implementation is missing — it goes back to the fix round. **You never close a row with "the code looks
+correct"** or with a one-off observation that cannot be repeated.
 
-### 4b. Uruchomienie
+"100% covered" means here: every expected result has evidence — not a line-coverage percentage. The two
+can diverge in both directions, and confusing them is exactly what lets defects through.
 
-Obie komendy przez `~/.claude/bin/verify`:
+### 4b. Running
 
-- **jednostkowe** — testy modułów, które ruszyłeś (ich pliki testowe i testy bezpośrednich wywołujących), raz, na końcu; pełny zestaw repo tylko dla XL albo zmian we wspólnym kodzie (CLAUDE.md, Rules „Test runs”);
-- **integracyjne** — na postawionym minimalnym stacku: `docker compose -f docker-compose.minimal.yml
-  up -d --build <serwis>` w `__HOME__/projects/cloud/cloud-platform-dev`, dane testowe wstawiasz
-  SQL-em przez `... exec -T db psql -U exa_db -d exa_db` i **sprzątasz je po sobie**.
+Both commands through `~/.claude/bin/verify`:
 
-### 4c. Dowód musi być dowodem
+- **unit** — the tests of the modules you touched (their test files and the tests of their direct
+  callers), once, at the end; the full repo suite only for XL or changes to shared code (CLAUDE.md, Rules
+  "Test runs");
+- **integration** — on a minimal stack brought up: `docker compose -f docker-compose.minimal.yml
+  up -d --build <service>` in `__HOME__/projects/cloud/cloud-platform-dev`, test data inserted with
+  SQL through `... exec -T db psql -U exa_db -d exa_db` and **cleaned up after yourself**.
 
-Każdy test, którym zamykasz wiersz macierzy, **musi być czerwony bez Twojej zmiany** — zmutuj kod
-produkcyjny albo cofnij zmianę i zobacz, że test pada. I sprawdź, że mutacja rzeczywiście się przyjęła:
-w tym projekcie zdarzyło się dwa razy, że mutacja nie dopasowała się do kodu, a zielony przebieg nie
-znaczył nic. Test, który przechodzi, bo mockuje właśnie tę wiązkę, którą zmieniłeś, nie jest dowodem.
+### 4c. Evidence must be evidence
 
-Pamięć `reports-epic-progress` wymienia klasy defektów, które w tym projekcie przechodziły przez zielone
-testy — kolejność walidacji w marshmallow, inner join po nullowalnym FK, SQLite ukrywający PostgreSQL,
-mockowe fixture'y podmieniające właśnie sprawdzaną wiązkę. Przejdź tę listę, zanim uznasz zielone za
-koniec.
+Every test that closes a matrix row **must be red without your change** — mutate the production code or
+revert the change and see the test fail. And check that the mutation actually applied: in this project a
+mutation twice failed to match the code and a green run meant nothing. A test that passes because it mocks
+exactly the seam you changed is not evidence.
 
-**Każdy bug znaleziony w review dostaje własny test regresyjny na obu poziomach:**
-jednostkowy oraz integracyjny na mockach/fake'ach granic zewnętrznych (sprzęt, magistrala, sieć, inne
-serwisy, zegar), nazwany od buga i czerwony bez poprawki. W macierzy pokrycia każdy taki bug ma osobny
-wiersz („bug: …”) z nazwami obu testów. Bez drugiego recenzenta to te testy, a nie kolejne rundy
-review, są dowodem, że bug nie wróci.
+The memory `reports-epic-progress` lists the classes of defects that went through green tests in this
+project — validation order in marshmallow, an inner join over a nullable FK, SQLite hiding PostgreSQL,
+mock fixtures replacing exactly the seam under test. Walk that list before you treat green as the end.
 
-### 4d. Czerwone wraca
+**Every bug found in the final review gets its own regression test on both levels:** a unit test and an
+integration test on mocks/fakes of the external boundaries (hardware, bus, network, other services,
+clock), named after the bug and red without the fix. In the coverage matrix each such bug has its own row
+("bug: …") with the names of both tests. Without a second human reviewer, those tests — not more review
+rounds — are the proof that the bug will not return.
 
-Każda czerwona pozycja i każdy niepokryty wiersz wracają do pętli poprawek (limity z CLAUDE.md
-obowiązują: 3 rundy poprawek bez postępu na tym samym findingu → eskalacja). Nie ma PR-a z pominiętym testem, z wierszem bez dowodu ani z dowodem, którego
-nie przebiegłeś po ostatniej zmianie kodu. Macierz idzie do raportu końcowego w całości.
+### 4d. Red goes back
 
-### 4e. QA — trudne scenariusze e2e
+Every red item and every uncovered row goes back to the fix round (the limits from CLAUDE.md apply: 3
+fix rounds without progress on the same finding → **Zablokowane**). There is no PR with a skipped test,
+a row without evidence, or evidence you did not run after the last code change. The matrix goes into the
+final report in full.
 
-Gdy macierz jest zielona, załaduj skill `qa` z ID zadania. Testuje on końcowe commity gałęzi na
-izolowanym stacku i wymyśla scenariusze, których macierz nie ma. To bramka do PR-a na zasadach z punktu
-11 tamtego skilla: FAIL wraca do pętli poprawek jako finding, NIEJASNE czeka na Sebastiana, NIE
-URUCHOMIONY jest blokerem, a FAIL (zastany) idzie do `## Dodatkowy kontekst`. Każdy commit po
-przebiegu QA unieważnia jego wynik — przed PR-em pełny przebieg na końcowych SHA.
+### 4e. QA — hard e2e scenarios
 
-## 5. Zrzuty ekranu, gdy zmiana dotyka UI
+When the matrix is green, load the `qa` skill with the task ID. It tests the branch's final commits on an
+isolated stack and invents scenarios the matrix does not have. It is a gate to the PR under the rules of
+point 11 of that skill: FAIL goes back to the fix round as a finding, NIEJASNE waits for Sebastian, NIE
+URUCHOMIONY is a blocker, and FAIL (zastany) goes to `## Dodatkowy kontekst`. Every commit after a QA run
+invalidates its result — a full run on the final SHAs before the PR.
 
-„Nowe pole, zmieniony stan kontrolki, inna wyświetlana wartość" to też UI. Procedura jest w pamięciach
-`pr-screenshots-required` i `browser-check-login-rule`:
+## 5. Screenshots when the change touches the UI
 
-1. minimalny stack w górę, panel Browser na `http://localhost/`;
-2. wpisz e-mail (`admin@email.com`) i **poproś Sebastiana o jedno kliknięcie zalogowania** — hasła nie
-   wpisujesz nigdy, to twarda zasada, nie preferencja. To jedyny moment, w którym ten skill przerywa
-   pracę i czeka na człowieka; zbierz wszystkie takie prośby w jedną;
-3. dalej sterujesz sam: nawigacja, dane, zrzuty. Before/after zawsze, gdy zmieniasz coś, co już istniało.
+"A new field, a changed control state, a different displayed value" is UI too. The procedure is in the
+memories `pr-screenshots-required` and `browser-check-login-rule`:
 
-Wrzucenie zrzutu do PR-a (Bitbucket nie ma załączników do PR-ów — idzie przez downloads repozytorium):
+1. minimal stack up, Browser pane on `http://localhost/`;
+2. type the e-mail (`admin@email.com`) and **ask Sebastian for one click to log in** — you never type
+   the password, that is a hard rule, not a preference. This is the only moment this skill stops and
+   waits for a human; collect all such requests into one;
+3. from there you drive yourself: navigation, data, screenshots. Before/after whenever you change
+   something that already existed.
+
+Putting a screenshot into the PR (Bitbucket has no PR attachments — it goes through the repository's
+downloads):
 
 ```bash
 curl -s -u "$(cat ~/.config/bitbucket/credentials)" -X POST \
   "https://api.bitbucket.org/2.0/repositories/acme/<repo>/downloads" \
-  -F files=@<id-zadania>-<co-widac>.png
+  -F files=@<task-id>-<what-is-visible>.png
 ```
 
-Nazwa pliku zaczyna się od ID zadania — `downloads` to płaska przestrzeń nazw na całe repozytorium.
-W opisie linkujesz `https://bitbucket.org/acme/<repo>/downloads/<plik>.png`. Placeholder tylko wtedy,
-gdy stacku naprawdę nie da się postawić, i wtedy jedną linią piszesz dlaczego.
+The file name starts with the task ID — `downloads` is a flat namespace for the whole repository. In the
+description you link `https://bitbucket.org/acme/<repo>/downloads/<file>.png`. A placeholder only when
+the stack truly cannot be brought up, and then one line says why.
 
 ## 6. PR
 
-Push gałęzi, potem dla każdego repozytorium:
+Push the branch, then for each repository:
 
 ```bash
 curl -s -u "$(cat ~/.config/bitbucket/credentials)" -X POST \
@@ -138,23 +158,25 @@ curl -s -u "$(cat ~/.config/bitbucket/credentials)" -X POST \
       "destination": {"branch": {"name": ...}}, "description": ...}'
 ```
 
-PR powstaje **gotowy do review**, nie jako draft — testy przeszły, więc praca jest funkcjonalnie
-skończona, a `/bb` i tak omija drafty. Tytuł i opis z `pr-description` (`[ID] Krótki opis`, sekcje po
-polsku, `## Screenshots` z linkami z punktu 5). Przy wielu repozytoriach: tytuł `[MULTI][ID] …`, a
-wzajemne linki w `## Powiązane PR` dopisujesz **drugim** requestem `PUT`, bo numery PR-ów znasz dopiero
-po utworzeniu wszystkich — w `PUT` wysyłasz też `title`, inaczej Bitbucket go gubi.
+The PR is created **ready for review**, not as a draft — the tests passed, so the work is functionally
+finished, and `/bb` skips drafts anyway. Title and description from `pr-description` (`[ID] Short
+description`, sections in Polish, `## Screenshots` with the links from point 5), written by the `writer`
+agent in `publish` mode and ending with the footer `🤖 Wygenerowane przez <model>`. With several
+repositories: title `[MULTI][ID] …`, and the mutual links in `## Powiązane PR` go in with a **second**
+`PUT` request, because you only know the PR numbers after all of them are created — send the `title` in
+the `PUT` too, or Bitbucket drops it.
 
-Kolejność ma znaczenie: PR bazowy stosu przed tym, który na nim stoi; gdy zadanie wymaga kolejności
-wdrożenia (np. `common` przed konsumentami), napisz ją w `## Dodatkowy kontekst`.
+Order matters: the base PR of a stack before the one standing on it; when the task requires a deployment
+order (e.g. `common` before consumers), write it in `## Dodatkowy kontekst`.
 
-Statusu w Jirze nie ruszasz i nie komentujesz tam nic — to zostaje przy Sebastianie, chyba że poprosi.
+You do not touch the status in Jira and you comment nothing there — that stays with Sebastian unless he
+asks.
 
-## 7. Raport
+## 7. Report
 
-Format końcowy ze skilla `review`, plus: **macierz pokrycia z punktu 4a w całości** (oczekiwany rezultat
-→ dowód → wynik), **tabela scenariuszy QA z punktu 4e** z testowanymi SHA, link do każdego PR-a,
-linie `VERIFY` z obu poziomów testów, co pokazują zrzuty,
-ustalona kolejność merge'owania. Jeśli któryś wiersz zamknąłeś dowodem słabszym niż test (zrzut,
-obserwacja na stacku), powiedz to wprost przy tym wierszu — to jest informacja dla człowieka, który
-będzie to mergował. Bez PR-a status to **Zablokowane** z blokerem i decyzją, której potrzebujesz —
-nigdy „gotowe", żeby domknąć pętlę.
+The final format from the `review` skill, plus: **the coverage matrix from point 4a in full** (expected
+result → evidence → outcome), **the table of QA scenarios from point 4e** with the tested SHAs, a link to
+each PR, the `VERIFY` lines of both test levels, what the screenshots show, and the agreed merge order. If
+you closed a row with evidence weaker than a test (a screenshot, an observation on the stack), say so
+explicitly at that row — it is information for the human who will merge it. Without a PR the status is
+**Zablokowane** with the blocker and the decision you need — never "done" just to close the loop.

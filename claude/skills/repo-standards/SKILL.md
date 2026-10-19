@@ -1,6 +1,6 @@
 ---
 name: repo-standards
-description: Idiomy dla wersji przypiętych w repo i normy języka sprawdzane przez lint-strict. Preładowany w implementer; załaduj przy review idiomów albo przy ostrzeżeniach deprecation.
+description: Idioms for the versions pinned in the repo and the language norms lint-strict checks. Preloaded in implementer; load when reviewing idioms or on deprecation warnings.
 ---
 
 ## 1. Facts before code
@@ -22,7 +22,7 @@ with `installed == locked`:
 re-run repo-facts; a stale install is not evidence about the locked version. `git-source (unverified)`
 and `path=<dir>` never authorise the registry cache as oracle — read the actual source at that path.
 Then grep the oracle instead of recalling: signatures, exported names, the deprecation notes in the
-installed version. One grep beats three review rounds.
+installed version. One grep beats three fix rounds.
 
 ## 3. Current idiom vs legacy, per stack
 

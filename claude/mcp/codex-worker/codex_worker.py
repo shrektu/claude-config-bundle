@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import contextlib
-import json
 import os
 import subprocess
 import tempfile
@@ -19,7 +18,6 @@ STDERR_TAIL_LIMIT = 4000
 FINDINGS_LIMIT = 20000
 GIT_TIMEOUT_SECONDS = 30
 NO_INDEX_DIFFERENCES_EXIT = 1
-DETACHED_HEAD_EXIT = 1
 DEV_NULL = "/dev/null"
 GIT_OUTPUT_ENCODING = "utf-8"
 GIT_DECODE_ERRORS = "replace"
@@ -29,17 +27,7 @@ DEFAULT_CODEX_BIN = "codex"
 END_OF_OPTIONS = "--end-of-options"
 MISSING_CHANGE_ERROR = "ERROR: pass diff_base (preferred) or what_changed."
 
-IMPLEMENT_TIMEOUT_SECONDS = 3600
-IMPLEMENT_SANDBOX_MODE = "workspace-write"
-IMPLEMENT_NETWORK_OVERRIDE = "sandbox_workspace_write.network_access=false"
-WRITABLE_ROOTS_KEY = "sandbox_workspace_write.writable_roots"
-VERIFY_CACHE_PARTS = (".cache", "claude-verify")
-WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/", "test/")
-GIT_INDEX_FILE_ENV = "GIT_INDEX_FILE"
-TEMP_INDEX_NAME = "index"
 REVIEW_TASK = "review"
-IMPLEMENT_TASK = "implement run"
-DETACHED_HEAD = "[detached HEAD]"
 CODEX_NOT_FOUND_ERROR = (
     "ERROR: Codex CLI not found. "
     "Set CODEX_BIN to the absolute path from `command -v codex`."
@@ -58,36 +46,11 @@ class CodexProfile(NamedTuple):
 
 IGNORE_USER_CONFIG_FLAG = "--ignore-user-config"
 LOW_VERBOSITY_OVERRIDE = 'model_verbosity="low"'
-IMPLEMENT_PROFILE = CodexProfile(model="gpt-6.1-sol", reasoning_effort="medium")
-
-IMPLEMENT_PREAMBLE = """\
-You are Codex acting as the IMPLEMENTER for the plan below.
-Follow it; do not redesign it.
-
-Hard rules:
-- You are the implementer: edit files and run checks only. Never run a \
-git command that changes history, the index or the working tree beyond \
-your own file edits: no commit, add, stash, checkout, restore, reset, \
-clean, rebase, merge, push.
-- Write zero comments in code. Rename, extract a named function or name \
-the constant instead.
-- Python docstrings: one line, one sentence, at most 72 characters, \
-never a module docstring.
-- Never add a suppression (noqa, type: ignore, eslint-disable, NOLINT); \
-report the line instead.
-- Run every test, lint and build through \
-~/.claude/bin/verify --repo <repo> -- '<command>'; never a bare test \
-command.
-- Each TDD phase starts with a RED verify run of its new test, before \
-the production edit; keep its log path.
-- Stay inside the repo named below; touch nothing outside it.
-- Finish with a report under 60 lines: changed files, the RED verify log \
-path per phase, the verify summary lines, deviations and concerns."""
 
 
 MODE_PROFILES = {
     MODE_PLAN: CodexProfile(model="gpt-6.1-sol", reasoning_effort="high"),
-    MODE_CODE: CodexProfile(model="gpt-6.1-sol", reasoning_effort="high"),
+    MODE_CODE: CodexProfile(model="gpt-6.1-sol", reasoning_effort="medium"),
 }
 
 MODE_FOCUS = {
@@ -145,7 +108,6 @@ def run_git(
     root: str,
     args: list[str],
     accepted_exit_codes: tuple[int, ...] = (0,),
-    env: dict[str, str] | None = None,
 ) -> str:
     """Run git in the repo and return its stdout."""
     try:
@@ -156,7 +118,6 @@ def run_git(
             encoding=GIT_OUTPUT_ENCODING,
             errors=GIT_DECODE_ERRORS,
             timeout=GIT_TIMEOUT_SECONDS,
-            env={**os.environ, **(env or {})},
         )
     except FileNotFoundError as error:
         raise DiffUnavailable("git executable not found") from error
@@ -277,13 +238,6 @@ MODE_EXTRA_OVERRIDES = {
 }
 
 
-class Snapshot(NamedTuple):
-    """Working tree state captured before an implement run."""
-
-    head: str
-    tree: str
-
-
 @dataclass(slots=True)
 class CodexJob:
     """One codex exec invocation to run."""
@@ -309,54 +263,6 @@ class CodexRun:
 
 class CodexUnavailableError(Exception):
     """Codex could not be run to completion."""
-
-
-def is_work_branch(branch: str) -> bool:
-    """Tell whether the branch name has a work-branch prefix."""
-    return branch.startswith(WORK_BRANCH_PREFIXES)
-
-
-def current_branch(root: str) -> str:
-    """Return the checked-out branch name, empty when detached."""
-    output = run_git(
-        root,
-        ["symbolic-ref", "--short", "-q", "HEAD"],
-        accepted_exit_codes=(0, DETACHED_HEAD_EXIT),
-    )
-    return output.strip()
-
-
-def work_branch_error(root: str) -> str | None:
-    """Return a refusal message unless the repo is on a work branch."""
-    try:
-        branch = current_branch(root)
-    except DiffUnavailable as error:
-        return f"ERROR: cannot read the current branch of {root}: {error}"
-    if is_work_branch(branch):
-        return None
-    allowed = ", ".join(WORK_BRANCH_PREFIXES)
-    name = repr(branch or DETACHED_HEAD)
-    return (
-        f"ERROR: refusing to implement on branch {name}: "
-        f"only work branches ({allowed}) are allowed."
-    )
-
-
-def verify_cache_dir() -> Path:
-    """Return the directory where verify keeps its logs and ledger."""
-    return Path.home().joinpath(*VERIFY_CACHE_PARTS)
-
-
-def snapshot_working_tree(root: str) -> Snapshot:
-    """Save HEAD and the whole working tree as a git tree object."""
-    head = run_git(root, ["rev-parse", "HEAD"]).strip()
-    with tempfile.TemporaryDirectory() as scratch:
-        index_file = str(Path(scratch) / TEMP_INDEX_NAME)
-        index_env = {GIT_INDEX_FILE_ENV: index_file}
-        run_git(root, ["read-tree", head], env=index_env)
-        run_git(root, ["add", "-A"], env=index_env)
-        tree = run_git(root, ["write-tree"], env=index_env).strip()
-    return Snapshot(head=head, tree=tree)
 
 
 def read_last_message(path: str) -> str:
@@ -432,48 +338,6 @@ STDERR:
 {codex_run.stderr[-STDERR_TAIL_LIMIT:]}"""
 
 
-def describe_worktree(root: str) -> str:
-    """Describe the repo state with git status and the diff stat."""
-    try:
-        status = run_git(root, ["status", "--short"]).rstrip()
-        diffstat = run_git(root, ["diff", "HEAD", "--stat"]).rstrip()
-    except DiffUnavailable as error:
-        return f"unavailable: {error}"
-    return f"""git status --short:
-{status or "[clean]"}
-
-git diff HEAD --stat:
-{diffstat or "[empty]"}"""
-
-
-def build_implement_report(
-    root: str, snapshot: Snapshot, headline: str, body: str
-) -> str:
-    """Assemble the implement result around the pre-run snapshot."""
-    return f"""{headline}
-
-Snapshot before the run:
-HEAD: {snapshot.head}
-TREE: {snapshot.tree}
-
-{body}
-
-{describe_worktree(root)}
-"""
-
-
-def implement_overrides() -> list[str]:
-    """Return the codex config overrides of the write sandbox."""
-    writable_roots = json.dumps([str(verify_cache_dir())])
-    settings = [
-        LOW_VERBOSITY_OVERRIDE,
-        f'sandbox_mode="{IMPLEMENT_SANDBOX_MODE}"',
-        IMPLEMENT_NETWORK_OVERRIDE,
-        f"{WRITABLE_ROOTS_KEY}={writable_roots}",
-    ]
-    return [arg for setting in settings for arg in ("-c", setting)]
-
-
 @mcp.tool()
 def codex_review_changes(
     review_focus: str,
@@ -491,11 +355,14 @@ def codex_review_changes(
 
     mode "plan": critique of the orchestrator's plan before implementation — gpt-6.1-sol, reasoning
     effort high; points out problems only. mode "code": final review of the implemented diff before
-    the PR — gpt-6.1-sol, reasoning effort high, bugs only, tuned for the fewest tokens (no user
-    config, low verbosity, one line per bug). `mode` is required; model and reasoning_effort default per mode.
+    the PR — gpt-6.1-sol, reasoning effort medium, bugs only, tuned for
+    the fewest tokens (no user config, low verbosity, one line per bug).
+    `mode` is required; model and
+    reasoning_effort default per mode.
     Codex never implements and never edits anything.
-    Pass `diff_base` (a git ref such as origin/develop or a review-checkpoint SHA) instead of pasting the
-    diff into `what_changed`; the server runs git diff plus untracked files itself.
+    Pass `diff_base` (a git ref such as origin/develop or a milestone
+    commit SHA) instead of pasting the diff into `what_changed`; the
+    server runs git diff plus untracked files itself.
     """
     if mode not in MODE_PROFILES:
         allowed = ", ".join(MODE_PROFILES)
@@ -542,55 +409,6 @@ sandbox={SANDBOX_MODE}).
 Findings:
 {(codex_run.last_message or codex_run.stdout)[-FINDINGS_LIMIT:]}
 """
-
-
-@mcp.tool()
-def codex_implement(
-    prompt: str,
-    project_path: str,
-    model: str | None = None,
-    reasoning_effort: str | None = None,
-) -> str:
-    """Run the escalation Codex implementer on a work-branch repo."""
-    root = resolve_project_path(project_path)
-    refusal = work_branch_error(root)
-    if refusal:
-        return refusal
-    try:
-        snapshot = snapshot_working_tree(root)
-    except DiffUnavailable as error:
-        return f"ERROR: cannot snapshot {root} before the run: {error}"
-
-    model = model or IMPLEMENT_PROFILE.model
-    effort = reasoning_effort or IMPLEMENT_PROFILE.reasoning_effort
-    job = CodexJob(
-        root=root,
-        prompt=f"{IMPLEMENT_PREAMBLE}\n\nRepository root: {root}\n\n{prompt}",
-        model=model,
-        reasoning_effort=effort,
-        overrides=implement_overrides(),
-        timeout=IMPLEMENT_TIMEOUT_SECONDS,
-        task=IMPLEMENT_TASK,
-    )
-    try:
-        codex_run = run_codex(job)
-    except CodexUnavailableError as error:
-        return build_implement_report(root, snapshot, str(error), "")
-
-    if codex_run.returncode != 0:
-        code = codex_run.returncode
-        headline = f"ERROR: Codex implement run exited with code {code}."
-        return build_implement_report(
-            root, snapshot, headline, format_streams(codex_run)
-        )
-
-    headline = (
-        f"Codex implement run completed (mode=implement, model={model}, "
-        f"reasoning_effort={effort}, sandbox={IMPLEMENT_SANDBOX_MODE})."
-    )
-    final_message = codex_run.last_message or codex_run.stdout
-    body = f"Codex final message:\n{final_message[-FINDINGS_LIMIT:]}"
-    return build_implement_report(root, snapshot, headline, body)
 
 
 if __name__ == "__main__":
