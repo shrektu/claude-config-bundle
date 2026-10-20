@@ -29,7 +29,7 @@ description: UI texts and translations through Gemini Flash (agy-worker). Load w
    `~/.claude/bin/verify --repo <repo> -- 'cd <directory with package.json> && <bun|npm> run i18n:check'`
    (package manager per the lockfile: `bun.lock` → bun).
 
-## Optional nomenclature review (redakcja.py + writer `terms`)
+## Optional nomenclature review (redakcja.py + ui-writer `terms`)
 
 At Sebastian's request or for Polish texts that reach customers:
 
@@ -38,7 +38,7 @@ At Sebastian's request or for Polish texts that reach customers:
    between texts — otherwise `redakcja.py` counts adjacent lines as one paragraph).
 3. Run `python3 ~/claude-skills/_shared/redakcja.py --lang pl <file>` (`--lang en` for English);
    exit code 0 = clean, 1 = warnings, one per line: `file: problem`.
-4. Spawn `writer` in `terms` mode (Sonnet) with the strings, the glossary, the guide path and the
+4. Spawn `ui-writer` in `terms` mode (Sonnet) with the strings, the glossary, the guide path and the
    `redakcja.py` warnings: it checks the nomenclature against the glossary and the guide and returns
    corrected strings with one reason each. Apply its corrections, then repeat `i18n:check`.
 

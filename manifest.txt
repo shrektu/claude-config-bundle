@@ -1,4 +1,4 @@
-exported: 2026-10-19T16:51:47+02:00 on sebastian-Latitude-7420 by sebastian
+exported: 2026-10-20T10:44:40+02:00 on sebastian-Latitude-7420 by sebastian
 claude: 2.1.303 (Claude Code)
 codex:  codex-cli 0.163.0
 files:
@@ -7,8 +7,8 @@ files:
   ./claude/agents/implementer.md
   ./claude/agents/plan-gate-runner.md
   ./claude/agents/reviewer-opus.md
+  ./claude/agents/ui-writer.md
   ./claude/agents/writer.md
-  ./claude/bin/ai-review-gate
   ./claude/bin/bb-routine-habits
   ./claude/bin/bb-sweep
   ./claude/bin/git_remote.py
@@ -19,10 +19,8 @@ files:
   ./claude/bin/magic_numbers.py
   ./claude/bin/pyproject.toml
   ./claude/bin/repo-facts
-  ./claude/bin/review-checkpoint
   ./claude/bin/script_habits.py
   ./claude/bin/source_lexer.py
-  ./claude/bin/test_ai_review_gate.py
   ./claude/bin/test_bb_sweep.py
   ./claude/bin/test_bb_sweep_static.py
   ./claude/bin/test_habit_rules.py
@@ -64,6 +62,7 @@ files:
   ./claude/hooks/tdd-guard-test.py
   ./claude/hooks/verify-guard.py
   ./claude/hooks/verify-guard-test.py
+  ./claude/mcp/agy-worker/agy_context.py
   ./claude/mcp/agy-worker/agy_errors.py
   ./claude/mcp/agy-worker/agy_pdf.py
   ./claude/mcp/agy-worker/agy_prompts.py
@@ -79,6 +78,7 @@ files:
   ./claude/mcp/agy-worker/requirements-dev.txt
   ./claude/mcp/agy-worker/requirements.txt
   ./claude/mcp/agy-worker/test_agy_worker.py
+  ./claude/mcp/agy-worker/test_context.py
   ./claude/mcp/agy-worker/test_gemini_tools.py
   ./claude/mcp/agy-worker/test_pdf_datasheet.py
   ./claude/mcp/agy-worker/test_prompts.py
@@ -99,6 +99,7 @@ files:
   ./claude/skills/epic/SKILL.md
   ./claude/skills/parallel/SKILL.md
   ./claude/skills/pr-description/SKILL.md
+  ./claude/skills/qa/references/scenarios.md
   ./claude/skills/qa/SKILL.md
   ./claude/skills/repo-standards/SKILL.md
   ./claude/skills/review/SKILL.md

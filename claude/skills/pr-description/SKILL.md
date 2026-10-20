@@ -27,7 +27,7 @@ has Gemini 3.8 Flash draft it (`agy_write`, kind `pr_description`), checks the n
 then publish. The text is Polish by default, in full sentences, concrete and concise. Bitbucket renders
 Markdown — use `##` headings. The description always ends with a blank line and the footer
 `🤖 Wygenerowane przez <model>`, where `<model>` is the model that produced the text (`Gemini 3.8 Flash`,
-or `Claude Sonnet 5.5` when the writer fell back to writing it itself), so readers know it was written by
+or `Claude Haiku 5.5` when the writer fell back to writing it itself), so readers know it was written by
 AI. Include only the sections that apply; drop the optional ones instead of writing "N/A" or leaving them
 empty. Sections, in this order:
 

@@ -11,6 +11,7 @@
       "Agent(reviewer-opus)",
       "Agent(flash-review-runner)",
       "Agent(writer)",
+      "Agent(ui-writer)",
       "Agent(plan-gate-runner)",
       "mcp__codex-worker__*",
       "mcp__agy-worker__*",

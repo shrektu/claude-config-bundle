@@ -2,20 +2,24 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from agy_context import (
+    changed_names,
+    changed_paths,
+    ordered_paths,
+    select_call_sites,
+)
 from agy_errors import AgyUnavailableError, fail
 from agy_pdf import page_window, pdf_workspace, validate_pdf
 from agy_prompts import (
     DATASHEET_SCHEMA,
     EVIDENCE_PATH,
-    FACTS_PATH,
     REVIEW_DIFF_PATH,
-    STYLE_GUIDE_PATH,
-    TEMPLATE_PATH,
     TRANSLATE_SCHEMA,
     WriteKind,
-    code_review_prompt,
     datasheet_prompt,
     debug_prompt,
+    fit_code_review,
+    fit_listed_prompt,
     plan_prompt,
     translate_prompt,
     write_prompt,
@@ -29,6 +33,7 @@ from agy_reports import (
     translation_report,
 )
 from agy_runner import (
+    MAX_PROMPT_BYTES,
     AgyJob,
     check_model,
     check_outcome,
@@ -39,10 +44,14 @@ from agy_runner import (
 )
 from agy_workspace import (
     TEXT_ENCODING,
-    build_diff,
     empty_workspace,
+    grep_words,
     path_from_env,
     resolve_repo_root,
+    snapshot_diff,
+    snapshot_head,
+    snapshot_paths,
+    snapshot_text,
     snapshot_workspace,
 )
 from mcp.server.fastmcp import FastMCP
@@ -52,6 +61,7 @@ mcp = FastMCP("agy-worker")
 
 DEFAULT_ARGON_MODEL = "gemini-4-argon-high"
 DEFAULT_FLASH_MODEL = "gemini-3.8-flash-medium"
+DEFAULT_FLASH_LOW_MODEL = "gemini-3.8-flash-low"
 ARGON_MARKER = "argon"
 PLAN_TIMEOUT_SECONDS = 1800
 DATASHEET_TIMEOUT_SECONDS = 1800
@@ -187,28 +197,20 @@ def style_guide_content() -> bytes | None:
     return path.read_bytes() if path.is_file() else None
 
 
-def write_attachments(request: WriteRequest) -> dict[str, bytes]:
-    """Collect the files agy_write attaches to the workspace."""
-    attachments = {FACTS_PATH: request.facts.encode(TEXT_ENCODING)}
-    if request.template.strip():
-        attachments[TEMPLATE_PATH] = request.template.encode(TEXT_ENCODING)
-    style_guide = style_guide_content()
-    if style_guide is not None:
-        attachments[STYLE_GUIDE_PATH] = style_guide
-    return attachments
-
-
 def run_snapshot_job(
     root: Path,
     prompt: str,
     model: str,
     timeout_seconds: int,
+    commit: str,
     attachments: Mapping[str, bytes] | None = None,
 ) -> str:
-    """Run a prompt against a snapshot of the repository."""
+    """Run a prompt against a snapshot commit of the repository."""
     check_prompt_size(prompt)
     job = AgyJob(prompt, model, timeout_seconds, None)
-    envelope = run_job(lambda: snapshot_workspace(root, attachments), job)
+    envelope = run_job(
+        lambda: snapshot_workspace(root, attachments, commit), job
+    )
     return (envelope.response or "").strip()
 
 
@@ -217,14 +219,21 @@ def review_plan(request: PlanRequest) -> str:
     check_model(request.model)
     root = resolve_repo_root(request.project_path)
     require_allowlisted(root)
-    prompt = plan_prompt(
-        request.what_changed,
-        request.review_focus,
-        request.acceptance_criteria,
-        request.extra_context,
+    commit = snapshot_head(root)
+    paths = ordered_paths(snapshot_paths(root, commit), frozenset())
+    prompt = fit_listed_prompt(
+        lambda files: plan_prompt(
+            request.what_changed,
+            request.review_focus,
+            request.acceptance_criteria,
+            request.extra_context,
+            files=files,
+        ),
+        paths,
+        MAX_PROMPT_BYTES,
     )
     findings = run_snapshot_job(
-        root, prompt, request.model, PLAN_TIMEOUT_SECONDS
+        root, prompt, request.model, PLAN_TIMEOUT_SECONDS, commit
     )
     header = (
         f"Gemini review completed (mode=plan, model={request.model}, "
@@ -238,20 +247,36 @@ def review_code(request: CodeReviewRequest) -> str:
     check_model(request.model)
     root = resolve_repo_root(request.project_path)
     require_allowlisted(root)
-    diff = build_diff(root, request.diff_base)
-    if not diff.strip():
+    snapshot = snapshot_diff(root, request.diff_base)
+    if not snapshot.diff.strip():
         fail(f"the diff against {request.diff_base!r} is empty")
-    prompt = code_review_prompt(
+    focus = (
         request.review_focus,
         request.acceptance_criteria,
         request.extra_context,
     )
+    changed = changed_paths(snapshot.diff)
+    names = changed_names(
+        snapshot.diff, lambda path: snapshot_text(root, snapshot.commit, path)
+    )
+    hits = grep_words(root, snapshot.commit, names)
+    call_sites = select_call_sites(names, hits, changed)
+    paths = ordered_paths(snapshot_paths(root, snapshot.commit), changed)
+    fitted = fit_code_review(
+        focus, snapshot.diff, call_sites.all_lines(), paths, MAX_PROMPT_BYTES
+    )
+    attachments = (
+        None
+        if fitted.diff_inline
+        else {REVIEW_DIFF_PATH: snapshot.diff.encode(TEXT_ENCODING)}
+    )
     findings = run_snapshot_job(
         root,
-        prompt,
+        fitted.prompt,
         request.model,
         CODE_REVIEW_TIMEOUT_SECONDS,
-        {REVIEW_DIFF_PATH: diff.encode(TEXT_ENCODING)},
+        snapshot.commit,
+        attachments,
     )
     header = (
         f"Gemini review completed (mode=code, model={request.model}, "
@@ -267,16 +292,18 @@ def write_text(request: WriteRequest) -> str:
     kind = parse_write_kind(request.kind)
     root = resolve_repo_root(request.project_path)
     require_allowlisted(root)
-    attachments = write_attachments(request)
+    style_guide = style_guide_content()
     prompt = write_prompt(
         kind,
         request.language,
-        has_template=TEMPLATE_PATH in attachments,
-        has_style_guide=STYLE_GUIDE_PATH in attachments,
+        request.facts,
+        request.template,
+        style_guide.decode(TEXT_ENCODING) if style_guide else "",
     )
-    text = run_snapshot_job(
-        root, prompt, request.model, WRITE_TIMEOUT_SECONDS, attachments
-    )
+    check_prompt_size(prompt)
+    job = AgyJob(prompt, request.model, WRITE_TIMEOUT_SECONDS, None)
+    envelope = run_job(empty_workspace, job)
+    text = (envelope.response or "").strip()
     header = (
         f"Gemini text completed (model={request.model}, "
         f"kind={kind}, workspace=clean)."
@@ -289,12 +316,19 @@ def consult_debug(request: DebugRequest) -> str:
     check_model(request.model)
     root = resolve_repo_root(request.project_path)
     require_allowlisted(root)
-    prompt = debug_prompt(request.problem)
+    commit = snapshot_head(root)
+    paths = ordered_paths(snapshot_paths(root, commit), frozenset())
+    prompt = fit_listed_prompt(
+        lambda files: debug_prompt(request.problem, files=files),
+        paths,
+        MAX_PROMPT_BYTES,
+    )
     findings = run_snapshot_job(
         root,
         prompt,
         request.model,
         DEBUG_TIMEOUT_SECONDS,
+        commit,
         {EVIDENCE_PATH: request.evidence.encode(TEXT_ENCODING)},
     )
     header = (
@@ -378,7 +412,7 @@ def agy_plan_review(  # noqa: PLR0913
     project_path: str,
     acceptance_criteria: str = "",
     extra_context: str = "",
-    model: str = DEFAULT_FLASH_MODEL,
+    model: str = DEFAULT_FLASH_LOW_MODEL,
 ) -> str:
     """Adversarial plan review by Gemini in a sandboxed worktree."""
     request = PlanRequest(
@@ -441,7 +475,7 @@ def agy_code_review(  # noqa: PLR0913
     project_path: str,
     acceptance_criteria: str = "",
     extra_context: str = "",
-    model: str = DEFAULT_FLASH_MODEL,
+    model: str = DEFAULT_FLASH_LOW_MODEL,
 ) -> str:
     """Bug-only code review of a diff by Gemini Flash in a sandbox."""
     request = CodeReviewRequest(
@@ -463,9 +497,9 @@ def agy_write(  # noqa: PLR0913
     facts: str,
     template: str = "",
     language: str = "pl",
-    model: str = DEFAULT_FLASH_MODEL,
+    model: str = DEFAULT_FLASH_LOW_MODEL,
 ) -> str:
-    """Write a PR, Jira or UI text from given facts with Gemini Flash."""
+    """Write a PR, Jira, review or UI text from facts with Gemini Flash."""
     request = WriteRequest(
         project_path, kind, facts, template, language, model
     )

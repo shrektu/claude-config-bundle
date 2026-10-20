@@ -67,8 +67,8 @@ After handling, you mark the thread: `bb-sweep harvest-mark <repo> <pr> <thread-
 **AI footer — always.** Every comment, thread reply and PR description that you publish ends with a blank
 line and the line `🤖 Wygenerowane przez <model>`, so that others know they are talking to an AI.
 `<model>` is the model that produced the text:
-- review comments and thread replies, drafted by `writer` in `review-comment` mode: `🤖 Wygenerowane przez Claude Sonnet 5.5`;
-- PR descriptions, drafted by `writer` in `publish` mode (Gemini Flash writes, Sonnet checks): `🤖 Wygenerowane przez Gemini 3.8 Flash`;
+- review comments and thread replies, drafted by `writer` in `publish` mode with kind `review_comment` (Gemini Flash writes, Haiku checks): `🤖 Wygenerowane przez Gemini 3.8 Flash` (`Claude Haiku 5.5` when the writer fell back);
+- PR descriptions, drafted by `writer` in `publish` mode (Gemini Flash writes, Haiku checks): `🤖 Wygenerowane przez Gemini 3.8 Flash`;
 - a short label that I write myself: `🤖 Wygenerowane przez Claude Opus 5.5`.
 
 The footer also applies to short labels ("magic number\n\n🤖 Wygenerowane przez Claude Opus 5.5").
@@ -202,8 +202,8 @@ from the cache, `--deep` asks about all of them).
 **Without my vote (section `review`)** → I do the full code review myself: read the whole diff (`review` skill),
 post comments only inline at specific diff lines (no general comments and no
 summaries; the same length rule as in point 1) and **vote** — `approve` or `request-changes`. The vote always goes together with
-the comments; a PR does not stay without a verdict. The comments are drafted by `writer` in `review-comment` mode
-(footer `Claude Sonnet 5.5`); a bare label I write myself (footer `Claude Opus 5.5`).
+the comments; a PR does not stay without a verdict. The comments are drafted by `writer` in `publish` mode, kind `review_comment`
+(footer `Gemini 3.8 Flash`); a bare label I write myself (footer `Claude Opus 5.5`).
 
 On someone else's PR you have no plan in context, so you take the scope from Jira: the task ID is in the title
 (`[TICKET-1274] …`), `getJiraIssue` gives the task content and acceptance criteria. In addition you read the **PR description**

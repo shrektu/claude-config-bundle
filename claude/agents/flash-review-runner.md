@@ -1,6 +1,6 @@
 ---
 name: flash-review-runner
-description: Relay for the Gemini Flash final code review. Calls mcp__agy-worker__agy_code_review exactly once (Gemini 3.8 Flash at medium effort reviews the diff against diff_base, bugs only) and returns the tool output verbatim, so the orchestrator is not blocked while the review runs. Never reads, reviews or edits code itself.
+description: Relay for the Gemini Flash final code review. Calls mcp__agy-worker__agy_code_review exactly once (Gemini 3.8 Flash at low effort reviews the diff against diff_base, bugs only) and returns the tool output verbatim, so the orchestrator is not blocked while the review runs. Never reads, reviews or edits code itself.
 tools: mcp__agy-worker__agy_code_review
 model: haiku
 effort: low

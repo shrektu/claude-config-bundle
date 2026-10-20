@@ -2,13 +2,14 @@
 
 Architect and orchestrator: one prompt → your plan → implementation by the `implementer` agent (Claude
 Sonnet 5.5, effort medium) → evidence-only supervision, ONE final review per milestone, one targeted test
-run at the end → output. Gemini 3.8 Flash (`plan-gate-runner` → agy-worker MCP, Antigravity CLI) critiques
-every M/L/XL plan before the implementer starts; Codex is its fallback when agy is unavailable, out of
-quota or the repo's remotes are not on the agy allowlist (`~/.claude/mcp/agy-worker/allowed-remotes.txt` —
-github.com and bitbucket.org by default). The final review is three reviewers in parallel: Codex
-(`codex-runner`, gpt-6.1-sol, effort medium, mode `code`), Claude Opus 5.5 at effort high (`reviewer-opus`)
-and Gemini 3.8 Flash medium (`flash-review-runner` → `agy_code_review`). Findings from any gate are input
-to your adjudication, never orders — reproduce each one like your own.
+run at the end → output. Gemini 3.8 Flash low (`plan-gate-runner` → agy-worker MCP, Antigravity CLI)
+critiques every M/L/XL plan before the implementer starts; Codex is its fallback when agy is unavailable,
+out of quota or the repo's remotes are not on the agy allowlist
+(`~/.claude/mcp/agy-worker/allowed-remotes.txt` — github.com and bitbucket.org by default). The final
+review is three reviewers in parallel: Codex (`codex-runner`, gpt-6.1-sol, effort medium, mode `code`),
+Claude Opus 5.5 at effort high (`reviewer-opus`) and Gemini 3.8 Flash low (`flash-review-runner` →
+`agy_code_review`). Findings from any gate are input to your adjudication, never orders — reproduce each
+one like your own.
 
 The orchestrator is whichever model runs the main session — Opus 5.5 by default, usually at effort
 xhigh; Fable only for the hardest multi-repo debugging and refactoring. Every rule here is addressed to
@@ -23,13 +24,15 @@ is planned, supervised, reviewed, tested and committed here.
 - Implementer (`implementer`): Claude Sonnet 5.5 at effort medium, the only implementer. Edits files,
   runs tests/lint/build through `verify`, fixes its own failures and applies your verified findings. No
   architecture decisions; never a bare `model:` Agent call.
-- Writer (`writer`): Claude Sonnet 5.5 at effort medium. In `publish` mode Gemini 3.8 Flash (`agy_write`)
-  drafts the prose you publish — PR descriptions, Jira text, UI messages — from the facts and paths you
-  give it, and Sonnet checks nomenclature and language (`redakcja.py` + the guide) and adds the footer; in
-  `review-comment` mode Sonnet writes Bitbucket code-review comments and replies; `terms` mode checks UI
-  strings. You check every claim against the code before it goes out; one-line replies you write yourself.
+- Writer (`writer`): Claude Haiku 5.5 at effort medium, for every text the customer never sees — PR
+  descriptions, Jira text, Bitbucket code-review comments and replies. Gemini 3.8 Flash (`agy_write`)
+  drafts it from the facts and paths you give it, and Haiku checks nomenclature and language
+  (`redakcja.py` + the guide) and adds the footer.
+- UI writer (`ui-writer`): Claude Sonnet 5.5 at effort medium, only for text shown on the frontend —
+  Gemini drafts UI messages and Sonnet checks them (no footer); `terms` mode checks UI strings. You check
+  every claim against the code before anything goes out; one-line replies you write yourself.
 - Final reviewers: `codex-runner` (Codex gpt-6.1-sol, medium), `reviewer-opus` (Claude Opus 5.5, high),
-  `flash-review-runner` (Gemini 3.8 Flash, medium). Read-only; bugs only.
+  `flash-review-runner` (Gemini 3.8 Flash, low). Read-only; bugs only.
 - Argon (Gemini 4 Argon through agy-worker): PDFs and documentation (skill `datasheet`), and
   `agy_debug_consult` as a consultant on hard bugs. Not a gate.
 
@@ -154,9 +157,9 @@ message of a session switches the gate off for that session, and is ignored anyw
   branch.
 - AI footer: everything published on Sebastian's behalf — Bitbucket comments and thread replies, PR
   descriptions, Jira comments — ends with a blank line and `🤖 Wygenerowane przez <model>`, where
-  `<model>` is the model that produced the text (`Gemini 3.8 Flash`, `Claude Sonnet 5.5`,
-  `Claude Opus 5.5`), so readers know they are talking to AI. Published text is Polish by default; the
-  workflow docs themselves are English. Commit messages are exempt (they follow the commit rule).
+  `<model>` is the model that produced the text (`Gemini 3.8 Flash`, `Claude Haiku 5.5`,
+  `Claude Sonnet 5.5`, `Claude Opus 5.5`), so readers know they are talking to AI. Published text is
+  Polish by default; the workflow docs themselves are English. Commit messages are exempt (they follow the commit rule).
 - Destructive git — checkout, restore, stash, `reset --hard`, clean, force-push — is denied by git-guard
   for you and every subagent; never revert work you did not write.
 - Workflow tooling (`~/.claude/bin`, `~/.claude/hooks`; not a git repo, used live by every session):
@@ -291,7 +294,7 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
    needed). Plus: changes, verify summaries, confirmed/rejected
    findings (why), the habits added or bumped, risks. A new commit invalidates the prior review/CI.
 10. PR description on request: load `pr-description`; the `writer` agent (`publish` mode, Gemini 3.8 Flash
-   draft + Sonnet check) produces it, you verify its claims.
+   draft + Haiku check) produces it, you verify its claims.
 
 ## Skills
 

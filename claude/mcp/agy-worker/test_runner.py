@@ -9,6 +9,7 @@ import pytest
 from agy_errors import AgyUnavailableError
 from agy_runner import AgyJob, AgyRun
 from helpers_test import (
+    FLASH_LOW_MODEL,
     MAX_AUTH_SECONDS,
     WHAT_CHANGED,
     FakeAgy,
@@ -149,7 +150,7 @@ def test_plan_review_findings_use_repo_relative_paths(
 
     assert result == (
         "Gemini review completed "
-        "(mode=plan, model=gemini-3.8-flash-medium, workspace=clean).\n\n"
+        f"(mode=plan, model={FLASH_LOW_MODEL}, workspace=clean).\n\n"
         "Findings:\nsee ratelimit.py#L14 and auth.py:3"
     )
     assert list(fake_agy.work_dir.iterdir()) == []
@@ -277,7 +278,7 @@ def test_quota_error_reports_quota(
     result = plan_review(allowlisted_repo)
 
     assert result.startswith("AGY-UNAVAILABLE: ")
-    assert "quota of model gemini-3.8-flash-medium looks exhausted" in result
+    assert "quota of model gemini-3.8-flash-low looks exhausted" in result
     assert fake_agy.ran()
 
 
@@ -337,6 +338,7 @@ def test_second_caller_busy_while_lock_held(
     allowlisted_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("AGY_MAX_PARALLEL", "1")
     monkeypatch.setattr(agy_runner, "LOCK_WAIT_SECONDS", 0.3)
     monkeypatch.setattr(agy_runner, "LOCK_POLL_SECONDS", 0.05)
     with fake_agy.lock_path.open("a") as holder:
@@ -348,6 +350,95 @@ def test_second_caller_busy_while_lock_held(
     assert "busy" in result
     assert not fake_agy.ran()
     assert list(fake_agy.work_dir.iterdir()) == []
+
+
+def test_run_proceeds_while_slot_zero_held(
+    fake_agy: FakeAgy,
+    allowlisted_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGY_MAX_PARALLEL", "2")
+    monkeypatch.setattr(agy_runner, "LOCK_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(agy_runner, "LOCK_POLL_SECONDS", 0.05)
+    with fake_agy.lock_path.open("a") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+
+        result = plan_review(allowlisted_repo)
+
+    assert result.startswith("Gemini review completed")
+    assert fake_agy.ran()
+
+
+def test_busy_when_every_slot_held(
+    fake_agy: FakeAgy,
+    allowlisted_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGY_MAX_PARALLEL", "2")
+    monkeypatch.setattr(agy_runner, "LOCK_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(agy_runner, "LOCK_POLL_SECONDS", 0.05)
+    second_slot = fake_agy.lock_path.with_name(fake_agy.lock_path.name + ".1")
+    with (
+        fake_agy.lock_path.open("a") as first,
+        second_slot.open("a") as second,
+    ):
+        fcntl.flock(first, fcntl.LOCK_EX)
+        fcntl.flock(second, fcntl.LOCK_EX)
+
+        result = plan_review(allowlisted_repo)
+
+    assert result.startswith("AGY-UNAVAILABLE: ")
+    assert "busy" in result
+    assert not fake_agy.ran()
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-1"])
+def test_invalid_max_parallel_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("AGY_MAX_PARALLEL", value)
+
+    assert agy_runner.max_parallel() == 3
+
+
+def test_unset_max_parallel_is_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGY_MAX_PARALLEL", raising=False)
+
+    assert agy_runner.max_parallel() == 3
+
+
+def test_valid_max_parallel_is_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGY_MAX_PARALLEL", "5")
+
+    assert agy_runner.max_parallel() == 5
+
+
+def test_lock_slot_paths_unit(tmp_path: Path) -> None:
+    base = tmp_path / "agy.lock"
+
+    assert agy_runner.lock_slot_paths(base, 3) == [
+        base,
+        tmp_path / "agy.lock.1",
+        tmp_path / "agy.lock.2",
+    ]
+
+
+def test_slot_released_after_failed_run(
+    fake_agy: FakeAgy,
+    allowlisted_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGY_MAX_PARALLEL", "1")
+    use_mode(monkeypatch, "error")
+
+    result = plan_review(allowlisted_repo)
+
+    assert result.startswith("AGY-UNAVAILABLE: ")
+    assert fake_agy.ran()
+    with fake_agy.lock_path.open("a") as probe:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def test_lock_is_released_after_a_run(
@@ -409,8 +500,9 @@ def test_agy_receives_json_sandbox_arguments_inside_bwrap(
         "--output-format",
         "json",
         "--model",
-        "gemini-3.8-flash-medium",
+        FLASH_LOW_MODEL,
         "--sandbox",
+        "--dangerously-skip-permissions",
         "--print-timeout",
         "1740s",
     ]
