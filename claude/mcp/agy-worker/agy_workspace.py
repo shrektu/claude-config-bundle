@@ -1,5 +1,6 @@
 import contextlib
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -47,6 +48,22 @@ GIT_DIR_NAME = "gitdir"
 WORKTREES_DIR = "worktrees"
 SCRATCH_PREFIX = "agy-"
 PORCELAIN_PATH_OFFSET = 3
+NUL = "\0"
+BLOB_TYPE = "blob"
+PLAIN_PATHS = ("-c", "core.quotepath=false")
+GREP_ARGUMENTS = (
+    "grep",
+    "-n",
+    "-I",
+    "-w",
+    "-F",
+    "-z",
+    "--no-color",
+)
+GREP_FIELDS = 3
+SUCCESS_CODES = frozenset({0})
+NO_MATCH_OK = frozenset({0, 1})
+MISSING_OK = frozenset({0, 128})
 
 
 class Workspace(NamedTuple):
@@ -56,7 +73,27 @@ class Workspace(NamedTuple):
     git_dir: Path
 
 
-def run_tool(arguments: Sequence[str], env: Mapping[str, str]) -> str:
+class SnapshotDiff(NamedTuple):
+    """A snapshot commit of the working tree and its diff to a base."""
+
+    commit: str
+    diff: str
+
+
+class GrepHit(NamedTuple):
+    """A line of a snapshot that contains a searched name."""
+
+    name: str
+    path: str
+    line: int
+    text: str
+
+
+def run_tool(
+    arguments: Sequence[str],
+    env: Mapping[str, str],
+    allowed_codes: frozenset[int] = SUCCESS_CODES,
+) -> str:
     """Run a helper program and return its stdout."""
     name = arguments[0]
     try:
@@ -71,17 +108,22 @@ def run_tool(arguments: Sequence[str], env: Mapping[str, str]) -> str:
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         fail(f"{name} could not run: {error}")
-    if done.returncode:
+    if done.returncode not in allowed_codes:
         fail(f"{name} failed: {done.stderr.strip()}")
     return done.stdout
 
 
 def run_git(
-    root: Path, args: Sequence[str], env: Mapping[str, str] | None = None
+    root: Path,
+    args: Sequence[str],
+    env: Mapping[str, str] | None = None,
+    allowed_codes: frozenset[int] = SUCCESS_CODES,
 ) -> str:
     """Run git in a directory and return its stdout."""
     command = ["git", "-C", str(root), *GIT_SAFE_CONFIG, *args]
-    return run_tool(command, {**GIT_IDENTITY_ENV, **(env or {})})
+    return run_tool(
+        command, {**GIT_IDENTITY_ENV, **(env or {})}, allowed_codes
+    )
 
 
 def run_git_in(workspace: Workspace, args: Sequence[str]) -> str:
@@ -222,15 +264,20 @@ def snapshot_commit(
     root: Path,
     index_file: Path,
     extra_files: Mapping[str, bytes] | None = None,
+    base_commit: str | None = None,
 ) -> str:
-    """Commit the whole working tree without touching refs or the index."""
-    try:
-        head = run_git(root, ["rev-parse", "--verify", "HEAD"]).strip()
-    except AgyUnavailableError:
-        fail("the repository has no commits yet, nothing to review")
+    """Commit the working tree, or a given commit, plus extra files."""
     index_env = {GIT_INDEX_FILE_ENV: str(index_file)}
-    seed_index(root, index_file, head)
-    run_git(root, ["add", "-A"], index_env)
+    if base_commit is None:
+        try:
+            head = run_git(root, ["rev-parse", "--verify", "HEAD"]).strip()
+        except AgyUnavailableError:
+            fail("the repository has no commits yet, nothing to review")
+        seed_index(root, index_file, head)
+        run_git(root, ["add", "-A"], index_env)
+    else:
+        head = base_commit
+        run_git(root, ["read-tree", head], index_env)
     for path, content in (extra_files or {}).items():
         add_attachment(root, index_file, path, content)
     tree = run_git(root, ["write-tree"], index_env).strip()
@@ -239,11 +286,66 @@ def snapshot_commit(
     ).strip()
 
 
-def build_diff(root: Path, base: str) -> str:
-    """Diff the working tree against a ref, untracked files included."""
+def snapshot_head(root: Path) -> str:
+    """Commit the whole working tree and return the commit id."""
     with scratch_dir() as scratch:
-        commit = snapshot_commit(root, scratch / INDEX_NAME)
-        return run_git(root, [*DIFF_ARGUMENTS, base, commit])
+        return snapshot_commit(root, scratch / INDEX_NAME)
+
+
+def snapshot_diff(root: Path, base: str) -> SnapshotDiff:
+    """Diff the working tree against a ref, untracked files included."""
+    commit = snapshot_head(root)
+    diff = run_git(root, [*PLAIN_PATHS, *DIFF_ARGUMENTS, base, commit])
+    return SnapshotDiff(commit, diff)
+
+
+def snapshot_paths(root: Path, commit: str) -> list[str]:
+    """List every path of a snapshot commit."""
+    listing = run_git(
+        root,
+        ["ls-tree", "-r", "-z", "--name-only", "--end-of-options", commit],
+    )
+    return [path for path in listing.split(NUL) if path]
+
+
+def snapshot_text(root: Path, commit: str, path: str) -> str | None:
+    """Return a file of a snapshot commit, or None when it is absent."""
+    spec = f"{commit}:{path}"
+    kind = run_git(root, ["cat-file", "-t", spec], allowed_codes=MISSING_OK)
+    if kind.strip() != BLOB_TYPE:
+        return None
+    return run_git(root, ["cat-file", "blob", spec])
+
+
+def grep_words(root: Path, commit: str, names: Sequence[str]) -> list[GrepHit]:
+    """Find the lines of a snapshot commit that contain any name."""
+    if not names:
+        return []
+    patterns = [argument for name in names for argument in ("-e", name)]
+    output = run_git(
+        root,
+        [*GREP_ARGUMENTS, *patterns, commit],
+        allowed_codes=NO_MATCH_OK,
+    )
+    prefix = f"{commit}:"
+    hits: list[GrepHit] = []
+    for record in output.split("\n"):
+        fields = record.split(NUL, 2)
+        if len(fields) != GREP_FIELDS:
+            continue
+        path, number, text = fields
+        hits.extend(
+            GrepHit(name, path.removeprefix(prefix), int(number), text)
+            for name in names
+            if contains_word(text, name)
+        )
+    return hits
+
+
+def contains_word(text: str, name: str) -> bool:
+    """Tell whether a name occurs in a text as a whole word."""
+    pattern = rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])"
+    return re.search(pattern, text) is not None
 
 
 def is_worktree_admin_dir(root: Path, candidate: Path) -> bool:
@@ -272,11 +374,15 @@ def drop_worktree(
 
 @contextlib.contextmanager
 def snapshot_workspace(
-    root: Path, extra_files: Mapping[str, bytes] | None = None
+    root: Path,
+    extra_files: Mapping[str, bytes] | None = None,
+    commit: str | None = None,
 ) -> Iterator[Workspace]:
-    """Check out a snapshot of the working tree into a disposable worktree."""
+    """Check out a snapshot into a disposable worktree, files attached."""
     with scratch_dir() as scratch:
-        commit = snapshot_commit(root, scratch / INDEX_NAME, extra_files)
+        commit = snapshot_commit(
+            root, scratch / INDEX_NAME, extra_files, commit
+        )
         path = scratch / WORKTREE_NAME
         admin_dir: Path | None = None
         try:

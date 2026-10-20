@@ -25,6 +25,8 @@ MAX_AUTH_SECONDS = 10
 EXECUTABLE_MODE = 0o755
 TRACKED_FILE = "tracked.txt"
 IGNORED_FILE = "ignored.log"
+FLASH_LOW_MODEL = "gemini-3.8-flash-low"
+FLASH_MEDIUM_MODEL = "gemini-3.8-flash-medium"
 ORIGIN_URL = "https://github.com/acme/widgets.git"
 FOREIGN_URL = "https://gitlab.com/acme/widgets.git"
 GIT_IDENTITY = [
@@ -40,7 +42,7 @@ REVIEW_FOCUS = "ordering and rollback"
 REVIEW_BODY = "IMPORTANT\n- step 3 breaks the rollback\nPASS"
 PLAN_SUCCESS_TEXT = (
     "Gemini review completed "
-    "(mode=plan, model=gemini-3.8-flash-medium, workspace=clean).\n\n"
+    f"(mode=plan, model={FLASH_LOW_MODEL}, workspace=clean).\n\n"
     "Findings:\n" + REVIEW_BODY
 )
 DATASHEET_CLAIMS = [

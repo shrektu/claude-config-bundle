@@ -51,12 +51,13 @@ a specialist behind a thin relay.
   unavailable it falls back to Codex (`codex-runner`, gpt-6.1-sol, reasoning effort high). Findings are input
   to the orchestrator's adjudication, never orders.
 - Final review (the trio): `codex-runner` (gpt-6.1-sol, effort medium, bugs only), `reviewer-opus` (Claude
-  Opus 5.5, read-only) and `flash-review-runner` (Gemini 3.8 Flash, medium) review the diff in parallel
+  Opus 5.5, read-only) and `flash-review-runner` (Gemini 3.8 Flash, low) review the diff in parallel
   once per milestone (once per task with one milestone). After adjudication the milestone is committed and
   the fix round lands as a `--fixup` commit, verified by its tests and by reading the fix diff. A delta trio
   runs only for fixes over about 100 lines or in a risk area. The fixups are autosquashed before the report.
-- `writer`: Gemini Flash drafts the prose the orchestrator publishes (PR descriptions, ticket comments,
-  longer replies) and Sonnet checks it; review comments are written by Sonnet. Everything published on
+- `writer` (Claude Haiku 5.5): Gemini Flash drafts every text the customer never sees (PR descriptions,
+  Jira comments, Bitbucket review comments and replies) and Haiku checks it; `ui-writer` (Claude Sonnet
+  5.5) does the same for UI text shown on the frontend, with no footer. Everything published on
   Sebastian's behalf ends with the footer `🤖 Wygenerowane przez <model>`.
 - Argon (`agy-worker`): reads datasheet PDFs and answers hard debugging questions (`agy_debug_consult`).
 
@@ -86,9 +87,9 @@ Skills (`claude/skills/`): `task` (a ticket from start to an open PR), `epic` (a
 review), `datasheet` (claims checked against chip PDFs through Argon), `ui-texts` (UI texts and translations)
 and `repo-standards` (pinned versions and idioms).
 
-CLIs (`claude/bin/`): `verify`, `review-checkpoint` (incremental review diffs), `repo-facts` (toolchain and
-pinned-version facts), `lint-strict` (the commit-gate linters), `habits` (rules learned from reviews),
-`ai-review-gate`, `usage-report` (token and context baseline from local transcripts) and `bb-sweep`.
+CLIs (`claude/bin/`): `verify`, `repo-facts` (toolchain and pinned-version facts), `lint-strict` (the
+commit-gate linters), `habits` (rules learned from reviews), `usage-report` (token and context baseline
+from local transcripts) and `bb-sweep`.
 
 ## agy-worker (Argon)
 

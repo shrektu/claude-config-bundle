@@ -99,7 +99,7 @@ RETIRED_HOME_FILES="bin/feature-worktree bin/feature-worktree-test.sh bin/qualit
   hooks/edit_texts.py hooks/lint-guard.py hooks/lint-guard-test.py hooks/shell_words.py \
   mcp/codex-worker/codex_worker_test.py skills/quality-bar/SKILL.md skills/tdd/SKILL.md \
   agents/implementer-strong.md skills/rownolegle/SKILL.md skills/epik/SKILL.md skills/teksty-ui/SKILL.md \
-  skills/qa/references/scenariusze.md"
+  skills/qa/references/scenariusze.md bin/ai-review-gate bin/test_ai_review_gate.py bin/review-checkpoint"
 for f in $RETIRED_HOME_FILES; do
   mkdir -p "$(dirname "$H1/.claude/$f")"
   echo "retired content" > "$H1/.claude/$f"
@@ -122,8 +122,11 @@ check_file "$H1/.claude/bundle/retire.json"
 check_file "$H1/.claude/bundle/install.sh"
 check_file "$H1/.codex/AGENTS.md"
 check_file "$H1/.claude/bin/repo-facts"
-for tool in ai-review-gate habits lint-strict review-checkpoint usage-report verify; do
+for tool in habits lint-strict usage-report verify; do
   check_exec "$H1/.claude/bin/$tool"
+done
+for tool in ai-review-gate test_ai_review_gate.py review-checkpoint; do
+  check_gone "$H1/.claude/bin/$tool"
 done
 check_file "$H1/.claude/agents/implementer.md"
 CHECKS=$((CHECKS + 1))
@@ -166,7 +169,7 @@ for a in $RETIRED_AGENTS; do
 done
 CHECKS=$((CHECKS + 1))
 AGENTS_LEFT=$(cd "$H1/.claude/agents" && ls | LC_ALL=C sort | tr '\n' ' ')
-[ "$AGENTS_LEFT" = "codex-runner.md flash-review-runner.md implementer.md plan-gate-runner.md reviewer-opus.md writer.md " ] || fail "agents left after install: $AGENTS_LEFT"
+[ "$AGENTS_LEFT" = "codex-runner.md flash-review-runner.md implementer.md plan-gate-runner.md reviewer-opus.md ui-writer.md writer.md " ] || fail "agents left after install: $AGENTS_LEFT"
 check_grep "$WORK/install1.log" "for t in tdd-guard " "install log: post-install hint runs the tdd-guard matrix"
 check_grep "$WORK/install1.log" " comment-guard " "install log: post-install hint runs the comment-guard matrix"
 check_grep "$WORK/install1.log" "test_codex_worker.py" "install log: post-install hint names the worker test"
@@ -281,8 +284,11 @@ check "installed export.sh exit status (see $WORK/export.log)" $?
 check_file "$EXPORTED/retire.json"
 check_file "$EXPORTED/claude/hooks/git-policy.py"
 check_file "$EXPORTED/claude/bin/repo-facts"
-for tool in ai-review-gate habits lint-strict review-checkpoint verify; do
+for tool in habits lint-strict verify; do
   check_exec "$EXPORTED/claude/bin/$tool"
+done
+for tool in ai-review-gate review-checkpoint; do
+  check_gone "$EXPORTED/claude/bin/$tool"
 done
 check_file "$EXPORTED/claude/hooks/tdd-guard.py"
 check_file "$EXPORTED/claude/hooks/comment-guard.py"
@@ -594,7 +600,8 @@ python3 - "$ROOT/retire.json" <<'PY' || fail "retire.json lacks the v2 entries"
 import json, sys
 spec = json.load(open(sys.argv[1]))
 files = ("agents/implementer-strong.md", "skills/rownolegle", "skills/epik", "skills/teksty-ui",
-         "skills/qa/references/scenariusze.md")
+         "skills/qa/references/scenariusze.md", "bin/ai-review-gate", "bin/test_ai_review_gate.py",
+         "bin/review-checkpoint")
 allow = ("Agent(implementer-strong)", "Write(/__HOME__/.claude/hooks/**)")
 problems = [f"file {f}" for f in files if f not in spec["files"]]
 problems += [f"allow {e}" for e in allow if e not in spec["settings"]["permissions.allow"]]

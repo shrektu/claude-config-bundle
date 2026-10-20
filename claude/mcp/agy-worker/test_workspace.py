@@ -298,3 +298,99 @@ def test_snapshot_extra_file_collision_unavailable(
         ),
     ):
         pass
+
+
+def snapshot_of(repo: Path, **files: str) -> str:
+    for name, content in files.items():
+        (repo / name).write_text(content)
+    return agy_workspace.snapshot_head(repo)
+
+
+def test_grep_words_no_match_returns_empty(allowlisted_repo: Path) -> None:
+    commit = snapshot_of(allowlisted_repo)
+
+    assert agy_workspace.grep_words(allowlisted_repo, commit, ["absent"]) == []
+
+
+def test_grep_words_attributes_each_line_to_whole_word_names(
+    allowlisted_repo: Path,
+) -> None:
+    commit = snapshot_of(
+        allowlisted_repo,
+        **{"a.txt": "total(1)\nsubtotal(2)\ntotal and discount\n"},
+    )
+
+    hits = agy_workspace.grep_words(
+        allowlisted_repo, commit, ["total", "discount"]
+    )
+
+    assert hits == [
+        agy_workspace.GrepHit("total", "a.txt", 1, "total(1)"),
+        agy_workspace.GrepHit("total", "a.txt", 3, "total and discount"),
+        agy_workspace.GrepHit("discount", "a.txt", 3, "total and discount"),
+    ]
+
+
+def test_grep_words_without_names_skips_git(allowlisted_repo: Path) -> None:
+    hits = agy_workspace.grep_words(allowlisted_repo, "no-such-commit", [])
+
+    assert hits == []
+
+
+def test_snapshot_paths_with_spaces_and_non_ascii(
+    allowlisted_repo: Path,
+) -> None:
+    folder = allowlisted_repo / "dir with space"
+    folder.mkdir()
+    (folder / "zażółć.txt").write_text("x\n")
+
+    paths = agy_workspace.snapshot_paths(
+        allowlisted_repo, agy_workspace.snapshot_head(allowlisted_repo)
+    )
+
+    assert paths == ["dir with space/zażółć.txt", "tracked.txt"]
+
+
+def test_snapshot_text_reads_present_empty_and_missing_files(
+    allowlisted_repo: Path,
+) -> None:
+    commit = snapshot_of(allowlisted_repo, **{"empty.txt": ""})
+
+    read = agy_workspace.snapshot_text
+    assert read(allowlisted_repo, commit, "tracked.txt") == "original\n"
+    assert read(allowlisted_repo, commit, "empty.txt") == ""
+    assert read(allowlisted_repo, commit, "missing.txt") is None
+
+
+def test_snapshot_diff_returns_commit_and_diff(allowlisted_repo: Path) -> None:
+    (allowlisted_repo / "tracked.txt").write_text("edited\n")
+
+    snapshot = agy_workspace.snapshot_diff(allowlisted_repo, "HEAD")
+
+    assert git_output(allowlisted_repo, "cat-file", "-t", snapshot.commit) == (
+        "commit\n"
+    )
+    assert "+edited" in snapshot.diff
+
+
+@pytest.mark.usefixtures("fake_agy")
+def test_workspace_on_given_commit_ignores_later_edits_and_keeps_attachments(
+    allowlisted_repo: Path,
+) -> None:
+    (allowlisted_repo / "tracked.txt").write_text("edited\n")
+    commit = agy_workspace.snapshot_head(allowlisted_repo)
+    (allowlisted_repo / "tracked.txt").write_text("late edit\n")
+    (allowlisted_repo / "late.txt").write_text("late\n")
+
+    with agy_workspace.snapshot_workspace(
+        allowlisted_repo, {".agy/note.txt": b"attached\n"}, commit
+    ) as workspace:
+        tracked = (workspace.path / "tracked.txt").read_text()
+        attached = (workspace.path / ".agy" / "note.txt").read_text()
+        late_exists = (workspace.path / "late.txt").exists()
+
+    assert (tracked, attached, late_exists) == (
+        "edited\n",
+        "attached\n",
+        False,
+    )

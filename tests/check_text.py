@@ -95,6 +95,7 @@ REQUIRED_AGENTS = (
     "implementer",
     "plan-gate-runner",
     "reviewer-opus",
+    "ui-writer",
     "writer",
 )
 RETIRED_AGENT_FILE = "implementer-strong.md"
@@ -202,6 +203,19 @@ def check_skills() -> None:
             len(description) <= DESCRIPTION_MAX_CHARS,
             f"{name}: description is {len(description)} chars (max {DESCRIPTION_MAX_CHARS})",
         )
+
+
+LOADED_REFERENCE = re.compile(r"Load `(references/[^`]+)`")
+
+
+def check_loaded_references_exist() -> None:
+    for skill in sorted(SKILLS_DIR.glob("*/SKILL.md")):
+        for match in LOADED_REFERENCE.finditer(skill.read_text()):
+            check(
+                (skill.parent / match.group(1)).is_file(),
+                f"{skill.parent.name}: loads {match.group(1)}, "
+                "which is not in the bundle",
+            )
 
 
 def check_agents() -> None:
@@ -393,6 +407,7 @@ def main() -> int:
     for step in (
         check_claude_md,
         check_skills,
+        check_loaded_references_exist,
         check_agents,
         check_no_stale_workflow_text,
         check_readme_workflow,

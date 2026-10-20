@@ -1,14 +1,35 @@
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum, auto
+from typing import NamedTuple
 
+from agy_context import (
+    MAX_CALL_SITES,
+    MAX_CALL_SITES_BYTES,
+    MAX_FILE_LIST_BYTES,
+    MAX_SITES_PER_NAME,
+    byte_size,
+    fit_lines,
+)
 from agy_reports import DatasheetOutput, TranslationOutput
+
+SECTION_SEPARATOR = "\n\n"
+CALL_SITES_LABEL = "Call sites in unchanged files"
+FILES_LABEL = "Repository files"
+CALL_SITES_RULE = "Check every listed call site against the changed contract."
+CALL_SITES_HEADER = (
+    f"{CALL_SITES_LABEL} (at most {MAX_SITES_PER_NAME} per name, "
+    f"{MAX_CALL_SITES} in total). {CALL_SITES_RULE}"
+)
+FILES_HEADER = f"{FILES_LABEL}:"
+NO_GUESSING_RULE = (
+    "Never guess a file name: read a path only when it appears in the "
+    "repository file list, the diff, the call sites, or an import or "
+    "include of a file you have read."
+)
 
 DOCUMENT_REFERENCE = "@document.pdf"
 REVIEW_DIFF_PATH = ".agy/review.diff"
-FACTS_PATH = ".agy/facts.md"
-TEMPLATE_PATH = ".agy/template.md"
-STYLE_GUIDE_PATH = ".agy/style-guide.md"
 EVIDENCE_PATH = ".agy/evidence.txt"
 READ_ONLY_PREAMBLE = (
     "You may read files in the working directory, but you must never run "
@@ -17,6 +38,12 @@ READ_ONLY_PREAMBLE = (
 NO_TOOLS_PREAMBLE = (
     "You have no tools: never run commands, never read or write files. "
     "Produce the answer in a single reply from this prompt alone."
+)
+READ_BATCH_RULE = (
+    "Read files in as few turns as possible: request every file you need "
+    "in one turn as parallel read_file calls, and read a long file in one "
+    "turn as parallel read_file calls for consecutive line ranges. Never "
+    "read .git or anything outside the working directory."
 )
 DATASHEET_NO_COMMANDS = (
     "Use only the attached document; never run commands and never write files."
@@ -85,13 +112,16 @@ translation exactly as often as in the source. Do not add, drop or rename
 keys, and do not explain anything."""
 
 CODE_REVIEW_INSTRUCTIONS = """\
-The change under review is the unified diff in {diff}. Review it for bugs
+The change under review is {diff}. Review it for bugs
 only. A bug is wrong behaviour, a crash, data
 loss or corruption, a security hole, a broken contract with a caller, or a
 bug fix without a test that fails without it. Never report style, naming,
 comments, formatting, refactors, alternative designs, suggestions phrased
 as "could" or "consider", or performance unless it is a defect. Read only
 the changed code and what it directly calls or is called by."""
+
+INLINE_DIFF_SOURCE = "the unified diff below"
+ATTACHED_DIFF_SOURCE = "the unified diff in {path}"
 
 CODE_REVIEW_OUTPUT_FORMAT = """\
 Output only these lines, with no preamble, no summary and no code:
@@ -103,17 +133,14 @@ The last line is PASS when there is no bug, otherwise FAIL."""
 
 WRITE_INSTRUCTIONS = """\
 Write the ready-to-publish text of a {kind} in the language {language}.
-Use only the facts in {facts} and what the code in the working directory
-shows; never invent a fact. Where a fact is missing, write [BRAK: <what is
-missing>] in its place. Output the text itself and nothing around it."""
+Use only the facts below; never invent a fact. Where a fact is missing,
+write [BRAK: <what is missing>] in its place. Output the text itself and
+nothing around it."""
 
 WRITE_NO_WRAPPER_RULE = (
     "Write no AI header and no AI footer, whatever the style guide says "
     "— the footer is added later."
 )
-
-WRITE_TEMPLATE_RULE = "Follow the structure of the template in {template}."
-WRITE_STYLE_GUIDE_RULE = "Follow the style guide in {style_guide}."
 
 DEBUG_INSTRUCTIONS = """\
 Find the root cause of the problem below; the evidence is in {evidence}.
@@ -132,6 +159,7 @@ class WriteKind(StrEnum):
     JIRA_COMMENT = auto()
     JIRA_DESCRIPTION = auto()
     UI_MESSAGE = auto()
+    REVIEW_COMMENT = auto()
 
     @property
     def label(self) -> str:
@@ -155,68 +183,157 @@ def plan_prompt(
     review_focus: str,
     acceptance_criteria: str,
     extra_context: str,
+    *,
+    files: str = "",
 ) -> str:
     """Compose the plan review prompt."""
-    sections = [PLAN_READ_ONLY_NOTE, PLAN_INSTRUCTIONS]
+    sections = [
+        PLAN_READ_ONLY_NOTE,
+        READ_BATCH_RULE,
+        NO_GUESSING_RULE,
+        PLAN_INSTRUCTIONS,
+    ]
     labelled(sections, "What the plan changes", what_changed)
     labelled(sections, "Review focus", review_focus)
     labelled(sections, "Acceptance criteria", acceptance_criteria)
     labelled(sections, "Further context", extra_context)
+    if files:
+        sections.append(files)
     sections.append(PLAN_OUTPUT_FORMAT)
-    return "\n\n".join(sections)
+    return SECTION_SEPARATOR.join(sections)
 
 
 def code_review_prompt(
-    review_focus: str, acceptance_criteria: str, extra_context: str
+    review_focus: str,
+    acceptance_criteria: str,
+    extra_context: str,
+    *,
+    diff: str | None,
+    call_sites: str = "",
+    files: str = "",
 ) -> str:
-    """Compose the code review prompt."""
+    """Compose the code review prompt, inlining the diff when given."""
+    diff_source = (
+        INLINE_DIFF_SOURCE
+        if diff is not None
+        else ATTACHED_DIFF_SOURCE.format(path=reference(REVIEW_DIFF_PATH))
+    )
     sections = [
         READ_ONLY_PREAMBLE,
-        CODE_REVIEW_INSTRUCTIONS.format(diff=reference(REVIEW_DIFF_PATH)),
+        READ_BATCH_RULE,
+        NO_GUESSING_RULE,
+        CODE_REVIEW_INSTRUCTIONS.format(diff=diff_source),
     ]
     labelled(sections, "Review focus", review_focus)
     labelled(sections, "Acceptance criteria", acceptance_criteria)
     labelled(sections, "Further context", extra_context)
-    sections.append(CODE_REVIEW_OUTPUT_FORMAT)
-    return "\n\n".join(sections)
+    context = [section for section in (call_sites, files) if section]
+    if diff is None:
+        sections.extend([*context, CODE_REVIEW_OUTPUT_FORMAT])
+    else:
+        sections.extend(
+            [CODE_REVIEW_OUTPUT_FORMAT, f"Diff:\n{diff}", *context]
+        )
+    return SECTION_SEPARATOR.join(sections)
 
 
 def write_prompt(
     kind: WriteKind,
     language: str,
-    *,
-    has_template: bool,
-    has_style_guide: bool,
+    facts: str,
+    template: str,
+    style_guide: str,
 ) -> str:
     """Compose the writing prompt."""
     sections = [
-        READ_ONLY_PREAMBLE,
-        WRITE_INSTRUCTIONS.format(
-            kind=kind.label, language=language, facts=reference(FACTS_PATH)
-        ),
+        NO_TOOLS_PREAMBLE,
+        WRITE_INSTRUCTIONS.format(kind=kind.label, language=language),
     ]
-    if has_template:
-        sections.append(
-            WRITE_TEMPLATE_RULE.format(template=reference(TEMPLATE_PATH))
-        )
-    if has_style_guide:
-        sections.append(
-            WRITE_STYLE_GUIDE_RULE.format(
-                style_guide=reference(STYLE_GUIDE_PATH)
-            )
-        )
+    labelled(sections, "Template — follow its structure", template)
+    labelled(sections, "Style guide — follow it", style_guide)
     sections.append(WRITE_NO_WRAPPER_RULE)
+    labelled(sections, "Facts", facts)
     return "\n\n".join(sections)
 
 
-def debug_prompt(problem: str) -> str:
+def debug_prompt(problem: str, *, files: str = "") -> str:
     """Compose the debug consult prompt."""
     sections = [
         READ_ONLY_PREAMBLE,
+        READ_BATCH_RULE,
+        NO_GUESSING_RULE,
         DEBUG_INSTRUCTIONS.format(evidence=reference(EVIDENCE_PATH)),
     ]
     labelled(sections, "Problem", problem)
-    return "\n\n".join(sections)
+    if files:
+        sections.append(files)
+    return SECTION_SEPARATOR.join(sections)
+
+
+class FittedReview(NamedTuple):
+    """A code review prompt and whether it carries the diff inline."""
+
+    prompt: str
+    diff_inline: bool
+
+
+def more_files_line(count: int) -> str:
+    """Mark how many files the list leaves out."""
+    return f"... {count} more files not listed"
+
+
+def more_sites_line(count: int) -> str:
+    """Mark how many call site lines the section leaves out."""
+    return f"... {count} more call site lines not listed"
+
+
+def room_for_section(prompt: str, limit: int, cap: int) -> int:
+    """Return the bytes a new section may take under the prompt limit."""
+    room = limit - byte_size(prompt) - len(SECTION_SEPARATOR)
+    return min(cap, room)
+
+
+def files_section(
+    build: Callable[[str], str], paths: Sequence[str], limit: int
+) -> str:
+    """Fit the repository file list into what the prompt leaves."""
+    budget = room_for_section(build(""), limit, MAX_FILE_LIST_BYTES)
+    return fit_lines(FILES_HEADER, paths, budget, more_files_line)
+
+
+def fit_listed_prompt(
+    build: Callable[[str], str], paths: Sequence[str], limit: int
+) -> str:
+    """Build a prompt with as much of the file list as fits the limit."""
+    return build(files_section(build, paths, limit))
+
+
+def fit_code_review(
+    focus: tuple[str, str, str],
+    diff: str,
+    call_site_lines: Sequence[str],
+    paths: Sequence[str],
+    limit: int,
+) -> FittedReview:
+    """Fit call sites, the diff and the file list under the limit."""
+    attached = code_review_prompt(*focus, diff=None)
+    budget = room_for_section(attached, limit, MAX_CALL_SITES_BYTES)
+    sites = fit_lines(
+        CALL_SITES_HEADER, call_site_lines, budget, more_sites_line
+    )
+    inline = code_review_prompt(*focus, diff=diff, call_sites=sites)
+    diff_inline = byte_size(inline) <= limit
+
+    def build(files: str) -> str:
+        """Compose the review prompt around a file list section."""
+        return code_review_prompt(
+            *focus,
+            diff=diff if diff_inline else None,
+            call_sites=sites,
+            files=files,
+        )
+
+    return FittedReview(fit_listed_prompt(build, paths, limit), diff_inline)
 
 
 def datasheet_prompt(claims: Sequence[str], context: str) -> str:

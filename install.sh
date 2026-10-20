@@ -338,13 +338,9 @@ echo "done. files changed: $CHANGED$( [ -d "$BACKUP" ] && echo "; backups in $BA
 echo "next:"
 echo "  - restart Claude Code (agents, hooks and MCP servers load at session start)"
 echo "  - claude mcp list            -> codex-worker and agy-worker must show Connected"
-echo '  - for t in tdd-guard comment-guard lint-guard bash-write-guard git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
+echo '  - for t in tdd-guard comment-guard git-guard verify-guard read-guard git-policy delegation-guard subagent-verify-check repo-facts; do python3 ~/.claude/hooks/$t-test.py || break; done'
 echo '  - cd ~/.claude/mcp/agy-worker && .venv/bin/python -m pytest -q'
 echo '  - cd ~/.claude/mcp/codex-worker && ../agy-worker/.venv/bin/python -m pytest -q test_codex_worker.py'
 echo "  - bash ~/.claude/bin/verify-test.sh"
-echo "  - bash ~/.claude/bin/review-checkpoint-test.sh"
-echo "  - bash ~/.claude/bin/feature-worktree-test.sh"
-echo "  - bash ~/.claude/bin/quality-gate-test.sh"
-echo "  - ~/.claude/bin/quality-gate          -> type, dead-code and duplicate findings on the lines you changed"
 echo "  - ~/.claude/bin/repo-facts            -> toolchain facts of the current repo (also the SessionStart hook)"
 echo "  - claude login / codex login if this machine is fresh; set autoMode.environment for this machine's repos"

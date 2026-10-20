@@ -32,7 +32,7 @@ background, per repo:
 - `codex-runner` — mode `code`, `diff_base` = the base branch (Codex gpt-6.1-sol, effort medium);
 - `reviewer-opus` — `diff_base` = the base branch, repo path (Claude Opus 5.5, effort high);
 - `flash-review-runner` — `diff_base`, `review_focus`, `project_path`, `acceptance_criteria`,
-  `extra_context` (Gemini 3.8 Flash medium, tool `agy_code_review`).
+  `extra_context` (Gemini 3.8 Flash low, tool `agy_code_review`).
 
 Give all three the same facts: acceptance criteria, the `review_focus` for the class (see `delegate`),
 the plan's failure modes and the risk area. `review_focus` and `acceptance_criteria` are passed as TEXT in

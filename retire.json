@@ -34,7 +34,10 @@
     "skills/rownolegle",
     "skills/epik",
     "skills/teksty-ui",
-    "skills/qa/references/scenariusze.md"
+    "skills/qa/references/scenariusze.md",
+    "bin/ai-review-gate",
+    "bin/test_ai_review_gate.py",
+    "bin/review-checkpoint"
   ],
   "settings": {
     "env": [

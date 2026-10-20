@@ -14,6 +14,8 @@ from helpers_test import (
     REVIEW_BODY,
     TRANSLATE_ENTRIES,
     TRANSLATE_STRUCTURED,
+    FLASH_LOW_MODEL,
+    FLASH_MEDIUM_MODEL,
     FakeAgy,
     make_pdf,
     plan_review,
@@ -97,7 +99,7 @@ def test_plan_review_success_on_allowlisted_repo(
     assert result == PLAN_SUCCESS_TEXT
 
 
-def test_plan_review_defaults_to_flash(
+def test_plan_review_defaults_to_flash_low(
     fake_agy: FakeAgy, allowlisted_repo: Path
 ) -> None:
     result = plan_review(allowlisted_repo)
@@ -105,9 +107,19 @@ def test_plan_review_defaults_to_flash(
     argv = fake_agy.invocation().argv
     assert result.startswith(
         "Gemini review completed "
-        "(mode=plan, model=gemini-3.8-flash-medium, workspace=clean)."
+        f"(mode=plan, model={FLASH_LOW_MODEL}, workspace=clean)."
     )
-    assert argv[argv.index("--model") + 1] == "gemini-3.8-flash-medium"
+    assert argv[argv.index("--model") + 1] == FLASH_LOW_MODEL
+
+
+def test_plan_review_explicit_model_overrides_default(
+    fake_agy: FakeAgy, allowlisted_repo: Path
+) -> None:
+    result = plan_review(allowlisted_repo, model=FLASH_MEDIUM_MODEL)
+
+    argv = fake_agy.invocation().argv
+    assert f"model={FLASH_MEDIUM_MODEL}," in result
+    assert argv[argv.index("--model") + 1] == FLASH_MEDIUM_MODEL
 
 
 def test_plan_review_not_allowlisted_does_not_spawn_agy(
@@ -151,7 +163,7 @@ def test_translate_success_returns_translations_json(
     )
 
     assert json.loads(result) == {
-        "model": "gemini-3.8-flash-medium",
+        "model": FLASH_MEDIUM_MODEL,
         "translations": {
             "greeting": "Cześć {{name}}",
             "bye": "Do widzenia",

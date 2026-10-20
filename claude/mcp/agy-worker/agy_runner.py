@@ -30,8 +30,11 @@ BWRAP_ENV = "AGY_BWRAP"
 DEFAULT_BWRAP = "/usr/bin/bwrap"
 LOCK_PATH_ENV = "AGY_LOCK_PATH"
 DEFAULT_LOCK_PARTS = (".cache", "agy-worker", "agy.lock")
+MAX_PARALLEL_ENV = "AGY_MAX_PARALLEL"
+DEFAULT_MAX_PARALLEL = 3
 RUNTIME_DIR_ENV = "XDG_RUNTIME_DIR"
 GEMINI_DIR = ".gemini"
+SKIP_PERMISSIONS_FLAG = "--dangerously-skip-permissions"
 AUTH_MARKER = "Authentication required"
 BWRAP_ERROR_MARKER = "bwrap:"
 NOT_LOGGED_IN = (
@@ -262,6 +265,7 @@ def agy_arguments(job: AgyJob) -> list[str]:
         "--model",
         job.model,
         "--sandbox",
+        SKIP_PERMISSIONS_FLAG,
         "--print-timeout",
         f"{print_timeout}s",
     ]
@@ -440,35 +444,56 @@ def read_envelope(run: AgyRun, job: AgyJob) -> Envelope:
     return envelope
 
 
-def acquire_lock(handle: IO[str], path: Path) -> None:
-    """Take the exclusive lock, polling until the wait is over."""
+def max_parallel() -> int:
+    """Return the configured number of concurrent agy runs."""
+    try:
+        count = int(os.environ[MAX_PARALLEL_ENV])
+    except (KeyError, ValueError):
+        return DEFAULT_MAX_PARALLEL
+    return count if count >= 1 else DEFAULT_MAX_PARALLEL
+
+
+def lock_slot_paths(base: Path, count: int) -> list[Path]:
+    """Return the lock file of every slot, the base file being slot 0."""
+    return [base] + [
+        base.with_name(f"{base.name}.{index}") for index in range(1, count)
+    ]
+
+
+def acquire_lock(handles: Sequence[IO[str]], path: Path) -> IO[str]:
+    """Take any free slot, polling until the wait is over."""
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
     while True:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                fail(
-                    f"busy: another agy run holds {path}; gave up after "
-                    f"{LOCK_WAIT_SECONDS:g} s"
-                )
-            time.sleep(LOCK_POLL_SECONDS)
-        else:
-            return
+        for handle in handles:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            return handle
+        if time.monotonic() >= deadline:
+            fail(
+                f"busy: all {len(handles)} agy slots held ({path}); "
+                f"gave up after {LOCK_WAIT_SECONDS:g} s"
+            )
+        time.sleep(LOCK_POLL_SECONDS)
 
 
 @contextlib.contextmanager
 def agy_lock() -> Iterator[None]:
-    """Hold the cross-session lock that allows one agy run at a time."""
+    """Hold one of the cross-session slots that bound parallel agy runs."""
     default = Path.home().joinpath(*DEFAULT_LOCK_PARTS)
     path = path_from_env(LOCK_PATH_ENV, default)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        acquire_lock(handle, path)
+    with contextlib.ExitStack() as stack:
+        handles = [
+            stack.enter_context(slot.open("a"))
+            for slot in lock_slot_paths(path, max_parallel())
+        ]
+        held = acquire_lock(handles, path)
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            fcntl.flock(held, fcntl.LOCK_UN)
 
 
 def ensure_clean(workspace: Workspace, envelope: Envelope) -> None:
