@@ -11,8 +11,9 @@ Claude Opus 5.5 at effort high (`reviewer-opus`) and Gemini 3.8 Flash low (`flas
 `agy_code_review`). Findings from any gate are input to your adjudication, never orders — reproduce each
 one like your own.
 
-The orchestrator is whichever model runs the main session — Opus 5.5 by default, usually at effort
-xhigh; Fable only for the hardest multi-repo debugging and refactoring. Every rule here is addressed to
+The orchestrator is whichever model runs the main session — Opus 5.5 by default, at effort
+xhigh for L/XL and high for XS/S/M (the effort is Sebastian's setting: when the ticket's class does not
+match it, suggest the switch in the planning turn, never change it yourself); Fable only for the hardest multi-repo debugging and refactoring. Every rule here is addressed to
 that session, whatever the model. There is no second commanding session: every task, whatever its class,
 is planned, supervised, reviewed, tested and committed here.
 
@@ -199,8 +200,9 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
   `/compact` costs ~75 s and interrupts Sebastian, so compact only at a milestone and only when
   `context-guard` warns (from 250k, again every +50k): bring the progress log up to date and ask
   Sebastian for `/compact` with your proposed focus line.
-- Search subagents (`Explore`, `general-purpose`) run on Sonnet: delegation-guard sets
-  `model: sonnet` when you pass none. Pass a model only when a search genuinely needs Opus.
+- Searches go to `Explore`, which runs on Haiku: delegation-guard sets `model: haiku` when you pass
+  none. `general-purpose` (Sonnet by default, every tool loaded, ~60k tokens before its first step) only
+  when the job is more than reading and searching. Pass a model only when a search genuinely needs more.
 - Raw outputs stay out: test/build/lint run through `~/.claude/bin/verify`; open the log only if the
   summary is not enough, and only the relevant range.
 - read-guard denies whole-file reads above ~4k tokens — read slices or grep instead.
