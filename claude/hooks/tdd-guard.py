@@ -8,6 +8,7 @@ untouched. Internal failures — a malformed payload, an unreadable transcript, 
 a payload without a scratchpad directory — pass as well: only missing evidence denies."""
 import dataclasses
 import datetime
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -27,7 +28,10 @@ SESSIONS_DIR = "sessions"
 LEDGER_TAIL_LINES = 2000
 RED_OUTCOME = "red"
 GIT_MARKER = ".git"
-EDIT_TOOLS = ("Edit", "Write", "NotebookEdit")
+EDIT_TOOL = "Edit"
+EDIT_TOOLS = (EDIT_TOOL, "Write", "NotebookEdit")
+AGENT_ID_KEY = "agent_id"
+SMALL_EDIT_MAX_LINES = 5
 BASH_TOOL = "Bash"
 PATH_KEYS = ("file_path", "notebook_path")
 STATE_PREFIX = "tdd-guard-"
@@ -809,6 +813,23 @@ def remember_unlock(path, session_id, repo):
         pass
 
 
+def is_small_main_session_edit(payload: dict[str, object]) -> bool:
+    """Tell whether the main session makes an edit of a few lines."""
+    if payload.get(AGENT_ID_KEY) or payload.get("tool_name") != EDIT_TOOL:
+        return False
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict) or tool_input.get("replace_all"):
+        return False
+    old = tool_input.get("old_string")
+    new = tool_input.get("new_string")
+    if not isinstance(old, str) or not isinstance(new, str):
+        return False
+    diff = difflib.ndiff(old.split("\n"), new.split("\n"))
+    changes = [line[0] for line in diff]
+    largest = max(changes.count("+"), changes.count("-"))
+    return largest <= SMALL_EDIT_MAX_LINES
+
+
 def guard(payload):
     tool = payload.get("tool_name")
     tool_input = payload.get("tool_input")
@@ -830,6 +851,8 @@ def guard(payload):
         if repo is not None and repo not in repos:
             repos.append(repo)
     if not repos:
+        return
+    if is_small_main_session_edit(payload):
         return
     if exception_granted(payload.get("transcript_path")):
         return

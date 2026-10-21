@@ -1,146 +1,70 @@
 ---
 name: repo-standards
-description: Idioms for the versions pinned in the repo and the language norms lint-strict checks. Preloaded in implementer; load when reviewing idioms or on deprecation warnings.
+description: Idioms for the versions pinned in the repo (per-stack tables in references/) and the language norms lint-strict checks. Preloaded in implementer; load when reviewing idioms or on deprecation warnings.
 ---
 
-## 1. Facts before code
+## 1. Versions and the API oracle
 
-`~/.claude/bin/repo-facts` is the first command in the repo. It prints the toolchain versions, and per
-allowlisted framework `locked=X installed=Y` with a flag: `MISMATCH`, `not installed`,
-`git-source (unverified)` or `path=<dir>`. Never start from what you remember the API to be.
+`~/.claude/bin/repo-facts` runs first. An entry with `installed == locked` (Rust: listed under
+`cargo locked+fetched`) makes the installed source the API oracle: JS/TS `node_modules/<pkg>`
+(`package.json`, `dist/*.d.ts`, `types/`), Python the venv's `site-packages/<pkg>`, Rust
+`~/.cargo/registry/src/<registry-dir>/<crate>-<version>`, a Rust `path=<dir>` dependency at `<dir>`.
+A `FLAG:` entry is no oracle: `MISMATCH`, `not installed`, `not fetched` → sync (`uv sync`, `npm ci`,
+`cargo fetch`) and re-run repo-facts; `git-source`, `unverified`, `ambiguous`, `not in Cargo.lock` →
+read the source the build actually uses, never the registry cache. Grep signatures, exports and
+deprecation notes there; never code an API from memory.
 
-## 2. The oracle
+## 2. Idioms
 
-The installed package source is the API oracle — but ONLY for an entry repo-facts reports as `installed`
-with `installed == locked`:
+Before the first edit read the table for your stack:
+`~/.claude/skills/repo-standards/references/python.md`, `ts-react.md`, or `native.md` (C/CMake,
+PlatformIO, Rust, Go).
 
-- JS/TS: `node_modules/<pkg>` (its `package.json`, `dist/*.d.ts`, `types/`)
-- Python: the project venv's `site-packages/<pkg>`
-- Rust: the registry source directory repo-facts names for that crate (`~/.cargo/registry/src/<registry-dir>/<crate>-<version>`)
+- Use a newer idiom in new or changed code when the repo's floor allows it, never above it. Raising a
+  floor (`requires-python`, tsconfig `lib`/`target`, `engines`, `react`) is the orchestrator's call.
+  Do not rewrite existing code outside the task.
+- Floors. Python: the lower bound of `requires-python`, else `.python-version` (lint-strict passes it
+  to ruff as `--target-version`). TS/JS: the feature type-checks under the app's tsconfig `lib`
+  (tsconfig.app.json) and exists in the oldest runtime (Node in `engines`/`.nvmrc`; frontend:
+  browserslist or the target device browser); `lib` polyfills nothing; Baseline "newly available" is
+  not "widely available". React: the lower bound of `react` in package.json.
 
-`MISMATCH` or `not installed` → sync the environment first (`uv sync`, `npm ci`, `cargo fetch`) and
-re-run repo-facts; a stale install is not evidence about the locked version. `git-source (unverified)`
-and `path=<dir>` never authorise the registry cache as oracle — read the actual source at that path.
-Then grep the oracle instead of recalling: signatures, exported names, the deprecation notes in the
-installed version. One grep beats three fix rounds.
+## 3. Who checks what
 
-## 3. Current idiom vs legacy, per stack
+- Hook-checked by lint-strict at the floor (fix what it reports, do not re-review by hand): ruff
+  UP040/046/047/043/035/017/041, B012, B911/B912, DTZ003; mypy `explicit-override` (≥ 3.12); VER002
+  `get_event_loop()` in `async def`; VER003 deprecated asyncio APIs (≥ 3.14); VER007 `re.match`
+  (≥ 3.15); ESLint `prefer-object-has-own` (ES ≥ 2022); VER201–204 `forwardRef` /
+  `<XContext.Provider>` / `useFormState` from react-dom / `propTypes` (React ≥ 19).
+- Everything else in the tables is not hook-checked: apply it while writing (review raises it) and
+  judge each case, since a rewrite can change behaviour (Set vs array, custom `__replace__`,
+  `TYPE_CHECKING` imports, live `MappingProxyType` views, index-sensitive `find` callbacks).
 
-| Stack | Current | Legacy — reject |
+## 4. Deprecations
+
+Configure warnings-as-errors where the project allows it (pytest `-W error::DeprecationWarning`,
+eslint deprecation rules, `-Werror=deprecated`). Elsewhere `warnings: N deprecation lines` with N > 0
+on a verify PASS is a finding: fix the deprecations in code you touched, report the rest.
+
+## 5. Norms
+
+`~/.claude/bin/lint-strict --repo <repo>` shows standards-gate's findings early.
+
+| Language | Norm | lint-strict runs |
 |---|---|---|
-| Python 3.11–3.15 | `X \| None`, `match`, `tomllib`, `@dataclass(slots=True)`, builtin generics `list[str]`/`dict[str,int]`; newer idioms per § 3a | `Optional[X]`, `Union[...]`, if/elif chains over a tag, `toml`/`tomli`, `typing.List`/`Dict`/`Tuple` |
-| FastAPI | `lifespan=` async context manager, `Annotated[..., Depends()]` | `@app.on_event("startup"/"shutdown")`, bare `Depends()` defaults |
-| SQLAlchemy 2.0 | `Mapped[...]` + `mapped_column`, `select()` + `session.execute`/`scalars` | `Column(...)` declarative attrs, `session.query(...)`, implicit autocommit |
-| Pydantic v2 | `model_validate`, `model_dump`, `ConfigDict`, `field_validator`, `model_validator` | `parse_obj`, `dict()`, inner `class Config`, `validator`, `root_validator` |
-| Alembic | autogenerate, then read every generated op by hand (types, server defaults, indexes, data migrations) | committing an autogenerated revision unread |
-| React 19 | ref as a normal prop, `use()`, actions / `useActionState`, `useOptimistic`, default params; per-minor idioms in § 3a | `forwardRef`, `defaultProps`, `propTypes`, manual promise state for data already in an action |
-| TypeScript 5.x–7 | `satisfies`, `const` type parameters, `unknown` + narrowing, `import type`; per-version idioms in § 3a | `as` casts to force a shape, `any`, enums where a union literal fits |
-| Vite 7/8 | `defineConfig`, ESM config, `import.meta.env` | CJS config, `process.env` in client code, webpack-era plugins |
-| Vitest | `vi.fn`/`vi.mock`/`vi.useFakeTimers`, `expect` from `vitest` | `jest.fn`/`jest.mock`, global jest APIs, `@types/jest` |
-| Playwright | `page.getByRole`/`getByLabel`/`getByTestId`, web-first assertions, auto-waiting | CSS/XPath selectors, `waitForTimeout`, manual sleeps |
-| C (the build's `-std`) + CMake ≥ 3.20 | `target_sources`/`target_link_libraries`/`target_compile_options`, `target_compile_features(c_std_17)` | `include_directories`, `add_definitions`, global `CMAKE_C_FLAGS` edits |
-| PlatformIO | envs in `platformio.ini` (`[env:<name>]`, `build_flags`, `lib_deps`) | hand-rolled Makefiles, hardcoded toolchain paths |
-| Rust 2021/2024 | `let ... else`, let chains, `?`, `thiserror`/`anyhow` per crate convention | nested `match` for early return, `unwrap()` in library code, `extern crate` |
-| Go 1.22+ | `for i := range n`, per-iteration loop variables, `errors.Is/As`, `slices`/`maps` | `for i := 0; i < n; i++` boilerplate where range fits, loop-variable capture workarounds, `interface{}` |
+| Python | PEP 8, 257, 484, 585, 604 | ruff --select ALL (off: formatter conflicts, D100/D104/D203/D213, INP001, print, S603/S607, CPY001, FAST001) + ruff format, mypy --strict, complexity limits; docstrings per CLAUDE.md; lines ≤ 79, or the repo's configured length up to 99 |
+| TS / JS | ECMAScript + typescript-eslint strict | the package's ESLint config + typescript-eslint strict-type-checked and stylistic-type-checked, complexity limits, explicit return types, tsc --noEmit, Prettier (the repo's config, else defaults with the file's quote and semicolon style) |
+| C | the ISO standard the build compiles with (`-std` from compile_commands.json) | clang-tidy -Wall -Wextra -Wpedantic, CERT, bugprone, analyzer, readability, misc, performance, portability, cognitive-complexity and function-size limits; Zephyr repos also checkpatch without its indentation rules; clang-format only with the repo's own .clang-format |
+| C++ | the build's standard + C++ Core Guidelines | as C, plus cppcoreguidelines and modernize |
 
-## 3a. Version-gated idioms (researched 2026-10-12)
-
-Use a newer idiom in new or changed code whenever the repo's **floor** allows it, and never above
-the floor. Raising a floor (`requires-python`, tsconfig `lib`/`target`, `engines`, `react`) is a
-decision for the orchestrator, never a side effect of the task. Existing code is not rewritten
-outside the task.
-
-The floor per stack:
-- **Python:** the lower bound of `requires-python`, else `.python-version`. device-service declares `>=3.11` even
-  though it runs 3.13, so 3.11 is its floor. lint-strict passes the same `--target-version` to ruff,
-  so the ruff-enforced rows below (UP040/046/047/043/035/017/041, B012, B911/B912) are already hook
-  checks.
-- **TypeScript/JS:**
-  - The feature must type-check under the app's tsconfig `lib` (tsconfig.app.json).
-  - It must also exist in the oldest runtime: the Node version in `engines`/`.nvmrc`; for frontend
-    code, browserslist or the target device browser.
-  - `lib` polyfills nothing; Baseline "newly available" is not "widely available".
-- **React:** the lower bound of `react` in package.json. The compiler row applies only when
-  `babel-plugin-react-compiler` is wired into the vite config.
-
-**Who checks what.**
-- **Hook (`lint-strict` at every commit), floor-gated:**
-  - ruff UP040/046/047/043/035/017/041, B012, B911/B912, DTZ003;
-  - mypy `explicit-override` (Python ≥ 3.12, `@typing.override` required on overrides);
-  - VER002 `get_event_loop()` inside `async def`;
-  - VER003 deprecated asyncio APIs (≥ 3.14);
-  - VER007 `re.match` (≥ 3.15);
-  - ESLint `prefer-object-has-own` (ES ≥ 2022);
-  - VER201–204 `forwardRef` / `<XContext.Provider>` / `useFormState` from react-dom / `propTypes` (React ≥ 19).
-
-  Do not re-review these by hand; fix what the hook reports.
-- **Everything else in this section is an AI check.** The implementer applies it while writing, and
-  the orchestrator raises it in review. These rows are not hook rules on purpose: the rewrite is not
-  equivalent without type information (Set vs array, custom `__replace__`, `TYPE_CHECKING` imports,
-  live `MappingProxyType` views, index-sensitive `find` callbacks), so judge each case.
-
-**Python**
-| Floor | Use | Instead of |
-|---|---|---|
-| 3.11 | `asyncio.TaskGroup`, `asyncio.timeout()`, `except*` for ExceptionGroup | `gather()` with manual cancel, `wait_for()` |
-| 3.12 | `@typing.override` on every overriding method; `itertools.batched(xs, n, strict=...)`; `Path.walk()`; `**kw: Unpack[TD]` | unmarked overrides, `islice` loops, `os.walk`, `**kwargs: Any` |
-| 3.13 | `@warnings.deprecated("use g()")`; `TypeIs[T]`; `ReadOnly[...]` in TypedDict; `copy.replace(obj, f=v)`; type-param defaults `class Box[T = int]` | hand-rolled `warnings.warn`, `TypeGuard` (does not narrow the else branch), `dataclasses.replace`/`_replace` |
-| 3.14 | forward references written bare, with no `from __future__ import annotations` in new modules (PEP 649); `except A, B:` without `as` (ruff format writes it); `uuid.uuid7()` for time-ordered keys; `Path.copy()`/`.move()`; `compression.zstd`; `asyncio.run()` (`get_event_loop()` raises without a loop); t-strings only for SQL/HTML/shell builders whose processor escapes | `"Node"` string annotations, `uuid4()` DB keys, `shutil.copytree`/`move`, third-party `zstandard`, `get_event_loop().run_until_complete`, f-strings building SQL |
-| 3.15 | `lazy import x` at module scope (also satisfies H020); `frozendict(...)` for constant mappings; `MISSING = sentinel("MISSING")`; `[*xs for xs in lists]`; `class M(TypedDict, closed=True)`; `re.prefixmatch` | function-local imports for startup cost, `MappingProxyType`/dict constants, `object()` sentinels, `chain.from_iterable`, open TypedDicts, `re.match` |
-
-**JavaScript / TypeScript** (the kiosk and acme UIs pin `lib: ES2022` today, so only the first row applies there)
-| Floor | Use | Instead of |
-|---|---|---|
-| lib ES2022 | `a.at(-1)`, `Object.hasOwn(o, k)`, `structuredClone(o)` | `a[a.length - 1]`, `hasOwnProperty`, `JSON.parse(JSON.stringify(o))` |
-| lib ES2023 | `toSorted`/`toReversed`/`toSpliced`/`with`, `findLast`/`findLastIndex` | `[...a].sort()`, `slice().reverse()`, `reverse().find()` |
-| lib ES2024 (Node 22) | `Object.groupBy`/`Map.groupBy`, `Promise.withResolvers()` | reduce into an object, `new Promise` with captured resolvers |
-| lib ES2025 (Node 24 for `Promise.try`/`RegExp.escape`) | Set `union`/`intersection`/`difference`, iterator helpers `.filter().take().toArray()`, `Promise.try`, `RegExp.escape`, `import x from './a.json' with { type: 'json' }` | spread-into-Set, `Array.from(it)` chains, hand-rolled regex escaping, `assert {}` |
-| lib esnext + Node 24/26, backend only | `Array.fromAsync`, `Error.isError`, `Uint8Array#toBase64`; `using`/`await using` and Temporal (ES2027, no Safari — never in frontend) | `for await` + push, `instanceof Error`, `Buffer` base64, `try/finally` disposal, `Date` |
-| TS 5.0–5.5 | `satisfies`, `<const T>`, `NoInfer<T>`, inferred predicates `xs.filter(x => x !== undefined)` without a cast, `import { type X }` under `verbatimModuleSyntax` | `as` shapes, `as const` at call sites, `(x): x is T =>` + cast |
-| TS 5.8 `erasableSyntaxOnly`, or Node type stripping | `const E = { A: 'a' } as const; type E = (typeof E)[keyof typeof E]`; explicit fields | `enum`, runtime `namespace`, constructor parameter properties |
-| TS 6.0 / 7.0 | `#/` subpath imports or `paths`; `moduleResolution bundler` for apps, `nodenext` for Node; `types: ["node"]` explicit; under TS 7, type-aware ESLint via the `@typescript/typescript6` alias | `baseUrl`, `node10`, implicit `@types/*`, `target es5`, `asserts` on imports |
-| Node 22+ | `import.meta.dirname`, `process.loadEnvFile()` / `--env-file`, global `fetch`, `node:test`, `node app.ts` (type stripping) | `fileURLToPath(import.meta.url)`, dotenv, node-fetch, ts-node |
-
-**React** (cloud-platform/ui and hw-sim are still on 18.3, so nothing here applies to them)
-| Floor | Use | Instead of |
-|---|---|---|
-| 19.0 | `ref` as a prop; `<Ctx value={v}>`; `use(Ctx)`; `useActionState`/`useOptimistic`/async `startTransition` for async submit state; `<form action={fn}>` + `useFormStatus` for plain forms; `<title>`/`<meta>` rendered in the tree; ref callbacks returning cleanup | `forwardRef`, `<Ctx.Provider>`, hand-rolled `isPending`/`error` state, `useFormState`, `document.title` in an effect, react-helmet |
-| 19.2 | `useEffectEvent` for event-like logic fired from an effect (never passed as a prop); `<Activity mode>` to keep hidden UI state | callbacks in effect deps, latest-ref hacks, `eslint-disable exhaustive-deps`, `{open && <Page/>}` when state must survive |
-| 19.3 | `<ViewTransition>` + `addTransitionType`; `<Fragment ref>` | `document.startViewTransition` + `flushSync`, wrapper `<div ref>` |
-| compiler 1.0 wired in vite config | plain components in new code, without `useMemo`/`useCallback`/`memo` for performance; keep the existing ones (removal can change effect timing) | new manual memoization |
-| eslint-plugin-react-hooks ≥ 7 | `flat.recommended` (compiler rules: `set-state-in-effect`, `refs`, `purity`, `immutability`, `static-components`…) | the deprecated `eslint-plugin-react-compiler`, 6.x presets |
-
-With react-hook-form, keep `handleSubmit`: RHF has no `<form action>` integration. Prefer `useWatch`/`<Controller>` to `watch()`.
-
-## 4. Deprecation policy
-
-Configure warnings-as-errors where the project allows it: pytest `-W error::DeprecationWarning` in the
-config, eslint deprecation rules, `-Werror=deprecated` for C/C++. Where that is not configurable,
-`~/.claude/bin/verify` prints `warnings: N deprecation lines` on PASS — N > 0 is a review finding, not
-noise. Fix the deprecation in the code you touched; report the rest.
-
-## 5. Norms — exemplary code on every changed line
-
-The norms below are enforced at every `git commit` by the `standards-gate` hook (`lint-strict` on the changed lines). `~/.claude/bin/lint-strict` can also be run by hand
-(e.g. `lint-strict --repo <repo>` before reporting) to see the same findings early.
-
-| Language | Norm | What lint-strict runs |
-|---|---|---|
-| Python | PEP 8, 257, 484, 585, 604 (+ the ruff rule set) | ruff with every rule (only formatter conflicts, INP001, print, S603/S607, CPY001 off), ruff format, a docstring on every class/function except tests (one line, one sentence, at most 72 characters, as short as possible), no module docstrings; lines ≤ 79, or the repo's configured length up to 99 |
-| TypeScript / JavaScript | ECMAScript + typescript-eslint strict | the package's ESLint config + typescript-eslint strict-type-checked and stylistic-type-checked, Prettier (the repo's config, else Prettier defaults with the file's quote and semicolon style) |
-| C | the ISO standard the build compiles with — `-std` from compile_commands.json (firmware-app: C99) | clang-tidy with -Wall -Wextra -Wpedantic, CERT, bugprone, analyzer, readability, misc, performance, portability; Zephyr repos also checkpatch without its indentation rules (the app code keeps its own indentation); clang-format only with the repo's own .clang-format |
-| C++ | the standard the build uses + C++ Core Guidelines | as C, plus cppcoreguidelines and modernize |
-
-- Never write for a newer standard than the build uses: C23 syntax in a C99 build does not compile.
-- Only what the norm itself leaves to the team is configurable — the line length within PEP 8's 99, the
-  quote style. A repo config cannot switch a rule off, and neither can `.claude/rules/standards.md`.
-- A suppression is not a fix. Report the line when the norm truly cannot be met (a signature the
-  framework imposes, generated code); the orchestrator decides.
-- `Not checked` means the tool could not run (no compile_commands.json, no node_modules): build or
-  install what it needs and rerun, or check that file against the norm by hand.
+- Only what the norm leaves to the team is configurable (line length up to 99, quote style); no repo
+  config switches a rule off.
+- A suppression is not a fix: report the line when the norm truly cannot be met (a framework-imposed
+  signature, generated code); the orchestrator decides.
+- `Not checked` = the tool could not run (no compile_commands.json, no node_modules): build or install
+  what it needs and rerun, or check that file by hand.
 
 ## 6. Project rules win
 
-When the repo has `.claude/rules/standards.md`, it overrides this skill for that repo — except the
-norms in § 5. Template:
-`~/.claude/templates/rules-standards.md`.
+A repo's `.claude/rules/standards.md` overrides this skill, except § 5 (template:
+`~/.claude/templates/rules-standards.md`).

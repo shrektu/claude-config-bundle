@@ -1,125 +1,103 @@
 ---
 name: qa
-description: Hard e2e scenarios for a Jira epic (on its epik/<EPIC> branch, once every task is merged into it) or a task with no epic, on an isolated stack, with a PASS / FAIL / NIEJASNE result and evidence. Load when Sebastian writes /qa with an epic or task ID or asks to test or click through one, and always in step 6 of the epic skill.
+description: Hard e2e scenarios on an isolated stack with PASS/FAIL/NIEJASNE evidence, for a fully merged epik/<EPIC>, a task with no epic or an old-epic blocker fix. Load on /qa <ID> or when asked to test or click through a ticket.
 argument-hint: <EPIC-ID | JIRA-ID>
 ---
 
-Input: `$ARGUMENTS` — one epic ID (`TICKET-1273`) or the ID of a task with no epic. Without an ID, ask; do
-not guess from the branch. An epic is tested only once all its task PRs are merged into `epik/<EPIC>` —
-before that the parts do not meet and the run proves nothing; say so and stop. A task that belongs to an
-epic is not tested on its own: point to the epic run instead — unless it is a blocker fix of an old
-epic with its PR to `develop` (the `task` skill section 1, e.g. TICKET-1530), which is tested like a task
-with no epic, on its own task branch.
+Input `$ARGUMENTS`: an epic ID, a task with no epic, or an old-epic blocker fix with its PR to `develop`
+(CLAUDE.md EPIC MODEL; tested on its own task branch). No ID: ask, never guess from the branch. An epic runs only
+once all its task PRs are merged into `epik/<EPIC>`, else say so and stop; any other task of an epic:
+point to the epic run and stop.
 
-You are a tester, not an implementer. You do not fix code, do not commit, do not touch Sebastian's
-branches or checkouts. Everything you write — scenarios, specs, the compose override, the report — lands in
-`~/.cache/claude-qa/runs/<ID>/`. The goal is to find what does not work: a scenario that passes is not a
-failure, but a list of only happy paths is.
+You only test: no code fixes, no commits, never touch Sebastian's branches or checkouts. Scenarios, specs,
+overrides and the report go to `~/.cache/claude-qa/runs/<ID>/`. Goal: find what does not work.
 
-## 1. The oracle from Jira
+## 1. Oracle
 
 `getJiraIssue` (cloudId `00000000-0000-0000-0000-000000000000`, `responseContentFormat: markdown`), the
-parent epic and `issuelinks`. For an epic: the epic itself and every child (`parent = <EPIC>`), plus the
-ideas the tasks left in `~/.cache/claude-progress/<EPIC>/qa-ideas.md`; the epic's own expected results
-and the cross-task flows come first. List the expected results in the ticket's own words — that is the only
-PASS/FAIL oracle. Behaviour the ticket does not specify is neither PASS nor FAIL: it is **NIEJASNE** with
-a concrete question. You do not settle it by what the code happens to do — then the test would check the
-code against itself.
+parent epic, `issuelinks`. Epic: also every child (`parent = <EPIC>`) and
+`~/.cache/claude-progress/<EPIC>/qa-ideas.md`; the epic's own expected results and cross-task flows first.
+List the expected results in the ticket's own words: the only PASS/FAIL oracle. Behaviour the ticket does
+not specify is **NIEJASNE** with a concrete question, never settled by what the code does.
 
-## 2. The branches under test
+## 2. Branches
 
-Repositories: `~/projects/cloud-platform` (monorepo), `~/projects/cloud/cloud-common`,
-`~/projects/kiosk/*` and the other repos with their own `.git`. In each, `git fetch --quiet origin` and,
-for an epic, `git branch -r --list "origin/epik/<EPIC>"`; for a task with no epic,
-`git branch -a --list "*<ID>*"`. The result is a table: repo → branch → base (`develop` for `epik/*`;
-`master` where that is the repo's main line).
+Repos: `~/projects/cloud-platform` (monorepo), `~/projects/kiosk/*`, any other with its own `.git`. In each
+`git fetch --quiet origin`, then `git branch -r --list "origin/epik/<EPIC>"` (epic) or
+`git branch -a --list "*<ID>*"` (task). Table: repo → branch → base (`develop`).
 
-**You test a commit, not a directory.** SHA = `origin/epik/<EPIC>` (or, for a task with no epic, the local
-task branch if it exists, otherwise `origin/<branch>`). For each repo you create a fresh worktree of your own:
+**Test a commit, not a directory.** SHA = `origin/epik/<EPIC>`; task: the local task branch if it exists,
+else `origin/<branch>`. Per repo, a fresh worktree of your own:
 
 ```bash
-git -C <repo> worktree add --detach ~/projects/cloud/.worktrees/qa-<repo>-<ID> <sha>
-git -C ~/projects/cloud/.worktrees/qa-<repo>-<ID> submodule update --init
+git -C <repo> worktree add --detach ~/projects/.worktrees/qa-<repo>-<ID> <sha>
 ```
 
-You never build from a worktree where an implementer or another session is working — uncommitted changes
-may be lying there. If the `common` submodule on a service's branch points to a different commit than the
-head of the task branch in `cloud-common`, that is a finding (a service built from an old
-`common`), not something to quietly fix. The QA result is valid only for those SHAs — write them in the
-report header.
+The result holds only for those SHAs; they go in the report header.
 
-## 3. The change map
+## 3. Change map
 
-`git diff <base>...<sha> --stat` and reading the changed files (in slices): which screens, endpoints,
-queries, migrations, NATS messages and periodic jobs. For every changed branch of logic, condition and
-query note `file:line` — the hard scenarios come from them.
+`git diff origin/<base>...<sha> --stat` (never the local base: it can be stale), then the changed files:
+screens, endpoints, queries, migrations, NATS messages, periodic jobs. Note `file:line` of every
+changed logic branch, condition and query.
 
 ## 4. Hard scenarios
 
-Load `references/scenarios.md` and write the scenarios **before you look at the implementer's tests** —
-otherwise you will repeat its assumptions. The minimum: every expected result from the ticket has one
-happy scenario and at least two hard ones. Hard means: it has a named mechanism that can break, pointed
-out in the diff.
+Load `references/scenarios.md`; write the scenarios **before reading the implementer's tests**. Minimum
+per expected result: one happy, two hard. Hard = a named mechanism that can break, pointed at in the diff.
 
-Each scenario: `S01…`, a title, why it is hard (`file:line`), the initial state and data, the steps, the
-expected result with a quote from the ticket or NIEJASNE, and the test form (point 5). Save them to
-`runs/<ID>/scenarios.md` before the first spec exists. Only now look through the implementer's tests: a
-scenario they already cover you run anyway — QA is independent evidence.
+Each: `S01…`, title, why hard (`file:line`), initial state and data, steps, expected (a ticket quote or
+NIEJASNE), form (§5). Save to `runs/<ID>/scenarios.md` before the first spec. Scenarios the implementer's
+tests already cover still run.
 
-## 5. Test form — the ladder
+## 5. Form: the highest rung that runs
 
-You take the highest rung that can be run. Every step down has a one-sentence reason in the report;
-"it was faster" is not a reason.
+Each step down gets a one-sentence reason in the report; "faster" is not one.
 
-1. **Playwright UI on the QA stack** — the default for everything visible in the panel.
-2. **Playwright `request` through the UI proxy** (`http://localhost:8480/api/...`, the same session) —
-   when there is no screen (an endpoint, an export, a report) or the scenario needs parallel requests.
-3. **An assertion on the QA database** (`qa exec -T db psql ...`) — as a second assertion next to 1 or 2,
-   never instead of them.
-4. **The repo's integration test on a real Postgres** (not SQLite) — when the scenario cannot be
-   triggered from outside: a periodic job, a NATS consumer without an endpoint.
-5. **The machine side** (`device-service`, `kiosk-ui`, `nats-gateway`, `kiosk-machine-docker`): the machine
-   stack from `kiosk-machine-docker` (`docker-compose.mock.yml`, `wiremock/`) and the real protocol with
-   a fake peer; the kiosk UI and service menu — Playwright as in 1. Write the first recipe that works
-   into `references/kiosk-stack.md`, so the next run does not rediscover it.
-6. **A unit test** — the last resort, marked in the report as weak evidence.
+1. **Playwright UI on the QA stack**: default for anything visible in the panel.
+2. **Playwright `request` through the UI proxy** (`http://localhost:8480/api/...`, same session): no
+   screen (endpoint, export, report) or parallel requests.
+3. **Assertion on the QA DB** (`qa exec -T db psql ...`): a second assertion next to 1 or 2, never instead.
+4. **The repo's integration test on real Postgres** (not SQLite): not triggerable from outside (periodic
+   job, NATS consumer without an endpoint).
+5. **Machine side** (`device-service`, `kiosk-ui`, `nats-gateway`, `kiosk-machine-docker`): the real service
+   and protocol against fake peers; kiosk UI and service menu through Playwright as in 1.
+6. **Unit test**: last resort, marked weak evidence.
 
-## 6. The QA stack
+## 6. QA stack
 
-A recipe with verified commands: `references/acme-stack.md`. In short: a clone of the database in the
-volume `acme-qa_pgdata`, the compose project `acme-qa`, services changed in the task built from the QA
-worktrees, the rest from the `cloud-platform-*` images, liquibase from the task branch (or `origin/develop`)
-on the clone, the UI on `:8480`. Sebastian's stack and database stay untouched, and the scenarios may
-destroy data with impunity.
+Recipes: `references/acme-stack.md` (panel/cloud), `references/kiosk-stack.md` (device-service + fake
+peers), `references/kiosk-kiosk.md` (kiosk UI). Sebastian's stack and DB stay untouched; QA data is
+disposable.
 
-**Logging in.** You never type the password — neither into a form nor through the API (memory
-`browser-check-login-rule`, a hard rule). The session lives in `~/.cache/claude-qa/auth/acme-qa.json`;
-when it is missing or expired, you ask Sebastian for one login using the command from the recipe. You
-make that request once, at the start, before you begin writing specs — afterwards you work without
-interruption.
+**Logging in.** Seeded QA users, one per role, logged in with their generated test passwords
+(`acme-stack.md` §4; never printed). Never type a real credential (Sebastian's or anyone's) in a form or
+the API; his account: ask him once, at the start, to log in with the recipe's command.
 
 ## 7. Specs
 
-Files in `~/.cache/claude-qa/runs/<ID>/`, a test title starts with the scenario ID (`S07 …`) — the result
-returns to the table by it. Every spec starts with:
+In `runs/<ID>/`; a test title starts with the scenario ID (`S07 …`). Header:
 
 ```ts
 import { test, expect } from '@playwright/test';
 
+const AUTH = `${process.env.HOME}/.cache/claude-qa/auth`;
+const CHROME = `${process.env.HOME}/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome`;
+
 test.use({
   baseURL: 'http://localhost:8480',
-  storageState: `${process.env.HOME}/.cache/claude-qa/auth/acme-qa.json`,
   screenshot: 'on',
+  launchOptions: { executablePath: CHROME },
+  storageState: `${AUTH}/acme-qa-<id>-<role>.json`,
 });
 ```
 
-- assertions on what the user sees (roles, text, values), not on CSS classes;
-- no `waitForTimeout` — you wait for state (`expect(...).toBeVisible()`, `waitForResponse`);
-- every scenario on its own data (SQL in the QA database or through the UI), independent of order;
-- mutating API requests with the `X-CSRF-TOKEN` header from the `csrf_access_token` cookie;
-- zero comments — the name of the test and of its steps says what you check.
+Another role: its own `test.use({ storageState })` per `describe`.
 
-Running and reading the results:
+- assert what the user sees (roles, text, values), not CSS classes;
+- no `waitForTimeout`: wait for state (`expect(...).toBeVisible()`, `waitForResponse`);
+- each scenario on its own data (SQL or UI), order-independent;
+- mutating API requests send `X-CSRF-TOKEN` from the `csrf_access_token` cookie.
 
 ```bash
 cd ~/.cache/claude-qa && PLAYWRIGHT_JSON_OUTPUT_NAME=runs/<ID>/results.json \
@@ -129,36 +107,32 @@ jq -r '.. | objects | select(has("specs")) | .specs[] | [.title, .tests[0].resul
   ~/.cache/claude-qa/runs/<ID>/results.json
 ```
 
-Forms 4–6 also go through `verify`, and the scenario gets the log path as its evidence.
+Forms 4–6 run through `verify`; its log path is the scenario's evidence.
 
-## 8. Whether a FAIL is real
+## 8. Before writing a FAIL
 
-Before you write a FAIL:
-
-1. look at the screenshot and `error-context.md` from `artifacts/`;
-2. tell an application error from a test error — a wrong selector, missing data, an expired session, a
-   service that did not come up (`qa logs <service>`). A test error you fix and rerun the scenario; it is
-   not a result;
-3. confirm with a second, independent method when possible: an SQL query, an API request, a service log;
-4. a scenario that passes once and fails once (`--repeat-each=3`) is a FAIL with the note "niestabilny" —
-   instability is usually a race, that is, a bug;
-5. a FAIL outside the ticket's promises (a neighbouring feature) you check on the base: rebuild that
-   service from the base's worktree and run the scenario again. It fails there too → **FAIL (zastany)**:
-   you report it, it does not block.
+1. Read the screenshot and `error-context.md` in `artifacts/`.
+2. App error or test error (selector, missing data, expired session, a service down: `qa logs <service>`)?
+   A test error: fix it and rerun; it is no result.
+3. Confirm by a second independent method where possible (SQL, API request, service log).
+4. Rerun every FAIL with `--repeat-each=3`; mixed results = FAIL "niestabilny" (usually a race).
+5. A FAIL outside the ticket's promises: check it on the base. QA worktree at `origin/<base>`
+   (`qa-<repo>-<ID>-base`), build that service from it, swap it into the same stack (override `image:` +
+   `build: !reset null`), rerun. Fails there too → **FAIL (zastany)**: reported, not blocking.
 
 ## 9. Cleanup
 
-Always, also after a FAIL and after an interruption: `qa down`, `docker volume rm acme-qa_pgdata`,
-`git -C <repo> worktree remove --force <QA worktree>` — only the `qa-*` worktrees you created yourself.
-The `acme-qa-*` images stay as a build cache. The `runs/<ID>/` directory stays — it is the evidence.
+Always, also after a FAIL or an interruption: the cleanup of every recipe used;
+`git -C <repo> worktree remove --force` only on `qa-*` worktrees you created. `acme-qa-*` images stay
+(build cache); `runs/<ID>/` stays (evidence).
 
 ## 10. Report
 
-Save it to `runs/<ID>/report.md` and return it in the reply:
+`runs/<ID>/report.md`, also returned in the reply:
 
 ```
 QA TICKET-1234 — 14 scenarios: 9 PASS, 3 FAIL, 1 NIEJASNE, 1 NIE URUCHOMIONY
-Tested SHAs: cloud-platform-reports abc1234, web-ui def5678; the rest from cloud-platform-* images (<date>)
+Tested SHAs: cloud-platform abc1234 (built: reports, ui), device-service def5678; stack acme-qa-<id>, data <clone+seed|seed> (<date>)
 
 | #   | Scenario | Why hard | Form | Result | Evidence |
 |-----|----------|----------|------|--------|----------|
@@ -167,21 +141,17 @@ Tested SHAs: cloud-platform-reports abc1234, web-ui def5678; the rest from cloud
 
 Below the table:
 
-- **FAIL** — steps, expected (a quote from the ticket), actual, screenshot, the suspect place
-  `file:line`. Every FAIL must be a ready finding that can be handed to the implementer without further
-  questions;
-- **NIEJASNE** — questions for Sebastian, in one batch;
-- **NIE URUCHOMIONY** — the blocker and what is needed for it to run;
-- **Steps down the ladder** — scenario → form → reason.
+- **FAIL**: steps, expected (ticket quote), actual, screenshot, suspect `file:line`; ready for the
+  implementer without questions;
+- **NIEJASNE**: questions for Sebastian, one batch;
+- **NIE URUCHOMIONY**: the blocker and what it needs to run;
+- **Steps down the ladder**: scenario → form → reason.
 
-## 11. Invocation from `epic` (step 6) — and from `task` only for a task with no epic
+## 11. As a gate (from `epic` §6 or `task` 4e)
 
-This is the gate to the `epik/<EPIC>` → `develop` PR (for a task with no epic: to its PR). A FAIL goes
-back as a fix through a PR into `epik/<EPIC>` (the owning task's open PR, or a new `task/<ID>-fix` PR) —
-with a regression test on both levels per CLAUDE.md; you point to the spec and screenshot path, you do not
-paste them. After the fix is merged you repeat the FAILs and the scenarios from the same area, and before
-the final PR — a full run on the epic branch's final SHAs, because a new commit invalidates the previous
-result. NIEJASNE waits for Sebastian's answer, NIE URUCHOMIONY is a blocker — the final PR is not created
-until Sebastian decides otherwise. FAIL (zastany) goes into the PR's `## Dodatkowy kontekst` section and
-does not block. The table goes into the `epic` report and into the final PR description's section with
-the QA scenarios.
+Gates the `epik/<EPIC>` → `develop` PR (otherwise the task's own PR). A FAIL goes back as a fix (epic:
+`epic` §6 "When something fails"; task: its fix round) with regression tests per CLAUDE.md; point to the
+spec and screenshot paths, never paste them. After the fix lands rerun the FAILs and their area; before the
+final PR, a full run on the final SHAs. NIEJASNE waits for Sebastian; NIE URUCHOMIONY blocks the PR until
+he decides; FAIL (zastany) goes to the PR's `## Dodatkowy kontekst`, not blocking. The table goes into the
+gated PR's description and the `epic` report.

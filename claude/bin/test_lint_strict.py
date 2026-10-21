@@ -7989,3 +7989,12 @@ def test_existing_mypypath_env_is_kept(
     assert env["MYPYPATH"] == os.pathsep.join(
         ["/ours/a", "/ours/b", MYPYPATH_BEFORE]
     )
+
+
+def test_c_checks_skip_annex_k_buffer_handling(ls: ModuleType) -> None:
+    checks = ls.C_CHECKS.split(",")
+
+    assert (
+        "-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling"
+        in checks
+    )
