@@ -70,7 +70,6 @@ run -t 5 -- 'exit 1'
 expect "tail flag" 1 "VERIFY FAIL exit=1"
 
 LEDGER=$CLAUDE_VERIFY_LOG_DIR/ledger.jsonl
-BUNDLE_VERIFY=__HOME__/.claude/backups/bundle-20260921-132434/bin/verify
 STUBS=$TMP/bin
 mkdir -p "$STUBS" "$CLAUDE_VERIFY_LOG_DIR"
 
@@ -146,7 +145,16 @@ print(good)
 PY
 }
 
-canon() { sed -E 's|[0-9]{8}-[0-9]{6}-|TS-|g; s|-[0-9]+\.log|-PID.log|g; s|time=[0-9]+s|time=Ts|g'; }
+canon() {
+  local text
+  text=$(cat)
+  text=${text//"$CLAUDE_VERIFY_LOG_DIR"/LOGDIR}
+  text=${text//"$STUBS"/STUBS}
+  sed -E 's|[0-9]{8}-[0-9]{6}-|TS-|g; s|-[0-9]+\.log|-PID.log|g; s|time=[0-9]+s|time=Ts|g; s|(log: LOGDIR/TS-)_[^ ]*(-PID\.log)|\1_SLUG\2|' <<<"$text"
+}
+
+GREEN_GOLDEN=$'VERIFY PASS exit=0 time=Ts lines=2 cmd: printf "one\\ntwo\\n"\nlog: LOGDIR/TS-printf__one_ntwo_n_-PID.log'
+RED_GOLDEN=$'VERIFY FAIL exit=1 time=Ts lines=1 cmd: STUBS/pytest quiet\nlog: LOGDIR/TS-_SLUG-PID.log\n--- last 1 lines\n4 failed, 273 passed, 9 warnings in 1.41s'
 
 outcome_of() {
   rm -f "$LEDGER"
@@ -193,11 +201,9 @@ run_in "$PLAIN" -- "cd $WORKTREE/src/deep && echo hi"
 check "repo: leading cd normalized to worktree root" "$(last_field repo)" "$WORKTREE_REAL"
 
 GREEN_NEW=$(cd "$PLAIN" && "$VERIFY" -- 'printf "one\ntwo\n"' 2>&1 | canon)
-GREEN_OLD=$(cd "$PLAIN" && "$BUNDLE_VERIFY" -- 'printf "one\ntwo\n"' 2>&1 | canon)
-check "byte-for-byte: green run" "$GREEN_NEW" "$GREEN_OLD"
+check "byte-for-byte: green run" "$GREEN_NEW" "$GREEN_GOLDEN"
 RED_NEW=$(cd "$PLAIN" && "$VERIFY" -- "$STUBS/pytest quiet" 2>&1 | canon)
-RED_OLD=$(cd "$PLAIN" && "$BUNDLE_VERIFY" -- "$STUBS/pytest quiet" 2>&1 | canon)
-check "byte-for-byte: failing run" "$RED_NEW" "$RED_OLD"
+check "byte-for-byte: failing run" "$RED_NEW" "$RED_GOLDEN"
 
 rm -f "$LEDGER"
 for index in 1 2 3 4 5 6 7 8; do (cd "$PLAIN" && "$VERIFY" -- "echo parallel $index" >/dev/null 2>&1) & done
@@ -674,13 +680,12 @@ fi
 
 broken_ledger_is_silent() {
   local label=$1
-  local out err rc bundle_out
+  local out err rc
   out=$(cd "$PLAIN" && "$VERIFY" -- 'printf "one\ntwo\n"' 2>"$TMP/stderr"); rc=$?
   err=$(cat "$TMP/stderr")
-  bundle_out=$(cd "$PLAIN" && "$BUNDLE_VERIFY" -- 'printf "one\ntwo\n"' 2>/dev/null)
   check "$label: exit code" "$rc" 0
   check "$label: nothing on stderr" "$err" ""
-  check "$label: stdout unchanged" "$(canon <<<"$out")" "$(canon <<<"$bundle_out")"
+  check "$label: stdout unchanged" "$(canon <<<"$out")" "$GREEN_GOLDEN"
 }
 
 rm -rf "$LEDGER"

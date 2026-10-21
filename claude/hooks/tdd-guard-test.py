@@ -335,11 +335,10 @@ REAL_PROBE_CANDIDATES = ("device-sw1191/app.py", "device-sw86/app.py", "device-d
 DEFAULT_PROJECTS_ROOT = "__HOME__/projects"
 real_probe = next((os.path.join(DEFAULT_PROJECTS_ROOT, candidate) for candidate in REAL_PROBE_CANDIDATES
                    if os.path.isfile(os.path.join(DEFAULT_PROJECTS_ROOT, candidate))), None)
-checks += 1
 if real_probe is None:
-    bad += 1
-    print("PROBE FAIL: no known gated repository found under the default projects root")
+    print("PROBE SKIP: no known gated repository under the projects root")
 else:
+    checks += 1
     reset()
     set_ledger(None)
     default_root = run(edit(real_probe), env={"CLAUDE_TDD_PROJECTS_ROOT": DEFAULT_PROJECTS_ROOT})

@@ -104,7 +104,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'payload=$(cat); case \"$payload\" in *commit*) printf \"%s\" \"$payload\" | __HOME__/.pyenv/versions/3.14.3/bin/python3 __HOME__/.claude/hooks/standards-gate.py;; esac'",
+            "command": "bash -c 'payload=$(cat); case \"$payload\" in *commit*) printf \"%s\" \"$payload\" | python3 __HOME__/.claude/hooks/standards-gate.py;; esac'",
             "timeout": 1200,
             "statusMessage": "standards-gate"
           }
@@ -161,7 +161,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "__HOME__/.pyenv/versions/3.14.3/bin/python3 __HOME__/.claude/hooks/standards-gate.py",
+            "command": "python3 __HOME__/.claude/hooks/standards-gate.py",
             "timeout": 480,
             "statusMessage": "standards-gate"
           }

@@ -112,6 +112,8 @@ stub_venv "$H2"
 run_install "$H1" "$ROOT/install.sh" "$WORK/install1.log"
 check "install.sh exit status (see $WORK/install1.log)" $?
 if [ "$FAILURES" != 0 ]; then tail -20 "$WORK/install1.log"; fi
+CHECKS=$((CHECKS + 1))
+if grep -qF "WARNING: hook interpreter" "$WORK/install1.log"; then fail "normal install warns about a hook interpreter"; fi
 
 while IFS= read -r -d '' file; do
   rel=${file#"$ROOT"/claude/}
