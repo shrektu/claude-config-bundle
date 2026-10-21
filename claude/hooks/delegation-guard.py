@@ -16,10 +16,9 @@ REPO_BOUNDARY_MARKERS = (
     "do not modify anything under",
 )
 PHASE_MARKERS = ("tdd_phases", "tdd phases")
-SEARCH_AGENT_TYPES = ("Explore", "general-purpose")
-SEARCH_AGENT_MODEL = "sonnet"
+SEARCH_AGENT_MODELS = {"Explore": "haiku", "general-purpose": "sonnet"}
 GUARD_PREFIX = "delegation-guard: "
-SEARCH_MODEL_REASON = GUARD_PREFIX + "search agent defaults to sonnet"
+SEARCH_MODEL_REASON = GUARD_PREFIX + "search agent defaults to {model}"
 REUSE_LINE_RE = re.compile(r"^\s*reuse\b", re.IGNORECASE | re.MULTILINE)
 FIX_ROUND_LINE_RE = re.compile(r"^\s*findings\b", re.IGNORECASE | re.MULTILINE)
 GIT_SAFETY_MARKER = "Never revert or discard changes you did not make"
@@ -140,13 +139,13 @@ def deny(reason: str) -> None:
     sys.exit(0)
 
 
-def default_search_model(tool_input: dict[str, object]) -> None:
+def default_search_model(tool_input: dict[str, object], model: str) -> None:
     """Print an allow decision that sets the search agent's model."""
     decision = {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
-        "permissionDecisionReason": SEARCH_MODEL_REASON,
-        "updatedInput": {**tool_input, "model": SEARCH_AGENT_MODEL},
+        "permissionDecisionReason": SEARCH_MODEL_REASON.format(model=model),
+        "updatedInput": {**tool_input, "model": model},
     }
     print(json.dumps({"hookSpecificOutput": decision}))
 
@@ -178,8 +177,8 @@ def main():
                 deny(BARE_MODEL_REASON)
             return
         has_model = isinstance(model, str) and bool(model.strip())
-        if agent in SEARCH_AGENT_TYPES and not has_model:
-            default_search_model(tool_input)
+        if agent in SEARCH_AGENT_MODELS and not has_model:
+            default_search_model(tool_input, SEARCH_AGENT_MODELS[agent])
             return
         if agent not in IMPLEMENTER_TYPES:
             return

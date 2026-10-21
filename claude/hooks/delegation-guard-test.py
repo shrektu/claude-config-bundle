@@ -281,8 +281,8 @@ bad += not spot4
 if not spot4:
     print(f"SPOT4 FAIL -> {out[:300]}")
 
-SEARCH_AGENTS = ("Explore", "general-purpose")
-for agent in SEARCH_AGENTS:
+SEARCH_AGENTS = {"Explore": "haiku", "general-purpose": "sonnet"}
+for agent, expected_model in SEARCH_AGENTS.items():
     original: dict[str, object] = {
         "subagent_type": agent,
         "prompt": "find it",
@@ -299,8 +299,9 @@ for agent in SEARCH_AGENTS:
         and decision.get("permissionDecision") == "allow"
         and decision.get("hookEventName") == "PreToolUse"
         and decision.get("permissionDecisionReason")
-        == "delegation-guard: search agent defaults to sonnet"
-        and decision.get("updatedInput") == {**original, "model": "sonnet"}
+        == f"delegation-guard: search agent defaults to {expected_model}"
+        and decision.get("updatedInput")
+        == {**original, "model": expected_model}
     )
     bad += not ok
     if not ok:
