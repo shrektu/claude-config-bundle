@@ -13,8 +13,9 @@ MAX_CHARS = 1600
 WRAP_WIDTH = 104
 MAX_LIST_LINES = 3
 SESSION_START = "SessionStart"
-WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/", "test/")
-WORK_BRANCH_HINT = "feature/*, bugfix/*, hotfix/*, test/*"
+WORK_BRANCH_PREFIXES = ("task/", "feature/", "bugfix/", "hotfix/", "test/")
+WORK_BRANCH_HINT = "task/*, feature/*, bugfix/*, hotfix/*, test/*"
+EPIC_BRANCH_PREFIX = "epik/"
 HEAD_REF_PREFIX = "ref: refs/heads/"
 GITDIR_PREFIX = "gitdir:"
 
@@ -634,7 +635,9 @@ def main():
     if effort:
         head.append(f"effort={effort}")
     lines = [" ".join(head)]
-    if branch and not branch.startswith(WORK_BRANCH_PREFIXES):
+    if branch and branch.startswith(EPIC_BRANCH_PREFIX):
+        lines.append(f"branch `{branch}` is an epic branch - only merge develop into it and push without force")
+    elif branch and not branch.startswith(WORK_BRANCH_PREFIXES):
         lines.append(f"branch `{branch}` is NOT a work branch ({WORK_BRANCH_HINT}) - do not commit or push here")
     if primary != root:
         directory_facts(primary, f"[{relative}] ", lines)

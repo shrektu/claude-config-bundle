@@ -142,8 +142,18 @@ message of a session switches the gate off for that session, and is ignored anyw
   progress on the same finding, or a BLOCKER you cannot fix with confidence → STOP, no escalation:
   report the blocker, the evidence and the decision needed — the task stays "Zablokowane", never
   declare it done to end the loop.
-- BRANCH RULE: work branches (`feature/*`, `bugfix/*`, `hotfix/*`, `test/*`) allow any git op (force-push
-  only `--force-with-lease`). Every other branch, any repo: every op that changes the branch or its
+- EPIC MODEL: every epic has a branch `epik/<EPIC>` (from `develop`) in each repo it touches; each task
+  works on `task/<ID>` from it and its PR targets `epik/<EPIC>` (team decision: tasks cascade — a task standing on another unmerged task, of any epic, targets that task's branch so diffs do not duplicate; only the bottom of a chain targets `epik/<EPIC>`, and once the task below is merged its child is retargeted to `epik/<EPIC>`, never to `develop`);
+  the epic branch gets the final review, QA and one PR to `develop` at the end (skill `epic`). A task with
+  no epic keeps `bugfix/*`/`hotfix/*` → `develop`/`master`. Every task that belongs to an epic in Jira
+  goes to `epik/<EPIC>` (or the task below it), always. The one exception (Sebastian, 2026-10-21): a fix
+  of blockers of an OLD epic whose tasks already went to `develop` before this model (e.g. TICKET-1530, the
+  blockers of TICKET-1273) — its branch comes from `develop` and its PR targets `develop`, with QA per task;
+  when unsure whether an epic is old, ask. Open PRs from before the model
+  keep their `feature/*` sources, retargeted to `epik/<EPIC>`.
+- BRANCH RULE: work branches (`task/*`, `feature/*`, `bugfix/*`, `hotfix/*`, `test/*`) allow any git op
+  (force-push only `--force-with-lease`). On `epik/*`: only create it from `develop`, merge `develop`
+  into it (committing that merge's conflict resolution) and push without force. Every other branch, any repo: every op that changes the branch or its
   remote is FORBIDDEN — no commit, push, merge, rebase, reset, tag, delete, not even a one-line or CI
   fix; say so and let the user decide (git-policy enforces this and the commit message: one imperative sentence,
   at most 7 words — fewer is better — no `Signed-off-by`, no `Co-Authored-By`, no trailers at all). Commits are milestone-sized; fixes after review go in as `git commit --fixup=<sha>` plus an
@@ -301,10 +311,12 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
 Load a skill when you are at that step and need more than the summary above — not as a ritual before
 every call; the guards' deny messages already carry the correction you would look up.
 
-- `task` — `/task <JIRA-ID>`: one ticket from Jira to an open PR; no PR until every expected result in
-  the ticket has executable proof, unit and integration green, screenshots for UI.
-- `epic` — `/epic <EPIC-ID>`: dependency graph of the epic, runs its tasks in parallel itself, then
-  verifies the whole epic on all branches merged together against the epic's expected result.
+- `task` — `/task <JIRA-ID>`: one ticket from Jira to an open PR into `epik/<EPIC>`; no PR until every
+  expected result in the ticket has executable proof, unit and integration green, screenshots for UI.
+  No QA per task — QA runs on the epic.
+- `epic` — `/epic <EPIC-ID>`: creates `epik/<EPIC>`, dependency graph, runs its tasks in parallel, then —
+  once every task PR is merged into `epik/<EPIC>` — the full run, QA (`qa`) and the final review on the
+  epic branch, and the `epik/<EPIC>` → `develop` PR.
 - `parallel` — independent milestones of an L/XL task on parallel implementers, one worktree each,
   landed by rebase + ff-only in dependency order.
 - `delegate` — the spawn prompt template for `implementer` and the fix round.
@@ -313,4 +325,5 @@ every call; the guards' deny messages already carry the correction you would loo
 - `pr-description` — on request. `repo-standards` — pinned-version idioms; preloaded in `implementer`.
 - `ui-texts` — UI texts, labels, translations and locale files, written by Gemini Flash through agy-worker.
 - `datasheet` — claims about registers, timings, pins or limits checked against a datasheet PDF by Argon.
-- `bb`, `qa`, `devboard-leds` — Bitbucket review, hard e2e scenarios, DEVBOARD LED config.
+- `bb`, `qa`, `devboard-leds` — Bitbucket review, hard e2e scenarios (on a complete `epik/<EPIC>` before it
+  goes to `develop`, or a task with no epic), DEVBOARD LED config.

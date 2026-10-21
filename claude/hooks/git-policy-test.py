@@ -46,8 +46,39 @@ def conflicting_rebase(path, branch, extra_args=()):
     return path
 
 
+def epik_repo(path: str, branch: str, merging: str | None = None) -> str:
+    """Build an epic branch repo, mid-merge when asked."""
+    init_repo(path, "develop")
+    git(path, "remote", "add", "origin", path)
+    git(path, "update-ref", "refs/remotes/origin/develop", "develop")
+    git(path, "switch", "-q", "-c", branch)
+    if merging:
+        if merging == "develop":
+            git(path, "switch", "-q", merging)
+        else:
+            git(path, "switch", "-q", "-c", merging, "develop")
+        write(os.path.join(path, "f.txt"), "theirs\n")
+        git(path, "commit", "-q", "-am", "theirs change")
+        git(path, "switch", "-q", branch)
+        write(os.path.join(path, "f.txt"), "ours\n")
+        git(path, "commit", "-q", "-am", "ours change")
+        git(path, "merge", "-q", merging, check=False)
+    return path
+
+
 def build(base):
     dirs = {}
+    dirs["epik"] = epik_repo(os.path.join(base, "epik_repo"), "epik/TICKET-1")
+    dirs["epik_foo"] = epik_repo(
+        os.path.join(base, "epik_foo"), "epik/TICKET-1-foo"
+    )
+    dirs["epik_merge_dev"] = epik_repo(
+        os.path.join(base, "epik_merge_dev"), "epik/TICKET-1", "develop"
+    )
+    dirs["epik_merge_other"] = epik_repo(
+        os.path.join(base, "epik_merge_other"), "epik/TICKET-1", "feature/x"
+    )
+    dirs["task"] = init_repo(os.path.join(base, "task_repo"), "task/TICKET-2")
     dirs["main"] = init_repo(os.path.join(base, "main_repo"), "main")
     git(dirs["main"], "branch", "feature/old")
     git(dirs["main"], "branch", "release")
@@ -81,6 +112,51 @@ def build(base):
 
 def cases(d):
     deny = [
+        ("epik", 'git commit -m "Add thing"'),
+        ("epik", "git merge feature/x"),
+        ("epik", "git merge develop feature/x"),
+        ("epik", "git merge"),
+        ("epik", "git merge --no-ff"),
+        ("epik", "git merge --abort"),
+        ("epik", "git merge --continue"),
+        ("epik", "git rebase develop"),
+        ("epik", "git reset --hard HEAD~1"),
+        ("epik", "git cherry-pick abc1234"),
+        ("epik", "git revert HEAD"),
+        ("epik", "git push -f"),
+        ("epik", "git push --force"),
+        ("epik", "git push --force-with-lease"),
+        ("epik", "git push --force-with-lease=epik/TICKET-1 origin epik/TICKET-1"),
+        ("epik", "git push --force-if-includes origin epik/TICKET-1"),
+        ("epik", "git push origin +epik/TICKET-1"),
+        ("epik", "git push origin epik/TICKET-1 --force"),
+        ("epik", "git pull"),
+        ("epik", "git tag v1.0"),
+        ("epik", "git branch -D feature/x"),
+        ("epik", "git update-ref refs/heads/feature/x HEAD"),
+        ("epik", "git merge feature/develop"),
+        ("epik", "git merge developer"),
+        ("epik", "git merge upstream/develop"),
+        ("epik", "git merge origin/develop/x"),
+        ("epik", "git merge -m develop feature/x"),
+        ("epik", "git merge -X ours feature/x"),
+        ("epik", "git merge -s ort feature/x"),
+        ("epik", "git merge --strategy-option=theirs feature/x"),
+        ("epik_foo", 'git commit -m "Add thing"'),
+        ("epik_foo", "git merge feature/x"),
+        ("epik_foo", "git push --force"),
+        ("epik_merge_other", 'git commit -m "Merge feature"'),
+        ("epik_merge_other", "git merge --continue"),
+        ("plain", f"git -C {d['epik_merge_other']} merge --continue"),
+        ("epik_merge_other", "git merge feature/x"),
+        ("epik_merge_dev", 'git commit -m "Merge develop. Done."'),
+        ("epik_merge_dev", 'git commit -m "Merge develop" -s'),
+        ("epik_merge_dev", "git rebase develop"),
+        ("epik_merge_dev", "git reset --hard HEAD"),
+        ("plain", f'git -C {d["epik"]} commit -m "Add thing"'),
+        ("plain", f"git -C {d['epik']} merge feature/x"),
+        ("plain", f"git -C {d['epik']} push --force"),
+        ("plain", f'git -C {d["epik_merge_other"]} commit -m "Merge feature"'),
         ("main", 'git commit -m "Add a thing."'),
         ("main", "git commit --amend"),
         ("main", "git merge feature/old"),
@@ -194,6 +270,37 @@ def cases(d):
         ("main", "git tag __subst_0__"),
     ]
     allow = [
+        ("task", 'git commit -m "Add thing"'),
+        ("task", "git merge feature/old"),
+        ("task", "git push origin task/TICKET-2"),
+        ("task", "git push -f"),
+        ("epik", "git merge develop"),
+        ("epik", "git merge origin/develop"),
+        ("epik", "git merge refs/heads/develop"),
+        ("epik", "git merge refs/remotes/origin/develop"),
+        ("epik", "git merge --no-ff origin/develop"),
+        ("epik", 'git merge -m "Merge develop" develop'),
+        ("epik", 'git merge -m "Merge feature/x" develop'),
+        ("epik", "git merge -X ours -s ort develop"),
+        ("epik", "git merge --no-edit -Xtheirs develop origin/develop"),
+        ("epik", "git push origin epik/TICKET-1"),
+        ("epik", "git push"),
+        ("epik", "git push -u origin epik/TICKET-1"),
+        ("epik", "git push --dry-run --force"),
+        ("epik", "git status"),
+        ("epik", "git switch develop"),
+        ("epik_foo", "git merge develop"),
+        ("epik_foo", "git push"),
+        ("epik_merge_dev", 'git commit -m "Merge develop into epik"'),
+        ("epik_merge_dev", "git merge --abort"),
+        ("epik_merge_dev", "git merge --continue"),
+        ("epik_merge_dev", "git merge --quit"),
+        ("epik_merge_other", "git merge --abort"),
+        ("epik_merge_other", "git merge --quit"),
+        ("plain", f"git -C {d['epik']} merge develop"),
+        ("plain", f"git -C {d['epik']} push origin epik/TICKET-1"),
+        ("plain", f'git -C {d["epik_merge_dev"]} commit -m "Merge develop"'),
+        ("plain", f"cd {d['epik']} && git merge origin/develop"),
         ("main", "git status"),
         ("main", "git status --porcelain"),
         ("main", "git log --oneline -5"),

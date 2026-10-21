@@ -1,10 +1,15 @@
 ---
 name: qa
-description: Hard e2e scenarios for a Jira task on an isolated stack, with a PASS / FAIL / NIEJASNE result and evidence. Load when Sebastian writes /qa with a task ID or asks to test or click through a task, and always in step 4e of the task skill.
-argument-hint: <JIRA-ID>
+description: Hard e2e scenarios for a Jira epic (on its epik/<EPIC> branch, once every task is merged into it) or a task with no epic, on an isolated stack, with a PASS / FAIL / NIEJASNE result and evidence. Load when Sebastian writes /qa with an epic or task ID or asks to test or click through one, and always in step 6 of the epic skill.
+argument-hint: <EPIC-ID | JIRA-ID>
 ---
 
-Input: `$ARGUMENTS` — one task ID (`TICKET-1274`). Without an ID, ask; do not guess from the branch.
+Input: `$ARGUMENTS` — one epic ID (`TICKET-1273`) or the ID of a task with no epic. Without an ID, ask; do
+not guess from the branch. An epic is tested only once all its task PRs are merged into `epik/<EPIC>` —
+before that the parts do not meet and the run proves nothing; say so and stop. A task that belongs to an
+epic is not tested on its own: point to the epic run instead — unless it is a blocker fix of an old
+epic with its PR to `develop` (the `task` skill section 1, e.g. TICKET-1530), which is tested like a task
+with no epic, on its own task branch.
 
 You are a tester, not an implementer. You do not fix code, do not commit, do not touch Sebastian's
 branches or checkouts. Everything you write — scenarios, specs, the compose override, the report — lands in
@@ -14,20 +19,23 @@ failure, but a list of only happy paths is.
 ## 1. The oracle from Jira
 
 `getJiraIssue` (cloudId `00000000-0000-0000-0000-000000000000`, `responseContentFormat: markdown`), the
-parent epic and `issuelinks`. List the expected results in the ticket's own words — that is the only
+parent epic and `issuelinks`. For an epic: the epic itself and every child (`parent = <EPIC>`), plus the
+ideas the tasks left in `~/.cache/claude-progress/<EPIC>/qa-ideas.md`; the epic's own expected results
+and the cross-task flows come first. List the expected results in the ticket's own words — that is the only
 PASS/FAIL oracle. Behaviour the ticket does not specify is neither PASS nor FAIL: it is **NIEJASNE** with
 a concrete question. You do not settle it by what the code happens to do — then the test would check the
 code against itself.
 
-## 2. The task's branches
+## 2. The branches under test
 
-Repositories: `~/projects/cloud/cloud-common`, `~/projects/cloud/cloud-platform-dev/repos/*` and
-`~/projects/kiosk/*` with their own `.git`. In each, `git fetch --quiet origin` and
-`git branch -a --list "*<ID>*"`. The result is a table: repo → branch → base (`develop`; `common` and
-`content-management` → `master`; a task standing on another unmerged task → that task's branch).
+Repositories: `~/projects/cloud-platform` (monorepo), `~/projects/cloud/cloud-common`,
+`~/projects/kiosk/*` and the other repos with their own `.git`. In each, `git fetch --quiet origin` and,
+for an epic, `git branch -r --list "origin/epik/<EPIC>"`; for a task with no epic,
+`git branch -a --list "*<ID>*"`. The result is a table: repo → branch → base (`develop` for `epik/*`;
+`master` where that is the repo's main line).
 
-**You test a commit, not a directory.** SHA = the local task branch if it exists, otherwise
-`origin/<branch>`. For each repo you create a fresh worktree of your own:
+**You test a commit, not a directory.** SHA = `origin/epik/<EPIC>` (or, for a task with no epic, the local
+task branch if it exists, otherwise `origin/<branch>`). For each repo you create a fresh worktree of your own:
 
 ```bash
 git -C <repo> worktree add --detach ~/projects/cloud/.worktrees/qa-<repo>-<ID> <sha>
@@ -166,12 +174,14 @@ Below the table:
 - **NIE URUCHOMIONY** — the blocker and what is needed for it to run;
 - **Steps down the ladder** — scenario → form → reason.
 
-## 11. Invocation from `task` (step 4e)
+## 11. Invocation from `epic` (step 6) — and from `task` only for a task with no epic
 
-This is the gate to the PR. A FAIL goes back into the fix loop as a finding — with a regression test on
-both levels per CLAUDE.md; you point to the spec and screenshot path, you do not paste them. After a fix
-round you repeat the FAILs and the scenarios from the same area, and before the PR — a full run on the
-final SHAs, because a new commit invalidates the previous result. NIEJASNE waits for Sebastian's answer,
-NIE URUCHOMIONY is a blocker — the PR is not created until Sebastian decides otherwise. FAIL (zastany)
-goes into the PR's `## Dodatkowy kontekst` section and does not block. The table goes into the `task`
-report and into the PR description's section with the QA scenarios.
+This is the gate to the `epik/<EPIC>` → `develop` PR (for a task with no epic: to its PR). A FAIL goes
+back as a fix through a PR into `epik/<EPIC>` (the owning task's open PR, or a new `task/<ID>-fix` PR) —
+with a regression test on both levels per CLAUDE.md; you point to the spec and screenshot path, you do not
+paste them. After the fix is merged you repeat the FAILs and the scenarios from the same area, and before
+the final PR — a full run on the epic branch's final SHAs, because a new commit invalidates the previous
+result. NIEJASNE waits for Sebastian's answer, NIE URUCHOMIONY is a blocker — the final PR is not created
+until Sebastian decides otherwise. FAIL (zastany) goes into the PR's `## Dodatkowy kontekst` section and
+does not block. The table goes into the `epic` report and into the final PR description's section with
+the QA scenarios.
