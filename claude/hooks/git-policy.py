@@ -4,6 +4,7 @@ By design constructs that hide the cwd or the git word (scripts, eval, $GIT, `!`
 case nesting) are not classified - git-guard carries the same class of blind spots."""
 import json
 import os
+import pathlib
 import re
 import shlex
 import subprocess
@@ -33,9 +34,27 @@ CD_OPTS = {"-L", "-P", "-e", "-@", "--"}
 CASE_KEYWORD = "case"
 ESAC_KEYWORD = "esac"
 
-WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/", "test/")
-WORK_BRANCH_HINT = "feature/*, bugfix/*, hotfix/*, test/*"
+WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/", "test/", "task/")
+WORK_BRANCH_HINT = "feature/*, bugfix/*, hotfix/*, test/*, task/*"
+EPIK_BRANCH_PREFIX = "epik/"
+EPIK_HINT = (
+    " On `epik/*` only these are allowed: creating it from develop, "
+    "`git merge develop` (with the commit that concludes it) and "
+    "`git push` without force; task code lands there only through "
+    "merged `task/*` PRs."
+)
+DEVELOP_BRANCH = "develop"
+MERGE_HEAD_FILE = "MERGE_HEAD"
+MERGE_FLOW_EVENTS = {"--abort", "--continue", "--quit"}
+FORCE_PUSH_EVENTS = {
+    "-f",
+    "--force",
+    "--force-with-lease",
+    "--force-if-includes",
+}
+FORCE_REFSPEC_PREFIX = "+"
 REFS_HEADS = "refs/heads/"
+REFS_REMOTES = "refs/remotes/"
 GIT_TIMEOUT_S = 2
 REBASE_STATE_DIRS = ("rebase-merge", "rebase-apply")
 
@@ -44,6 +63,7 @@ SHORT_VALUE_OPTS = {
     "tag": "mFu",
     "branch": "u",
     "push": "o",
+    "merge": "mFXs",
     "notes": "mF",
     "symbolic-ref": "m",
     "update-ref": "m",
@@ -53,6 +73,14 @@ LONG_VALUE_OPTS = {
                "--trailer"},
     "tag": {"--message", "--file", "--local-user"},
     "branch": {"--set-upstream-to"},
+    "merge": {
+        "--message",
+        "--file",
+        "--strategy",
+        "--strategy-option",
+        "--cleanup",
+        "--into-name",
+    },
     "notes": {"--message", "--file", "--reuse-message", "--reedit-message"},
     "symbolic-ref": {"-m"},
     "update-ref": {"-m"},
@@ -141,6 +169,7 @@ class RepoState(NamedTuple):
     branch: str
     rebase_head: str
     directory: str
+    merge_heads: tuple[str, ...] = ()
 
 
 def deny(reason):
@@ -729,6 +758,16 @@ def rebase_head_name(git_dir):
     return None
 
 
+def merge_heads_of(git_dir: str) -> tuple[str, ...]:
+    """Return the commits of the merge in progress, if any."""
+    path = pathlib.Path(git_dir) / MERGE_HEAD_FILE
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            return tuple(line.strip() for line in handle if line.strip())
+    except OSError:
+        return ()
+
+
 _STATE_CACHE = {}
 
 
@@ -739,29 +778,125 @@ def repo_state(opts):
     if os.path.isdir(opts.directory):
         git_dir = git_output(opts, "rev-parse", "--git-dir")
         if git_dir:
-            state = RepoState(git_output(opts, "symbolic-ref", "--short", "-q", "HEAD"),
-                              rebase_head_name(resolve(opts.directory, git_dir)), opts.directory)
+            git_path = resolve(opts.directory, git_dir)
+            state = RepoState(
+                git_output(opts, "symbolic-ref", "--short", "-q", "HEAD"),
+                rebase_head_name(git_path),
+                opts.directory,
+                merge_heads_of(git_path),
+            )
     _STATE_CACHE[opts] = state
     return state
 
 
-def branch_verdict(call, action):
+def is_develop_ref(opts: GitOpts, ref: str) -> bool:
+    """Tell whether the ref names develop locally or on a remote."""
+    if ref in (DEVELOP_BRANCH, REFS_HEADS + DEVELOP_BRANCH):
+        return True
+    remote = ref.removesuffix("/" + DEVELOP_BRANCH).removeprefix(REFS_REMOTES)
+    if remote == ref or not remote:
+        return False
+    return remote in (git_output(opts, "remote") or "").split()
+
+
+def develop_commits(opts: GitOpts) -> set[str]:
+    """Return the tips of the local and remote develop branches."""
+    listing = git_output(
+        opts,
+        "for-each-ref",
+        "--format=%(objectname)",
+        REFS_HEADS + DEVELOP_BRANCH,
+        f"{REFS_REMOTES}*/{DEVELOP_BRANCH}",
+    )
+    return set((listing or "").split())
+
+
+def concludes_develop_merge(call: GitCall, state: RepoState) -> bool:
+    """Tell whether the merge in progress is a merge of develop."""
+    return bool(state.merge_heads) and set(state.merge_heads) <= (
+        develop_commits(call.opts)
+    )
+
+
+def merges_only_develop(
+    call: GitCall, parsed: Parsed, state: RepoState
+) -> bool:
+    """Tell whether the merge command only touches develop."""
+    if parsed.has("--continue"):
+        return concludes_develop_merge(call, state)
+    if parsed.has(*MERGE_FLOW_EVENTS):
+        return bool(state.merge_heads)
+    return bool(parsed.positional) and all(
+        is_develop_ref(call.opts, ref) for ref in parsed.positional
+    )
+
+
+def pushes_without_force(parsed: Parsed) -> bool:
+    """Tell whether the push is free of any force option."""
+    if parsed.has(*FORCE_PUSH_EVENTS):
+        return False
+    return not any(
+        ref.startswith(FORCE_REFSPEC_PREFIX) for ref in parsed.positional
+    )
+
+
+def epik_allows(call: GitCall, parsed: Parsed, state: RepoState) -> bool:
+    """Tell whether the command is allowed on an epic branch."""
+    if call.sub == "merge":
+        return merges_only_develop(call, parsed, state)
+    if call.sub == "commit":
+        return concludes_develop_merge(call, state)
+    if call.sub == "push":
+        return pushes_without_force(parsed)
+    return False
+
+
+def rebase_verdict(call: GitCall, action: str, state: RepoState) -> str | None:
+    """Return the denial for a command during a rebase, if any."""
+    if is_work_branch(state.rebase_head):
+        return None
+    return (
+        f"a rebase of `{state.rebase_head}` is in progress in "
+        f"{call.opts.directory} and `git {call.sub}` {action} it, but it "
+        f"is not a work branch ({WORK_BRANCH_HINT}). Abort that rebase "
+        f"or hand it to the user.{HINT}"
+    )
+
+
+def epik_verdict(
+    call: GitCall, action: str, parsed: Parsed, state: RepoState
+) -> str | None:
+    """Return the denial for a command on an epic branch, if any."""
+    if epik_allows(call, parsed, state):
+        return None
+    return (
+        f"`git {call.sub}` {action} `{state.branch}`, which is an epic "
+        f"branch, not a work branch.{EPIK_HINT}"
+    )
+
+
+def branch_verdict(call: GitCall, action: str, parsed: Parsed) -> str | None:
+    """Return the denial for a command on the current branch, if any."""
     state = repo_state(call.opts)
     if state is None:
         return None
     if state.rebase_head:
-        if is_work_branch(state.rebase_head):
-            return None
-        return (f"a rebase of `{state.rebase_head}` is in progress in {call.opts.directory} and `git {call.sub}` "
-                f"{action} it, but it is not a work branch ({WORK_BRANCH_HINT}). Abort that rebase or hand it "
-                f"to the user.{HINT}")
+        return rebase_verdict(call, action, state)
     if state.branch is None:
-        return (f"HEAD is detached in {call.opts.directory}, so `git {call.sub}` {action} no work branch "
-                f"({WORK_BRANCH_HINT}). Create one first: `git switch -c feature/<topic>`.{HINT}")
+        return (
+            f"HEAD is detached in {call.opts.directory}, so "
+            f"`git {call.sub}` {action} no work branch ({WORK_BRANCH_HINT}). "
+            f"Create one first: `git switch -c task/<ID>`.{HINT}"
+        )
     if is_work_branch(state.branch):
         return None
-    return (f"`git {call.sub}` {action} `{state.branch}`, which is not a work branch ({WORK_BRANCH_HINT}). "
-            f"Run it on a work branch instead: `git switch -c feature/<topic>`.{HINT}")
+    if state.branch.startswith(EPIK_BRANCH_PREFIX):
+        return epik_verdict(call, action, parsed, state)
+    return (
+        f"`git {call.sub}` {action} `{state.branch}`, which is not a work "
+        f"branch ({WORK_BRANCH_HINT}). Run it on a work branch instead: "
+        f"`git switch -c task/<ID>`.{HINT}"
+    )
 
 
 def has_emoji(text):
@@ -872,7 +1007,7 @@ def main():
                     deny(reason)
             action = mutates(call.sub, parsed)
             if action:
-                reason = branch_verdict(call, action)
+                reason = branch_verdict(call, action, parsed)
                 if reason:
                     deny(reason)
     except SystemExit:

@@ -123,7 +123,9 @@ REQUIRED_ALLOW = (
 )
 SESSION_MODEL = "opus[1m]"
 RETIRED_MODE = "final-audit"
-STALE_TERMS = re.compile(r"implementer-strong|rownolegle|\bepik\b|teksty-ui")
+STALE_TERMS = re.compile(
+    r"implementer-strong|rownolegle|\bepik\b(?!/)|teksty-ui"
+)
 README_STALE_PHRASES = ("reviews every round itself", "before every commit")
 README_REVIEW_TERMS = (
     "once per milestone",

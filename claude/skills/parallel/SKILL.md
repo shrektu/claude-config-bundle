@@ -33,7 +33,7 @@ commit on its sub-branch alone is not enough, because the worktree forks from th
     git -C <task branch checkout> worktree add \
       __HOME__/projects/.worktrees/<repo>-<ID>-m<N> -b <task-branch>-m<N> <task-branch>
 
-The sub-branch carries the task branch's prefix (`feature/…-m2`), so a commit and a rebase on it pass
+The sub-branch carries the task branch's prefix (`task/…-m2`), so a commit and a rebase on it pass
 through git-policy. It is local only — it never goes to the remote. Write the fork SHA (`git rev-parse
 <task-branch>`) in the log: it is the `diff_base` of the code reviewers and the review base of this
 milestone.

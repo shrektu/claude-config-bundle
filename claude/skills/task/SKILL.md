@@ -26,10 +26,26 @@ CLAUDE.md).
 Tasks in this project regularly touch several repositories at once — do not assume one. When the ticket
 does not show where the code lives, send `Explore` before you plan anything.
 
-Branch: `feature/<ID>-<short-slug>` from `develop` (hotfix from `master`), the same name in every repo of
-the task. When the task stands on another unmerged task, the base is that task's branch, not `develop` —
-and the PR targets that branch. If Sebastian's checkout is on another branch or has uncommitted work,
-work in a worktree (`__HOME__/projects/cloud/.worktrees/<repo>-<ID>`), never by `checkout` in his
+Branch: `task/<ID>` from the epic branch `epik/<EPIC>` (the task's Jira parent), the same name in every
+repo of the task. The PR targets `epik/<EPIC>` — not `develop` (except a blocker fix of an old epic, below); the epic branch goes to `develop`,
+after its final review (the `epic` skill). If `epik/<EPIC>` does not exist yet in a repo the task
+touches, create it from the current `develop` (`git push origin origin/develop:refs/heads/epik/<EPIC>`)
+before the task branch. When the task stands on another unmerged task — of this epic or of another one —
+the base is that task's branch and the PR targets that branch (team decision: cascade, so a PR's diff
+shows only its own changes, never the tasks below it). Only the bottom of a chain targets
+`epik/<EPIC>`. When the task below is merged, retarget the child to its own `epik/<EPIC>` — merged work
+stays on the epic branch and never goes to `develop` on its own. When the task below belongs to another
+epic, say so in the PR description: the child merges into its epic only after that dependency is there.
+Every task that belongs to an epic in Jira goes to `epik/<EPIC>` (or the task below it), always — also
+when nothing stands on it or under it. The one exception (Sebastian, 2026-10-21): a fix of blockers of
+an old epic whose tasks already went to `develop` before the epic model (e.g. TICKET-1530, blockers of
+TICKET-1273) — `task/<ID>` from `develop`, PR to `develop`, `qa` before its PR (4e). When unsure whether
+the epic is old, ask Sebastian.
+A task with no epic (a hotfix, a standalone bug)
+keeps the old model: `bugfix/<ID>-<slug>` or `hotfix/<ID>-<slug>` from `develop`/`master`, PR to the
+same. Open PRs created before this model keep their `feature/*` source branches; only their target moved
+to `epik/<EPIC>`. If Sebastian's checkout is on another branch or has uncommitted work, work in a
+worktree (`__HOME__/projects/cloud/.worktrees/<repo>-<ID>`), never by `checkout` in his
 directory.
 
 ## 3. Workflow
@@ -114,13 +130,14 @@ fix rounds without progress on the same finding → **Zablokowane**). There is n
 a row without evidence, or evidence you did not run after the last code change. The matrix goes into the
 final report in full.
 
-### 4e. QA — hard e2e scenarios
+### 4e. QA — at the epic, not the task
 
-When the matrix is green, load the `qa` skill with the task ID. It tests the branch's final commits on an
-isolated stack and invents scenarios the matrix does not have. It is a gate to the PR under the rules of
-point 11 of that skill: FAIL goes back to the fix round as a finding, NIEJASNE waits for Sebastian, NIE
-URUCHOMIONY is a blocker, and FAIL (zastany) goes to `## Dodatkowy kontekst`. Every commit after a QA run
-invalidates its result — a full run on the final SHAs before the PR.
+A blocker fix of an old epic (section 1) goes to `develop` on its own, so it runs `qa` before its PR
+like a task with no epic. Otherwise no `qa` run per task: hard e2e scenarios run only once the whole epic is merged into `epik/<EPIC>`,
+before the epic branch goes to `develop` (the `epic` skill, step "Final"). A task is ready for its PR
+when the matrix from 4a is green. Scenarios you think of while working on the task go to
+`~/.cache/claude-progress/<EPIC>/qa-ideas.md` (one line each, with the task ID), so the epic's QA run
+picks them up. A task with no epic still runs `qa` before its PR, as before.
 
 ## 5. Screenshots when the change touches the UI
 
@@ -166,6 +183,8 @@ repositories: title `[MULTI][ID] …`, and the mutual links in `## Powiązane PR
 `PUT` request, because you only know the PR numbers after all of them are created — send the `title` in
 the `PUT` too, or Bitbucket drops it.
 
+The bottom PR of a stack targets `epik/<EPIC>`, the ones above target the task branch below them; only a
+blocker fix of an old epic (section 1) targets `develop`.
 Order matters: the base PR of a stack before the one standing on it; when the task requires a deployment
 order (e.g. `common` before consumers), write it in `## Dodatkowy kontekst`.
 
@@ -175,8 +194,8 @@ asks.
 ## 7. Report
 
 The final format from the `review` skill, plus: **the coverage matrix from point 4a in full** (expected
-result → evidence → outcome), **the table of QA scenarios from point 4e** with the tested SHAs, a link to
-each PR, the `VERIFY` lines of both test levels, what the screenshots show, and the agreed merge order. If
+result → evidence → outcome), the QA ideas added in point 4e (or, for a task with no epic, the QA table with the tested SHAs), a
+link to each PR, the `VERIFY` lines of both test levels, what the screenshots show, and the agreed merge order. If
 you closed a row with evidence weaker than a test (a screenshot, an observation on the stack), say so
 explicitly at that row — it is information for the human who will merge it. Without a PR the status is
 **Zablokowane** with the blocker and the decision you need — never "done" just to close the loop.
