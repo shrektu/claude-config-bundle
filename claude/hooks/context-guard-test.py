@@ -10,11 +10,11 @@ HERE = Path(__file__).resolve().parent
 HOOK = sys.argv[1] if len(sys.argv) > 1 else str(HERE / "context-guard.py")
 TAIL_BYTES = 512 * 1024
 HOOK_TIMEOUT_SECONDS = 15
-OVER = 600000
+OVER = 350000
 USER_PROMPT = "UserPromptSubmit"
 POST_TOOL = "PostToolUse"
 USER_TEMPLATE = (
-    "Kontekst sesji: {k}k tokenów (próg 500k). Przy najbliższym kamieniu "
+    "Kontekst sesji: {k}k tokenów (próg 250k). Przy najbliższym kamieniu "
     "milowym zrób /compact z fokusem — dalsze tury są coraz droższe i "
     "wolniejsze."
 )
@@ -98,7 +98,7 @@ class Checks:
         name: str,
         result: Result,
         event: str = USER_PROMPT,
-        kilo: str = "602",
+        kilo: str = "352",
     ) -> None:
         rc, out, err = result
         if rc != 0 or not out or err:
@@ -106,7 +106,7 @@ class Checks:
             return
         data = json.loads(out)
         hook_out = data["hookSpecificOutput"]
-        model_text = f"Context is {kilo}k tokens (threshold 500k)."
+        model_text = f"Context is {kilo}k tokens (threshold 250k)."
         self.check(name + " event", hook_out["hookEventName"] == event, out)
         self.check(
             name + " user",
@@ -144,7 +144,7 @@ def threshold_scenarios(checks: Checks, sandbox: Sandbox) -> None:
     checks.silent(
         "below_threshold", sandbox.run(sandbox.main_path, session="g")
     )
-    write_transcript(sandbox.main_path, [entry(300000)])
+    write_transcript(sandbox.main_path, [entry(150000)])
     checks.silent(
         "between_old_and_new_threshold_silent",
         sandbox.run(sandbox.main_path, session="g2"),
@@ -157,15 +157,15 @@ def step_scenarios(checks: Checks, sandbox: Sandbox) -> None:
     checks.silent(
         "not_again_same_size", sandbox.run(sandbox.main_path, session="h")
     )
-    write_transcript(sandbox.main_path, [entry(640000)])
+    write_transcript(sandbox.main_path, [entry(390000)])
     checks.silent(
         "not_again_before_step", sandbox.run(sandbox.main_path, session="h")
     )
-    write_transcript(sandbox.main_path, [entry(652000)])
+    write_transcript(sandbox.main_path, [entry(402000)])
     checks.warns(
         "again_after_step",
         sandbox.run(sandbox.main_path, session="h"),
-        kilo="654",
+        kilo="404",
     )
 
 
@@ -174,11 +174,11 @@ def compact_scenarios(checks: Checks, sandbox: Sandbox) -> None:
     checks.warns("compact_first", sandbox.run(sandbox.main_path, session="i"))
     write_transcript(sandbox.main_path, [entry(100000)])
     checks.silent("compact_drop", sandbox.run(sandbox.main_path, session="i"))
-    write_transcript(sandbox.main_path, [entry(560000)])
+    write_transcript(sandbox.main_path, [entry(310000)])
     checks.warns(
         "reset_after_compact",
         sandbox.run(sandbox.main_path, session="i"),
-        kilo="562",
+        kilo="312",
     )
 
 
@@ -207,21 +207,21 @@ def boundary_scenarios(checks: Checks, sandbox: Sandbox) -> None:
 
 def recrossing_scenarios(checks: Checks, sandbox: Sandbox) -> None:
     state_file = sandbox.state_dir / "r.json"
-    write_transcript(sandbox.main_path, [entry(508000)])
+    write_transcript(sandbox.main_path, [entry(258000)])
     checks.warns(
         "recross_first",
         sandbox.run(sandbox.main_path, session="r"),
-        kilo="510",
+        kilo="260",
     )
     checks.check("recross_state_written", state_file.exists())
-    write_transcript(sandbox.main_path, [entry(478000)])
+    write_transcript(sandbox.main_path, [entry(228000)])
     checks.silent("recross_dip", sandbox.run(sandbox.main_path, session="r"))
     checks.check("recross_state_cleared", not state_file.exists())
-    write_transcript(sandbox.main_path, [entry(508000)])
+    write_transcript(sandbox.main_path, [entry(258000)])
     checks.warns(
         "recross_again",
         sandbox.run(sandbox.main_path, session="r"),
-        kilo="510",
+        kilo="260",
     )
 
 

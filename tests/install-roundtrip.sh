@@ -215,7 +215,7 @@ if settings.get("model") != "opus[1m]":
     problems.append(f"model={settings.get('model')!r}")
 if settings.get("effortLevel") != "high":
     problems.append(f"effortLevel={settings.get('effortLevel')!r}")
-if settings.get("bashOutputMaxChars") != 12000:
+if settings.get("bashOutputMaxChars") != 6000:
     problems.append("bashOutputMaxChars missing")
 if settings.get("modelSettings") != bundle["modelSettings"]:
     problems.append(f"modelSettings={settings.get('modelSettings')}")

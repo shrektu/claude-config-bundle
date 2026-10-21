@@ -27,7 +27,8 @@ Drift is corrected the moment you see it, by SendMessage to the implementer.
 ## Final review (once per milestone)
 
 When the implementer's last report is in and its evidence holds, spawn in ONE message, in the
-background, per repo:
+background, per repo, the set for the class — all three for M/L/XL, `codex-runner` +
+`flash-review-runner` for S, `flash-review-runner` alone for XS (your own edit):
 
 - `codex-runner` — mode `code`, `diff_base` = the base branch (Codex gpt-6.1-sol, effort medium);
 - `reviewer-opus` — `diff_base` = the base branch, repo path (Claude Opus 5.5, effort high);
@@ -49,7 +50,8 @@ Then exercise the acceptance scenario the way it will really be hit — the real
 browser, the device, the API — whenever that is possible. A run that can exceed ~8 min goes in a Bash call
 with `run_in_background: true`.
 
-Depth per class is what the trio plus your adjudication cover: S and M the trio on the full diff; L also a
+Depth per class is what the reviewers plus your adjudication cover: XS Flash on the diff; S Codex and
+Flash on the diff; M the trio on the full diff; L also a
 re-read of the risky files after the fix round; XL as L, with `review_focus` on the risk area and a delta
 trio whenever the fix round touches it.
 
