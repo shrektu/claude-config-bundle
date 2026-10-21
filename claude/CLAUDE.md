@@ -6,7 +6,7 @@ run at the end → output. Gemini 3.8 Flash low (`plan-gate-runner` → agy-work
 critiques every M/L/XL plan before the implementer starts; Codex is its fallback when agy is unavailable,
 out of quota or the repo's remotes are not on the agy allowlist
 (`~/.claude/mcp/agy-worker/allowed-remotes.txt` — github.com and bitbucket.org by default). The final
-review is three reviewers in parallel: Codex (`codex-runner`, gpt-6.1-sol, effort medium, mode `code`),
+review of M/L/XL is three reviewers in parallel (S gets Codex and Flash, XS Flash alone): Codex (`codex-runner`, gpt-6.1-sol, effort medium, mode `code`),
 Claude Opus 5.5 at effort high (`reviewer-opus`) and Gemini 3.8 Flash low (`flash-review-runner` →
 `agy_code_review`). Findings from any gate are input to your adjudication, never orders — reproduce each
 one like your own.
@@ -23,16 +23,19 @@ is planned, supervised, reviewed, tested and committed here.
   runs the end tests, commits and reports.
 - Implementer (`implementer`): Claude Sonnet 5.5 at effort medium, the only implementer. Edits files,
   runs tests/lint/build through `verify`, fixes its own failures and applies your verified findings. No
-  architecture decisions; never a bare `model:` Agent call.
+  architecture decisions; never a bare `model:` Agent call. Class S and above only — an XS change you
+  make yourself.
 - Writer (`writer`): Claude Haiku 5.5 at effort medium, for every text the customer never sees — PR
   descriptions, Jira text, Bitbucket code-review comments and replies. Gemini 3.8 Flash (`agy_write`)
-  drafts it from the facts and paths you give it, and Haiku checks nomenclature and language
-  (`redakcja.py` + the guide) and adds the footer.
+  drafts it from the facts and paths you give it, and Haiku checks the language (`redakcja.py` + the
+  guide) and adds the footer. No nomenclature/glossary check here: the correct nomenclature is checked
+  only for text shown directly to the customer (UI, `ui-writer`) — Sebastian, 2026-10-21.
 - UI writer (`ui-writer`): Claude Sonnet 5.5 at effort medium, only for text shown on the frontend —
   Gemini drafts UI messages and Sonnet checks them (no footer); `terms` mode checks UI strings. You check
   every claim against the code before anything goes out; one-line replies you write yourself.
 - Final reviewers: `codex-runner` (Codex gpt-6.1-sol, medium), `reviewer-opus` (Claude Opus 5.5, high),
-  `flash-review-runner` (Gemini 3.8 Flash, low). Read-only; bugs only.
+  `flash-review-runner` (Gemini 3.8 Flash, low). Read-only; bugs only. All three for M/L/XL; S gets
+  `codex-runner` + `flash-review-runner`; XS gets `flash-review-runner` alone.
 - Argon (Gemini 4 Argon through agy-worker): PDFs and documentation (skill `datasheet`), and
   `agy_debug_consult` as a consultant on hard bugs. Not a gate.
 
@@ -42,7 +45,8 @@ Classify in the planning turn. The class sets the TDD ladder and what the final 
 
 | Class | Definition | Final review |
 |---|---|---|
-| S | ≤ ~30 lines, ≤ 2 files, no new module/abstraction, no risk area | the trio on the diff once, your adjudication |
+| XS | ≤ ~5 changed lines in 1 file, no new function/abstraction, no risk area, no shared code (test preload, base class, libs/common, CI, build config) | `flash-review-runner` on the diff, your adjudication |
+| S | ≤ ~30 lines, ≤ 2 files, no new module/abstraction, no risk area | `codex-runner` + `flash-review-runner` on the diff once, your adjudication |
 | M | not S, not L, not XL | the trio on the full diff, your adjudication, one fix round |
 | L | architecture-level, several modules, hard bug, perf, tricky typing, or > ~300 lines | as M, plus a re-read of the risky files after the fix round |
 | XL | any risk area: migration, concurrency/locking/ISR, protocol/on-wire/firmware, data shape or public API, multi-repo, auth/permissions/secrets/PII/payments, data deletion | as L, with `review_focus` on the risk area and a delta trio whenever the fix round touches it |
@@ -58,8 +62,9 @@ The cycle is proportional to the class, and the plan names the phases for the cl
 
 | Class | Cycle |
 |---|---|
+| XS | you edit it yourself, no implementer and no plan gate: one red test → fix → green through `verify` when the line has logic; no test run when it has none (the commit gate lints it) |
 | S | one red test → fix → green. No property phase, no separate refactor |
-| M | acceptance (one per expected result) → implementation → unit → edge cases at the boundaries → refactor under green |
+| M | acceptance (one per expected result) → implementation → unit and boundary edge cases in one phase → refactor under green only when the code needs it |
 | L | as M, with the acceptance tests also at integration level against mocks/fakes of the external boundaries; property/edge tests mandatory in the risky places |
 | XL | as L, plus an acceptance scenario for the migration/rollback/protocol; refactor only under full green, with its own verify run after the refactor |
 
@@ -97,7 +102,9 @@ message of a session switches the gate off for that session, and is ignored anyw
   verifying); you open the log, you do not rerun the same tests yourself.
 - The final review runs once per milestone (once per task with one milestone): `codex-runner` (mode
   `code`), `reviewer-opus` and `flash-review-runner` in ONE message in the background, with your end test
-  run in parallel. `review_focus` and `acceptance_criteria` go to the agy-sandboxed reviewers
+  run in parallel — for M/L/XL; S runs `codex-runner` + `flash-review-runner`, XS `flash-review-runner`
+  alone. A finding a cheaper set misses that a later stage catches is a reason to reclassify, not to add
+  reviewers by default. `review_focus` and `acceptance_criteria` go to the agy-sandboxed reviewers
   (`flash-review-runner`, `plan-gate-runner`) as TEXT, never as paths outside the repo — they see only the
   repo snapshot. Every finding is reproduced before it goes back to the implementer, dropped with a
   reason if unreal; a deliberate trade-off is argued or escalated, never silently changed. Untracked files
@@ -134,7 +141,8 @@ message of a session switches the gate off for that session, and is ignored anyw
   still goes to the implementer.
 - Fix round: after the trio's findings are adjudicated (and the trivial ones fixed by you), COMMIT the
   milestone on the work branch; all real findings go back in ONE SendMessage to the implementer that did
-  the work (spawn a fresh one only if it is gone or drifted), and the fix round lands as `git commit
+  the work (spawn a fresh one only if it is gone or drifted, or its report shows `subagent_tokens` above
+  ~150k — a fresh implementer with a `findings` section is then cheaper than resuming), and the fix round lands as `git commit
   --fixup=<milestone sha>`. You verify it by its tests and by reading the fix diff against the milestone
   commit. A finding whose fix does not hold (its regression test or the fix diff shows it) goes back in
   the next round. A second (delta) trio, `diff_base` = the milestone commit, runs only when the fixes
@@ -186,9 +194,10 @@ costs tokens and dilutes attention, not speed: measured on Opus 5.5, a turn take
 tokens at 100k and at 500k alike, so speed comes from short outputs, not from compacting. The 1M window
 is headroom for one hard ticket, not a licence to keep a session alive across several.
 
-- One session = one ticket; start fresh rather than carry a finished ticket into the next one.
+- One session = one ticket; start fresh rather than carry a finished ticket into the next one: after
+  the report, propose the next ticket with `start_session` instead of taking it here.
   `/compact` costs ~75 s and interrupts Sebastian, so compact only at a milestone and only when
-  `context-guard` warns (from 500k, again every +50k): bring the progress log up to date and ask
+  `context-guard` warns (from 250k, again every +50k): bring the progress log up to date and ask
   Sebastian for `/compact` with your proposed focus line.
 - Search subagents (`Explore`, `general-purpose`) run on Sonnet: delegation-guard sets
   `model: sonnet` when you pass none. Pass a model only when a search genuinely needs Opus.
@@ -260,7 +269,7 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
 
 ## Workflow
 
-1. Analyze the task, write a concise plan, classify it S/M/L/XL in the same turn. Before the plan is
+1. Analyze the task, write a concise plan, classify it XS/S/M/L/XL in the same turn. Before the plan is
    final: open every mockup, screenshot and attachment of the ticket and its epic, and settle every
    contract the milestone touches across repos (shapes, names, statuses, who owns which field). Each
    assumption the ticket does not settle goes to the user now, in one batch — a plan corrected after
@@ -275,7 +284,8 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
    reports, and the production phases go to it by SendMessage with the adjudicated plan delta.
 2. `repo-facts` for M/L/XL before the implementer starts. No test baseline: a test that fails in the
    end run is checked on the target branch then (Rules, "Test runs").
-3. Spawn `implementer` with the delegation prompt (templates in the `delegate` skill; delegation-guard
+3. Spawn `implementer` with the delegation prompt (S and above; an XS change you make yourself, RED
+   first when it has logic) (templates in the `delegate` skill; delegation-guard
    names any field you leave out). L/XL one milestone per call; independent milestones in parallel
    worktrees per `parallel`, with no limit on the number of implementers (only a shared resource — one
    DB, one board, one firmware build — serialises work).
@@ -283,7 +293,8 @@ is headroom for one hard ticket, not a licence to keep a session alive across se
 5. On each report: `git status --short` + `git diff HEAD --stat`, open the RED and verify logs the report
    names (no rerun, no diff).
 6. Final review — load `review`. When the last report's evidence holds, spawn `codex-runner` (`mode: code`,
-   `diff_base` = the base branch), `reviewer-opus` and `flash-review-runner`, per repo, in ONE message in
+   `diff_base` = the base branch), `reviewer-opus` and `flash-review-runner` (the set for the class: S
+   without `reviewer-opus`, XS `flash-review-runner` only), per repo, in ONE message in
    the background, and start the end test run (step 8) in parallel. Finish the WHOLE adjudication before
    sending anything: reproduce every finding; all real ones go back in ONE SendMessage (the fix round,
    after you commit the milestone). No follow-up "one more thing" messages. Trivial findings

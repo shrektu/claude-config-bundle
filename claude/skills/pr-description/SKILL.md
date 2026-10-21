@@ -22,8 +22,9 @@ so it goes straight to ready-for-review.
 
 The orchestrator does not write it itself: spawn `writer` in `publish` mode with the diff range, the repo
 path, the Jira ID, the confirmed findings with their test names and this skill as the template. The writer
-has Gemini 3.8 Flash draft it (`agy_write`, kind `pr_description`), checks the nomenclature and language
-(`redakcja.py` plus the style guide) and adds the footer; check every claim in the draft against the code,
+has Gemini 3.8 Flash draft it (`agy_write`, kind `pr_description`), checks the language (`redakcja.py`
+plus the style guide, no nomenclature/glossary check — that is only for customer-facing UI text) and
+adds the footer; check every claim in the draft against the code,
 then publish. The text is Polish by default, in full sentences, concrete and concise. Bitbucket renders
 Markdown — use `##` headings. The description always ends with a blank line and the footer
 `🤖 Wygenerowane przez <model>`, where `<model>` is the model that produced the text (`Gemini 3.8 Flash`,

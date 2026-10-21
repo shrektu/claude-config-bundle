@@ -13,7 +13,7 @@ EVENT_KEY = "hook_event_name"
 SUBAGENT_DIR = "subagents"
 SUBAGENT_FILE_RE = re.compile(r"^agent-.+\.jsonl$")
 TAIL_BYTES = 512 * 1024
-DEFAULT_THRESHOLD = 500_000
+DEFAULT_THRESHOLD = 250_000
 DEFAULT_STEP = 50_000
 DEFAULT_STATE_DIR = "~/.cache/claude-context-guard"
 TOKENS_PER_K = 1000
@@ -36,7 +36,9 @@ MODEL_TEXT = (
     "Context is {k}k tokens (threshold {t}k). At the next milestone "
     "(round reported, findings sent, commit made) make sure the progress "
     "log is current, then ask Sebastian to run /compact and propose the "
-    "focus line; /compact is a user command you cannot run."
+    "focus line; /compact is a user command you cannot run. When the "
+    "ticket is already reported, propose the next piece of work in a "
+    "fresh session (start_session) instead of continuing here."
 )
 
 

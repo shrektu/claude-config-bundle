@@ -205,7 +205,7 @@
       }
     ]
   },
-  "bashOutputMaxChars": 12000,
+  "bashOutputMaxChars": 6000,
   "taskOutputMaxChars": 8000,
   "statusLine": {
     "type": "command",

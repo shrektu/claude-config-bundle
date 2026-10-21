@@ -92,7 +92,8 @@ after the bug, unit AND integration against mocks/fakes of the external boundari
 — say so explicitly. The implementer leaves the changes uncommitted; you verify them and commit them as
 `git commit --fixup=<milestone sha>`. A finding whose fix does not hold (its regression test or the fix
 diff shows it) goes back in the next round. Spawn a fresh implementer (with a `findings` section in place
-of `tdd_phases`) only when the old one is gone or has drifted. Three rounds without progress on the same
+of `tdd_phases`) only when the old one is gone, has drifted, or its last report shows `subagent_tokens`
+above ~150k — resuming that context costs more than a fresh agent reading the findings and the files. Three rounds without progress on the same
 finding end in **Zablokowane**, with the evidence — there is no escalation to another implementer.
 
 ## Final check
@@ -107,6 +108,7 @@ code. A failing test is run once on the target branch before it counts as a regr
 
 | Class | Focus |
 |---|---|
+| XS | the changed lines and whether they do what the task says; nothing else touched |
 | S | the one behaviour that changed, its red test, and whether anything else was touched |
 | M | plan conformance, acceptance criteria evidence, meaningful tests, callers and signatures |
 | L | module boundaries, integration tests against the fakes, perf and typing claims, regressions in every caller |

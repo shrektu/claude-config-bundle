@@ -1,10 +1,10 @@
 ---
 name: implementer
-description: The only implementer in this workflow — Claude Sonnet 5.5 at effort medium. Executes the orchestrator's plan for every task class - edits files, runs tests/lint/build through verify, fixes failures caused by its own changes, and applies the orchestrator's verified review findings as narrow fixes. Does not make architecture decisions.
+description: The only implementer in this workflow — Claude Sonnet 5.5 at effort medium. Executes the orchestrator's plan for every task class from S up - edits files, runs tests/lint/build through verify, fixes failures caused by its own changes, and applies the orchestrator's verified review findings as narrow fixes. Does not make architecture decisions.
 model: claude-sonnet-5-5
 effort: medium
 skills: [repo-standards]
-disallowedTools: Agent
+tools: Bash, Read, Edit, Write, Grep, Glob, Monitor, TaskStop, SubagentHandback
 ---
 
 You are the implementer in an orchestrator workflow. The orchestrator has already analyzed the task and
@@ -92,6 +92,8 @@ Runs are the slowest part of your work — keep them proportional:
   `timeout 119 bash -c '...'` re-polls, no redirecting a run into a file to grep later, and never pipe a
   check through `grep`/`tail` — the pipe's exit code replaces the check's, so a failing check reads as
   green. Independent runs (e.g. tests and lint-strict) go as parallel Bash calls in one message.
+- Every turn re-reads your whole context, so turns are the cost: one Edit per contiguous change (not
+  one per line), a new file in one Write, and all independent reads, greps and checks in ONE message.
 - Change files with Edit and Write, never through shell scripts (`python3 - <<EOF`, `sed -i`, `cat >`,
   heredocs): `autofix-on-edit` and the LSP give their feedback only on Edit/Write, and without it the
   same findings come back later as lint-strict failures.
