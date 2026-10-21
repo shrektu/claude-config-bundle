@@ -6,7 +6,7 @@ Applies this bundle to the current machine. Idempotent: unchanged files are skip
 up to ~/.claude/backups/bundle-<stamp>/ before being replaced. The bundle's own install.sh, export.sh,
 README.md and retire.json are copied to ~/.claude/bundle/ verbatim, so their __HOME__ placeholders survive. retire.json is processed first (retired files
 and settings entries are backed up and removed). settings.json is MERGED (bundle wins for workflow keys, this
-machine keeps env and autoMode, allow/deny lists are unioned, hooks are replaced per event+matcher so a hook
+machine keeps env (incl. the per-machine mode, env CLAUDE_MODE) and autoMode, allow/deny lists are unioned, hooks are replaced per event+matcher so a hook
 is never registered twice; local-only matchers stay). ~/.claude.json
 gets the codex-worker and agy-worker MCP servers, ~/.codex/config.toml gets the codex-worker block appended if missing.
 claude/lint/ruff.toml is always installed to ~/.claude/lint/ruff.toml (a changed copy is backed up first). After
@@ -332,6 +332,12 @@ while IFS= read -r stale; do
   rm -rf "$stale"
   echo "rotated backup: $stale"
 done < <(find "$HOME/.claude/backups" -mindepth 1 -maxdepth 1 -type d -name 'bundle-*' | sort -r | tail -n +$((BACKUPS_KEPT + 1)))
+
+if python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get('env', {}).get('CLAUDE_MODE', '').strip().lower() == 'personal' else 1)" "$HOME/.claude/settings.json"; then
+  echo "mode: personal (CLAUDE_MODE in ~/.claude/settings.json env)"
+else
+  echo "mode: work (default; set env CLAUDE_MODE=personal on a private machine)"
+fi
 
 echo
 echo "done. files changed: $CHANGED$( [ -d "$BACKUP" ] && echo "; backups in $BACKUP" )"

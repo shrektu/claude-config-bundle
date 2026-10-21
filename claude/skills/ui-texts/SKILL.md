@@ -19,7 +19,8 @@ description: UI texts (ui-writer) and translations (Gemini Flash via agy-worker)
 6. `AGY-UNAVAILABLE` → stop and tell Sebastian why (repo off the allowlist → he can add it to
    `~/.claude/mcp/agy-worker/allowed-remotes.txt`); never translate yourself instead.
 7. Resolve every `problems` entry: re-request those keys or fix the placeholders.
-8. Nomenclature review of Polish texts (others on Sebastian's request): spawn `ui-writer` mode `terms`
+8. Work mode only (skip where CLAUDE_MODE=personal). Nomenclature review of Polish texts (others on
+   Sebastian's request): spawn `ui-writer` mode `terms`
    with the strings and the glossary; apply its corrections.
 9. Write the texts into the locale files, keeping key order and formatting, then run
    `~/.claude/bin/verify --repo <repo> -- 'cd <package.json dir> && <bun|npm> run i18n:check'` (bun when

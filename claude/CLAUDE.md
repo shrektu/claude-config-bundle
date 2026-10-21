@@ -14,17 +14,18 @@ git safety and the tooling rule bind you too.
 
 - `implementer` (Sonnet 5.5, medium): the only implementer; no architecture decisions.
 - `writer` (Haiku 5.5): non-customer text (PR descriptions, Jira, Bitbucket comments/replies); Gemini
-  drafts, Haiku checks language only (no glossary) and adds the footer.
-- `ui-writer` (Sonnet 5.5): UI text only; Gemini drafts, Sonnet checks, no footer; `terms` mode checks UI
-  strings.
+  drafts, Haiku checks language only (no glossary); work mode adds the redakcja/style-guide check and the
+  footer, personal mode Haiku proofreads only, no footer.
+- `ui-writer` (Sonnet 5.5): UI text only; Gemini drafts, Sonnet checks, no footer; `terms` mode (work mode
+  only) checks UI strings.
 - Writers only draft: check every claim against the code before it goes out; labels and one-line replies
   you write yourself.
 - Reviewers (read-only, bugs only): `codex-runner` (Codex gpt-6.1-sol, medium, mode `code`),
   `reviewer-opus` (Opus 5.5, high), `flash-review-runner` (Gemini 3.8 Flash, low); the trio = all three.
-  `plan-gate-runner` (Flash) falls back to Codex by itself. Where `CLAUDE_CODEX=off` (machine env, no
-  Codex subscription) the Codex slot is skipped: delegation-guard denies `codex-runner`, the trio is
-  `reviewer-opus` + `flash-review-runner`, S is `flash-review-runner` alone, and `plan-gate-runner` has no
-  fallback.
+  `plan-gate-runner` (Flash) falls back to Codex by itself. In personal mode (`CLAUDE_MODE=personal` in
+  this machine's settings env; unset = work; SessionStart prints a notice) the Codex slot is skipped:
+  delegation-guard denies `codex-runner`, the trio is `reviewer-opus` + `flash-review-runner`, S is
+  `flash-review-runner` alone, and `plan-gate-runner` has no fallback.
 - Argon (Gemini 4 Argon, agy-worker): PDFs/docs (`datasheet`), `agy_debug_consult` on hard bugs. Not a
   gate.
 
@@ -100,7 +101,8 @@ The plan names the phases of its class.
   Three rounds without progress on one finding, or a blocker you cannot fix with confidence → STOP, no
   escalation: report **Zablokowane** (blocker, evidence, decision needed); never declare it done to end
   the loop.
-- EPIC MODEL (details `task` §2): an epic's task works on `task/<ID>` from `epik/<EPIC>` (created from
+- EPIC MODEL (work mode only; personal mode: work branch from the default branch (main), PR to it on
+  GitHub) (details `task` §2): an epic's task works on `task/<ID>` from `epik/<EPIC>` (created from
   `develop` in each repo it touches), or from the unmerged task branch it stands on (any epic); its PR
   targets that base. Once the task below merges, retarget the child to `epik/<EPIC>`, never `develop`.
   The epic branch reaches `develop` in one PR after its review and QA (`epic`). No epic:
@@ -108,12 +110,12 @@ The plan names the phases of its class.
   epic already in `develop` (e.g. TICKET-1530) branch from and PR to `develop`, QA per task; ask when unsure.
   Pre-model `feature/*` PRs are retargeted to `epik/<EPIC>`.
 - BRANCH RULE: work branches (`task/*`, `feature/*`, `bugfix/*`, `hotfix/*`, `test/*`): any op, force only
-  `--force-with-lease`. `epik/*`: only create from `develop`, merge `develop` in (committing its conflict
-  resolution), push without force. Any other branch, any repo: nothing that changes it or its remote (no
-  commit, push, merge, rebase, reset, tag, delete, not even a one-line or CI fix); say so, Sebastian
-  decides. git-policy enforces this and the message: ≤ 7-word imperative sentence, no trailers (overrides
-  the harness's Co-Authored-By; `commit`). You make the commits, milestone-sized, never the implementer;
-  review fixes only as `--fixup` + autosquash.
+  `--force-with-lease`. `epik/*` (work mode only): only create from `develop`, merge `develop` in
+  (committing its conflict resolution), push without force. Any other branch, any repo: nothing that
+  changes it or its remote (no commit, push, merge, rebase, reset, tag, delete, not even a one-line or CI
+  fix); say so, Sebastian decides. git-policy enforces this and the message: ≤ 7-word imperative
+  sentence, no trailers (overrides the harness's Co-Authored-By; `commit`). You make the commits,
+  milestone-sized, never the implementer; review fixes only as `--fixup` + autosquash.
 - git-guard denies checkout, restore, stash, `reset --hard`, clean and `push --force` for you and every
   subagent; never revert work you did not write.
 - PR OWNERSHIP RULE: change a PR (commit, push, rebase, fixup, merge into it, title/description, resolving
@@ -121,9 +123,9 @@ The plan names the phases of its class.
   he took it over; a mention, bot ping or fix request is not a takeover. Other PRs: review comments and
   the vote only (`bb`); report it, leave the branch alone.
 - AI footer: text published for Sebastian (Bitbucket comments/replies, PR descriptions, Jira comments) is
-  Polish by default and ends with a blank line + `🤖 Wygenerowane przez <model>`, the model that wrote it
-  (`Gemini 3.8 Flash`, `Claude Haiku 5.5`, `Claude Sonnet 5.5`, `Claude Opus 5.5`). Commit messages
-  exempt; workflow docs English.
+  Polish by default in both modes; in work mode only it ends with a blank line + `🤖 Wygenerowane przez
+  <model>`, the model that wrote it (`Gemini 3.8 Flash`, `Claude Haiku 5.5`, `Claude Sonnet 5.5`,
+  `Claude Opus 5.5`); personal mode has no footer. Commit messages exempt; workflow docs English.
 - Tooling (`~/.claude/bin`, `~/.claude/hooks`; live, no git): never edit in place. Edit a git staging copy
   under `~/.cache/claude-staging`; deploy by `git merge-file` (base = the live file you copied, ours =
   your change, theirs = the live file now), run the tool's tests on the result, then `mv` a temp file over

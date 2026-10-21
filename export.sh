@@ -2,7 +2,7 @@
 usage() {
   cat <<'USAGE'
 usage: export.sh [OUT_DIR]      (default: ~/claude-config-bundle; also writes OUT_DIR.tar.gz)
-Packs the portable Claude Code + Codex setup of this machine: CLAUDE.md, settings.json (without autoMode),
+Packs the portable Claude Code + Codex setup of this machine: CLAUDE.md, settings.json (without autoMode and the machine mode),
 agents, skills, prompts, templates, bin, hooks, lint (ruff.toml), the codex-worker and agy-worker MCP servers, statusline, Codex AGENTS.md and the
 MCP entries for ~/.claude.json and ~/.codex/config.toml, plus retire.json so the retirement
 list travels with the bundle. Paths are replaced by __HOME__, __CODEX_BIN__ and
@@ -97,6 +97,8 @@ python3 - "$HOME/.claude/settings.json" "$OUT/claude/settings.json" <<'PY'
 import json, sys
 settings = json.load(open(sys.argv[1]))
 settings.pop("autoMode", None)
+for machine_key in ("CLAUDE_MODE", "CLAUDE_CODEX"):
+    settings.get("env", {}).pop(machine_key, None)
 json.dump(settings, open(sys.argv[2], "w"), indent=2, ensure_ascii=False)
 open(sys.argv[2], "a").write("\n")
 PY

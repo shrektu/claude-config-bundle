@@ -49,7 +49,7 @@ a specialist behind a thin relay.
   `verify`, fixes its own failures. It makes no architecture decisions and has no iteration limit.
 - Plan gate: `plan-gate-runner` relays the plan to Gemini 3.8 Flash (`agy_plan_review`); when Gemini is
   unavailable it falls back to Codex (`codex-runner`, gpt-6.1-sol, reasoning effort high), with no
-  fallback where `CLAUDE_CODEX=off`. Findings are input
+  fallback in personal mode (`CLAUDE_MODE=personal`). Findings are input
   to the orchestrator's adjudication, never orders.
 - Final review (the trio): `codex-runner` (gpt-6.1-sol, effort medium, bugs only), `reviewer-opus` (Claude
   Opus 5.5, read-only) and `flash-review-runner` (Gemini 3.8 Flash, low) review the diff in parallel
@@ -125,14 +125,28 @@ when it exists on the exporting machine), the agy-worker MCP server (python file
 
 Code review runs on gpt-6.1-sol, which needs a recent codex-cli. Check `codex --version`.
 
-On a machine whose Codex account cannot run gpt-6.1-sol, set `"CLAUDE_CODEX": "off"` in the `env` of
-`~/.claude/settings.json` (`install.sh` keeps machine env). Then delegation-guard denies every
-`codex-runner` spawn and codex-gate denies every Codex call (relay agents included), so the final review
-runs as `reviewer-opus` + `flash-review-runner` (class S: Flash alone) and the plan gate has no Codex
-fallback. Without the variable nothing changes.
+### Personal/work mode
+
+One per-machine setting picks the mode: `"CLAUDE_MODE": "personal"` in the `env` of
+`~/.claude/settings.json`. Unset (or any other value) = work mode, the behaviour described above.
+`install.sh` keeps the machine's env and `export.sh` never carries it, so neither overwrites the mode;
+`install.sh` prints the machine's mode at the end. It replaces the old Codex-only switch, which
+`install.sh` removes from settings.
+
+Personal mode turns off:
+
+- Codex: delegation-guard denies every `codex-runner` spawn and codex-gate denies every Codex call (relay
+  agents included), so the final review runs as `reviewer-opus` + `flash-review-runner` (class S: Flash
+  alone; Flash unavailable: `reviewer-opus`) and the plan gate has no Codex fallback.
+- The company language checks: `redakcja.py`, the style guide, the glossary and the `terms` mode;
+  `writer` and `ui-writer` proofread themselves, and `agy_write` sends no company style guide.
+- The AI footer on published text, and the epic-branch handling (`repo-facts` no longer reports an
+  `epik/*` branch as an epic branch).
+
+A SessionStart hook (`mode-notice`) prints a one-line notice in personal mode and nothing in work mode.
 
 ```bash
-for h in autofix-on-edit codex-gate comment-guard context-guard delegation-guard git-guard git-policy payload-probe read-guard repo-facts standards-gate subagent-verify-check tdd-guard verify-guard; do
+for h in autofix-on-edit codex-gate comment-guard context-guard delegation-guard git-guard git-policy mode-notice payload-probe read-guard repo-facts standards-gate subagent-verify-check tdd-guard verify-guard; do
   python3 ~/.claude/hooks/$h-test.py || echo "FAILED: $h"
 done
 bash ~/.claude/bin/verify-test.sh

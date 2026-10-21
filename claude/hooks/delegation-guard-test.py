@@ -192,7 +192,8 @@ garbage = [
 ]
 
 
-SWITCH_VARS = ("CLAUDE_CODEX", "CLAUDE_CODEX_GATE")
+SWITCH_VARS = ("CLAUDE_MODE", "CLAUDE_CODEX", "CLAUDE_CODEX_GATE")
+PERSONAL = {"CLAUDE_MODE": "personal"}
 
 
 def hook_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -330,12 +331,12 @@ codex_spawn: dict[str, object] = {
     "run_in_background": True,
 }
 CODEX_OFF_NEEDLES = (
-    "Codex is off on this machine (CLAUDE_CODEX=off)",
+    "Personal mode (CLAUDE_MODE=personal)",
     "skip the Codex slot",
     "reviewer-opus",
     "flash-review-runner",
 )
-rc, out, err = run(codex_spawn, env={"CLAUDE_CODEX": "off"})
+rc, out, err = run(codex_spawn, env=PERSONAL)
 try:
     decision = json.loads(out)["hookSpecificOutput"]
 except ValueError:
@@ -354,10 +355,10 @@ if not ok:
     print(f"CODEX OFF DENY FAIL -> rc={rc} {out[:300]} {err[-160:]}")
 
 EDGE_CHECKS = 0
-for off_value in ("OFF", " off ", "0", "false", "no", "No"):
+for off_value in ("personal", "PERSONAL", " Personal ", "personal\n"):
     for key in ("subagent_type", "agent_type"):
         spawn: dict[str, object] = {key: "codex-runner", "prompt": "review it"}
-        rc, out, err = run(spawn, env={"CLAUDE_CODEX": off_value})
+        rc, out, err = run(spawn, env={"CLAUDE_MODE": off_value})
         EDGE_CHECKS += 1
         if not (
             rc == 0
@@ -369,17 +370,27 @@ for off_value in ("OFF", " off ", "0", "false", "no", "No"):
             bad += 1
             print(f"OFF VALUE FAIL {off_value!r} {key} -> {out[:200]}")
 
-for on_value in ("on", "", "1", "yes", "true"):
+for on_value in ("work", "", "persnal", "WORK", "1", "off"):
     rc, out, err = run(
         {"subagent_type": "codex-runner", "prompt": "review it"},
-        env={"CLAUDE_CODEX": on_value},
+        env={"CLAUDE_MODE": on_value},
     )
     EDGE_CHECKS += 1
     if not (rc == 0 and out == "" and not err):
         bad += 1
         print(f"ON VALUE FAIL {on_value!r} -> {out[:200]}")
 
-OFF = {"CLAUDE_CODEX": "off"}
+for leftover in ("off", "0", "false", "no"):
+    rc, out, err = run(
+        {"subagent_type": "codex-runner", "prompt": "review it"},
+        env={"CLAUDE_CODEX": leftover},
+    )
+    EDGE_CHECKS += 1
+    if not (rc == 0 and out == "" and not err):
+        bad += 1
+        print(f"LEFTOVER CLAUDE_CODEX FAIL {leftover!r} -> {out[:200]}")
+
+OFF = PERSONAL
 for other in ("reviewer-opus", "flash-review-runner", "writer", STRONG_AGENT):
     rc, out, err = run({"subagent_type": other, "prompt": "x"}, env=OFF)
     EDGE_CHECKS += 1

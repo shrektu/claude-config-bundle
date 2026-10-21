@@ -20,11 +20,11 @@ PHASE_MARKERS = ("tdd_phases", "tdd phases")
 SEARCH_AGENT_MODELS = {"Explore": "haiku", "general-purpose": "sonnet"}
 GUARD_PREFIX = "delegation-guard: "
 SEARCH_MODEL_REASON = GUARD_PREFIX + "search agent defaults to {model}"
-CODEX_SWITCH_VAR = "CLAUDE_CODEX"
-CODEX_OFF_VALUES = frozenset({"off", "0", "false", "no"})
+MODE_VAR = "CLAUDE_MODE"
+PERSONAL_MODE = "personal"
 CODEX_AGENT = "codex-runner"
 CODEX_OFF_REASON = (
-    "Codex is off on this machine (CLAUDE_CODEX=off): skip the Codex slot. "
+    "Personal mode (CLAUDE_MODE=personal): Codex is off, skip the Codex slot. "
     f"`{CODEX_AGENT}` is not spawned and nothing is spawned in its place; "
     "the final review set is `reviewer-opus` + `flash-review-runner` "
     "(class S: `flash-review-runner` alone)."
@@ -160,10 +160,9 @@ def default_search_model(tool_input: dict[str, object], model: str) -> None:
     print(json.dumps({"hookSpecificOutput": decision}))
 
 
-def codex_is_off() -> bool:
-    """Tell whether this machine has Codex switched off."""
-    value = os.environ.get(CODEX_SWITCH_VAR, "")
-    return value.strip().lower() in CODEX_OFF_VALUES
+def personal_mode() -> bool:
+    """Tell whether this machine runs in personal mode."""
+    return os.environ.get(MODE_VAR, "").strip().lower() == PERSONAL_MODE
 
 
 def subagent_type(tool_input: dict[str, object]) -> str | None:
@@ -197,7 +196,7 @@ def main():
         if agent in SEARCH_AGENT_MODELS and not has_model:
             default_search_model(tool_input, SEARCH_AGENT_MODELS[agent])
             return
-        if agent == CODEX_AGENT and codex_is_off():
+        if agent == CODEX_AGENT and personal_mode():
             deny(CODEX_OFF_REASON)
         if agent not in IMPLEMENTER_TYPES:
             return

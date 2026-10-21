@@ -120,6 +120,12 @@
             "command": "python3 __HOME__/.claude/bin/repo-facts",
             "timeout": 10,
             "statusMessage": "repo-facts"
+          },
+          {
+            "type": "command",
+            "command": "python3 __HOME__/.claude/hooks/mode-notice.py",
+            "timeout": 5,
+            "statusMessage": "mode-notice"
           }
         ]
       },

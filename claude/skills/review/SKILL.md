@@ -26,7 +26,8 @@ repo): `project_path`, `diff_base` = the base branch, `review_focus`, `acceptanc
 | XL | the risk area: migration and rollback, on-wire/protocol compatibility, concurrency and ISR paths, auth and tenancy, irreversible steps |
 
 Flash `AGY-UNAVAILABLE`: no retry, say so in the report. XS: spawn `codex-runner` (`mode: code`)
-instead; S: Codex alone stands; M/L/XL: the other two stand.
+instead; S: Codex alone stands; M/L/XL: the other two stand. In personal mode (Codex is off) XS and S
+spawn `reviewer-opus` instead.
 
 A bug a later stage (delta review, PR review, QA) catches that the class's set missed → raise the class
 (this task's if open, similar tasks' next time); never add reviewers by default.

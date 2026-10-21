@@ -15,6 +15,11 @@ from helpers_test import (
 )
 
 
+@pytest.fixture(autouse=True)
+def clear_machine_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CLAUDE_MODE", raising=False)
+
+
 def write_executable(path: Path, source: str) -> Path:
     path.write_text(source)
     path.chmod(EXECUTABLE_MODE)

@@ -1,10 +1,15 @@
 ---
 name: pr-description
-description: A ready-to-paste Bitbucket PR description for a finished task, plus the PR screenshot procedure. Use when Sebastian asks for a PR description, says "przygotuj PR", or asks for a pull request description.
+description: A ready-to-paste Bitbucket PR description for a finished task, plus the PR screenshot procedure (work mode; personal mode gets a GitHub form). Use when Sebastian asks for a PR description, says "przygotuj PR", or asks for a pull request description.
 ---
 
-Return title + description as one ready-to-paste Bitbucket Markdown block, no commentary except the
-target-branch line. Publish it (POST/PUT) only inside `/task`/`/epic` or when Sebastian asks; before a
+Personal mode (`CLAUDE_MODE=personal`): the Bitbucket form below is work mode only. Draft the description
+via `writer` (kind `pr_description`, Polish by default, no footer) and return a title plus a body in
+GitHub Markdown for `gh pr create`. No Bitbucket upload and no screenshot-to-Bitbucket procedure; when the
+UI changes, the screenshots go into the GitHub PR as attachments Sebastian adds, or are described.
+
+Work mode: return title + description as one ready-to-paste Bitbucket Markdown block, no commentary except
+the target-branch line. Publish it (POST/PUT) only inside `/task`/`/epic` or when Sebastian asks; before a
 PUT back up the old description and send the title with it. The work is already verified: read the diff
 only to describe it.
 
@@ -54,6 +59,8 @@ Target branch: <target>
 
 🤖 Wygenerowane przez <model>
 ```
+
+The footer line is work mode only.
 
 ## Screenshots end to end
 

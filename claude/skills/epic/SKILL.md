@@ -1,6 +1,6 @@
 ---
 name: epic
-description: A whole Jira epic — its epik/<EPIC> branch, its tasks in parallel sessions, QA and the final review of the epic branch before it goes to develop. Load when Sebastian writes /epic with an epic ID (e.g. /epic TICKET-1273) or asks for a whole epic to be done.
+description: Work mode only (skip where CLAUDE_MODE=personal). A whole Jira epic — its epik/<EPIC> branch, its tasks in parallel sessions, QA and the final review of the epic branch before it goes to develop. Load when Sebastian writes /epic with an epic ID (e.g. /epic TICKET-1273) or asks for a whole epic to be done.
 ---
 
 Input: the epic ID (`TICKET-1273`). Execute, do not only plan: after the analysis start at once without

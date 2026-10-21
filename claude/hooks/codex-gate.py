@@ -14,7 +14,8 @@ TRANSCRIPT_KEYS = ("agent_transcript_path", "transcript_path")
 SUBAGENT_DIR = "subagents"
 SUBAGENT_FILE_RE = re.compile(r"^agent-.+\.jsonl$")
 OFF_VALUES = {"off", "0", "false", "no"}
-CODEX_SWITCH_VAR = "CLAUDE_CODEX"
+MODE_VAR = "CLAUDE_MODE"
+PERSONAL_MODE = "personal"
 
 REASON = (
     "Codex reviews run through the `codex-runner` agent (code gate) or the "
@@ -42,7 +43,7 @@ IMPLEMENT_REASON = (
 
 
 CODEX_OFF_REASON = (
-    "Codex is off on this machine (CLAUDE_CODEX=off): the Codex slot is "
+    "Personal mode (CLAUDE_MODE=personal): the Codex slot is "
     "skipped (final review without `codex-runner`, plan gate without the "
     "Codex fallback). Do not call Codex."
 )
@@ -83,7 +84,7 @@ def main():
             return
         if tool == IMPLEMENT_TOOL:
             deny(IMPLEMENT_REASON)
-        if os.environ.get(CODEX_SWITCH_VAR, "").strip().lower() in OFF_VALUES:
+        if os.environ.get(MODE_VAR, "").strip().lower() == PERSONAL_MODE:
             deny(CODEX_OFF_REASON)
         if os.environ.get("CLAUDE_CODEX_GATE", "").strip().lower() in OFF_VALUES:
             return

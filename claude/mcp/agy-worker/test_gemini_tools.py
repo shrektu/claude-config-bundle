@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
@@ -533,6 +534,66 @@ def test_write_inlines_facts_template_and_style_guide(
     assert TEMPLATE.strip() in prompt
     assert STYLE_GUIDE.strip() in prompt
     assert "@.agy/" not in prompt
+
+
+def test_machine_mode_env_does_not_leak_into_tests() -> None:
+    assert "CLAUDE_MODE" not in os.environ
+
+
+def test_style_guide_inlined_when_machine_runs_personal_mode(
+    fake_agy: FakeAgy,
+    allowlisted_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(STYLE_GUIDE)
+    monkeypatch.setenv("AGY_STYLE_GUIDE", str(guide))
+
+    write(allowlisted_repo)
+
+    assert STYLE_GUIDE.strip() in fake_agy.invocation().argv[1]
+
+
+@pytest.mark.parametrize("mode", ["personal", "PERSONAL", " Personal "])
+def test_write_skips_style_guide_in_personal_mode(
+    fake_agy: FakeAgy,
+    allowlisted_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(STYLE_GUIDE)
+    monkeypatch.setenv("AGY_STYLE_GUIDE", str(guide))
+    monkeypatch.setenv("CLAUDE_MODE", mode)
+
+    write(allowlisted_repo, template=TEMPLATE)
+
+    prompt = fake_agy.invocation().argv[1]
+    assert agy_worker.style_guide_content() is None
+    assert STYLE_GUIDE.strip() not in prompt
+    assert "Style guide" not in prompt
+    assert TEMPLATE.strip() in prompt
+
+
+@pytest.mark.parametrize("mode", ["", "work", "persnal"])
+def test_write_inlines_style_guide_outside_personal_mode(
+    fake_agy: FakeAgy,
+    allowlisted_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    guide = tmp_path / "guide.md"
+    guide.write_text(STYLE_GUIDE)
+    monkeypatch.setenv("AGY_STYLE_GUIDE", str(guide))
+    monkeypatch.setenv("CLAUDE_MODE", mode)
+
+    write(allowlisted_repo)
+
+    assert agy_worker.style_guide_content() == STYLE_GUIDE.encode()
+    assert STYLE_GUIDE.strip() in fake_agy.invocation().argv[1]
 
 
 def test_write_without_style_guide_file(

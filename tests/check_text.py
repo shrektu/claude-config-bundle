@@ -124,7 +124,7 @@ REQUIRED_ALLOW = (
 SESSION_MODEL = "opus[1m]"
 RETIRED_MODE = "final-audit"
 STALE_TERMS = re.compile(
-    r"implementer-strong|rownolegle|\bepik\b(?!/)|teksty-ui"
+    r"implementer-strong|rownolegle|\bepik\b(?!/)|teksty-ui|CLAUDE_CODEX(?!_GATE)"
 )
 README_STALE_PHRASES = ("reviews every round itself", "before every commit")
 README_REVIEW_TERMS = (
@@ -135,7 +135,7 @@ README_REVIEW_TERMS = (
     "autosquash",
 )
 README_WORKFLOW_TERMS = (
-    "CLAUDE_CODEX",
+    "CLAUDE_MODE",
     "plan-gate-runner",
     "flash-review-runner",
     "reviewer-opus",

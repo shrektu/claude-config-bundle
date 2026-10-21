@@ -1,6 +1,6 @@
 ---
 name: qa
-description: Hard e2e scenarios on an isolated stack with PASS/FAIL/NIEJASNE evidence, for a fully merged epik/<EPIC>, a task with no epic or an old-epic blocker fix. Load on /qa <ID> or when asked to test or click through a ticket.
+description: Work mode only (skip where CLAUDE_MODE=personal). Hard e2e scenarios on an isolated stack with PASS/FAIL/NIEJASNE evidence, for a fully merged epik/<EPIC>, a task with no epic or an old-epic blocker fix. Load on /qa <ID> or when asked to test or click through a ticket.
 argument-hint: <EPIC-ID | JIRA-ID>
 ---
 

@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +72,8 @@ CODE_REVIEW_TIMEOUT_SECONDS = 1800
 WRITE_TIMEOUT_SECONDS = 600
 DEBUG_TIMEOUT_SECONDS = 1800
 STYLE_GUIDE_ENV = "AGY_STYLE_GUIDE"
+MODE_VAR = "CLAUDE_MODE"
+PERSONAL_MODE = "personal"
 DEFAULT_STYLE_GUIDE_PARTS = (
     "claude-skills",
     "_shared",
@@ -191,7 +194,9 @@ def parse_write_kind(kind: str) -> WriteKind:
 
 
 def style_guide_content() -> bytes | None:
-    """Return the style guide text, or None when the file is absent."""
+    """Return the style guide text, or None in personal mode or if absent."""
+    if os.environ.get(MODE_VAR, "").strip().lower() == PERSONAL_MODE:
+        return None
     default = Path.home().joinpath(*DEFAULT_STYLE_GUIDE_PARTS)
     path = path_from_env(STYLE_GUIDE_ENV, default)
     return path.read_bytes() if path.is_file() else None

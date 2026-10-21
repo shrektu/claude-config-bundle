@@ -1,6 +1,6 @@
 ---
 name: task
-description: One Jira task from ID to an open PR. Load when Sebastian writes /task with a task ID (e.g. /task TICKET-1274) or asks you to do a specific Jira ticket.
+description: Work mode only (skip where CLAUDE_MODE=personal). One Jira task from ID to an open PR. Load when Sebastian writes /task with a task ID (e.g. /task TICKET-1274) or asks you to do a specific Jira ticket.
 ---
 
 Input: one task ID (`TICKET-1274`); without one, ask (never guess from the branch). Only the Jira-specific
