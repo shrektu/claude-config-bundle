@@ -135,6 +135,7 @@ README_REVIEW_TERMS = (
     "autosquash",
 )
 README_WORKFLOW_TERMS = (
+    "CLAUDE_CODEX",
     "plan-gate-runner",
     "flash-review-runner",
     "reviewer-opus",

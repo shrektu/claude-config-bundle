@@ -17,11 +17,27 @@ SPOOFED = f"{PROJECTS}/subagents/{SESSION}.jsonl"
 AGENT_ID = "a41b0d4bd296103f3"
 
 
+SWITCH_VARS = ("CLAUDE_CODEX", "CLAUDE_CODEX_GATE")
+CODEX_OFF_REASON = "Codex is off on this machine"
+
+
+def hook_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Return os.environ without the Codex switches, plus extra."""
+    base = {k: v for k, v in os.environ.items() if k not in SWITCH_VARS}
+    return {**base, **(extra or {})}
+
+
 def run(
     payload: dict[str, Any], env: dict[str, str] | None = None
 ) -> tuple[int, str, str]:
-    proc = subprocess.run([sys.executable, hook], input=json.dumps(payload), capture_output=True,
-                          text=True, env={**os.environ, **(env or {})})
+    proc = subprocess.run(
+        [sys.executable, hook],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=hook_env(env),
+    )
     return proc.returncode, proc.stdout, proc.stderr
 
 
@@ -176,7 +192,14 @@ for payload, label in allow:
         bad += 1
         print(f"ALLOW FAIL ({label}): rc={rc} out={out[:200]!r} err={err[:120]!r}")
 for raw in garbage:
-    proc = subprocess.run([sys.executable, hook], input=raw, capture_output=True, text=True)
+    proc = subprocess.run(
+        [sys.executable, hook],
+        input=raw,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=hook_env(),
+    )
     if not (proc.returncode == 0 and proc.stdout.strip() == "" and proc.stderr == ""):
         bad += 1
         print(f"GARBAGE FAIL {raw!r}: rc={proc.returncode} out={proc.stdout[:150]!r} err={proc.stderr[:120]!r}")
@@ -227,11 +250,102 @@ if (
     bad += 1
     print(f"IMPLEMENT MESSAGE FAIL: {implement_reason[:300]!r}")
 
-total = len(deny) + len(allow) + len(garbage) + 6
+codex_off_cases = [
+    {"tool_name": CODEX, "transcript_path": SUB, "agent_type": PLAN_GATE},
+    {
+        "tool_name": CODEX,
+        "transcript_path": MAIN,
+        "agent_type": PLAN_GATE,
+        "agent_id": AGENT_ID,
+    },
+]
+for off_payload in codex_off_cases:
+    rc, out, err = run(off_payload, env={"CLAUDE_CODEX": "off"})
+    off_reason = ""
+    if out.strip():
+        off_reason = json.loads(out)["hookSpecificOutput"][
+            "permissionDecisionReason"
+        ]
+    if not (rc == 0 and err == "" and CODEX_OFF_REASON in off_reason):
+        bad += 1
+        print(f"CODEX OFF FAIL: {off_payload} out={out[:200]!r}")
+
+edge_checks = 0
+RUNNER_CALL = {
+    "tool_name": CODEX,
+    "transcript_path": SUB,
+    "agent_type": "codex-runner",
+}
+for off_value in ("OFF", " off ", "0", "false", "no"):
+    for payload in (
+        {"tool_name": CODEX, "transcript_path": MAIN},
+        RUNNER_CALL,
+        {"tool_name": CODEX},
+    ):
+        rc, out, err = run(payload, env={"CLAUDE_CODEX": off_value})
+        edge_checks += 1
+        if not (rc == 0 and err == "" and CODEX_OFF_REASON in out):
+            bad += 1
+            print(f"OFF VALUE FAIL {off_value!r} {payload} -> {out[:200]!r}")
+
+for on_value in ("on", "", "1", "yes"):
+    rc, out, err = run(
+        RUNNER_CALL,
+        env={"CLAUDE_CODEX": on_value},
+    )
+    edge_checks += 1
+    if not (rc == 0 and out.strip() == "" and err == ""):
+        bad += 1
+        print(f"ON VALUE FAIL {on_value!r} -> {out[:200]!r}")
+
+rc, out, err = run(
+    {"tool_name": CODEX, "transcript_path": MAIN},
+    env={"CLAUDE_CODEX": "on"},
+)
+edge_checks += 1
+if CODEX_OFF_REASON in out or not denies(out):
+    bad += 1
+    print(f"ON MAIN SESSION FAIL -> {out[:200]!r}")
+
+rc, out, err = run(
+    {"tool_name": CODEX, "transcript_path": SUB, "agent_type": "codex-runner"},
+    env={"CLAUDE_CODEX": "off", "CLAUDE_CODEX_GATE": "off"},
+)
+edge_checks += 1
+if CODEX_OFF_REASON not in out:
+    bad += 1
+    print(f"GATE ESCAPE LIFTS CODEX OFF FAIL -> {out[:200]!r}")
+
+rc, out, err = run(
+    {"tool_name": CODEX_IMPLEMENT, "transcript_path": MAIN},
+    env={"CLAUDE_CODEX": "off"},
+)
+edge_checks += 1
+if "escalation was removed" not in out or CODEX_OFF_REASON in out:
+    bad += 1
+    print(f"IMPLEMENT UNDER CODEX OFF FAIL -> {out[:200]!r}")
+
+rc, out, err = run(
+    {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+    env={"CLAUDE_CODEX": "off"},
+)
+edge_checks += 1
+if not (rc == 0 and out.strip() == "" and err == ""):
+    bad += 1
+    print(f"OTHER TOOL UNDER CODEX OFF FAIL -> {out[:200]!r}")
+
+total = (
+    len(deny)
+    + len(allow)
+    + len(garbage)
+    + 6
+    + len(codex_off_cases)
+    + edge_checks
+)
 print(
     f"hook: {hook}\ndeny cases: {len(deny)}, allow cases: {len(allow)}, "
     f"garbage: {len(garbage)}, escape hatch: 1, implement escape hatch: 3, "
-    f"message: 2"
+    f"message: 2, codex off: {len(codex_off_cases)}"
 )
 print(f"{'FAIL' if bad else 'PASS'} {total - bad}/{total}")
 sys.exit(1 if bad else 0)
