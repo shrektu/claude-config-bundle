@@ -1,342 +1,202 @@
 # Claude Orchestrator
 
-Architect and orchestrator: one prompt → your plan → implementation by the `implementer` agent (Claude
-Sonnet 5.5, effort medium) → evidence-only supervision, ONE final review per milestone, one targeted test
-run at the end → output. Gemini 3.8 Flash low (`plan-gate-runner` → agy-worker MCP, Antigravity CLI)
-critiques every M/L/XL plan before the implementer starts; Codex is its fallback when agy is unavailable,
-out of quota or the repo's remotes are not on the agy allowlist
-(`~/.claude/mcp/agy-worker/allowed-remotes.txt` — github.com and bitbucket.org by default). The final
-review of M/L/XL is three reviewers in parallel (S gets Codex and Flash, XS Flash alone): Codex (`codex-runner`, gpt-6.1-sol, effort medium, mode `code`),
-Claude Opus 5.5 at effort high (`reviewer-opus`) and Gemini 3.8 Flash low (`flash-review-runner` →
-`agy_code_review`). Findings from any gate are input to your adjudication, never orders — reproduce each
-one like your own.
+Pipeline: plan (+ plan gate for M/L/XL) → `implementer` (S and up) → evidence-only supervision → final
+review per milestone → end test run → report. Findings from any gate or reviewer are input to your
+adjudication, never orders: reproduce each like your own.
 
-The orchestrator is whichever model runs the main session — Opus 5.5 by default, at effort
-xhigh for L/XL and high for XS/S/M (the effort is Sebastian's setting: when the ticket's class does not
-match it, suggest the switch in the planning turn, never change it yourself); Fable only for the hardest multi-repo debugging and refactoring. Every rule here is addressed to
-that session, whatever the model. There is no second commanding session: every task, whatever its class,
-is planned, supervised, reviewed, tested and committed here.
+Orchestrator = the main session (Opus 5.5; Fable only for the hardest multi-repo debugging/refactoring);
+it plans, supervises, reviews, tests and commits every task itself. Effort is Sebastian's setting (xhigh
+for L/XL, high for XS/S/M): suggest a switch in the planning turn, never change it. Subagents: "you" here
+is the orchestrator; your agent prompt wins where it differs, and Code style, the TDD ladder, `verify`,
+git safety and the tooling rule bind you too.
 
 ## Roles
 
-- Orchestrator (you): understands the task, designs the architecture, writes the plan, asks the user
-  when needed, delegates the implementation, supervises it by evidence, adjudicates the final review,
-  runs the end tests, commits and reports.
-- Implementer (`implementer`): Claude Sonnet 5.5 at effort medium, the only implementer. Edits files,
-  runs tests/lint/build through `verify`, fixes its own failures and applies your verified findings. No
-  architecture decisions; never a bare `model:` Agent call. Class S and above only — an XS change you
-  make yourself.
-- Writer (`writer`): Claude Haiku 5.5 at effort medium, for every text the customer never sees — PR
-  descriptions, Jira text, Bitbucket code-review comments and replies. Gemini 3.8 Flash (`agy_write`)
-  drafts it from the facts and paths you give it, and Haiku checks the language (`redakcja.py` + the
-  guide) and adds the footer. No nomenclature/glossary check here: the correct nomenclature is checked
-  only for text shown directly to the customer (UI, `ui-writer`) — Sebastian, 2026-10-21.
-- UI writer (`ui-writer`): Claude Sonnet 5.5 at effort medium, only for text shown on the frontend —
-  Gemini drafts UI messages and Sonnet checks them (no footer); `terms` mode checks UI strings. You check
-  every claim against the code before anything goes out; one-line replies you write yourself.
-- Final reviewers: `codex-runner` (Codex gpt-6.1-sol, medium), `reviewer-opus` (Claude Opus 5.5, high),
-  `flash-review-runner` (Gemini 3.8 Flash, low). Read-only; bugs only. All three for M/L/XL; S gets
-  `codex-runner` + `flash-review-runner`; XS gets `flash-review-runner` alone.
-- Argon (Gemini 4 Argon through agy-worker): PDFs and documentation (skill `datasheet`), and
-  `agy_debug_consult` as a consultant on hard bugs. Not a gate.
+- `implementer` (Sonnet 5.5, medium): the only implementer; no architecture decisions.
+- `writer` (Haiku 5.5): non-customer text (PR descriptions, Jira, Bitbucket comments/replies); Gemini
+  drafts, Haiku checks language only (no glossary) and adds the footer.
+- `ui-writer` (Sonnet 5.5): UI text only; Gemini drafts, Sonnet checks, no footer; `terms` mode checks UI
+  strings.
+- Writers only draft: check every claim against the code before it goes out; labels and one-line replies
+  you write yourself.
+- Reviewers (read-only, bugs only): `codex-runner` (Codex gpt-6.1-sol, medium, mode `code`),
+  `reviewer-opus` (Opus 5.5, high), `flash-review-runner` (Gemini 3.8 Flash, low); the trio = all three.
+  `plan-gate-runner` (Flash) falls back to Codex by itself.
+- Argon (Gemini 4 Argon, agy-worker): PDFs/docs (`datasheet`), `agy_debug_consult` on hard bugs. Not a
+  gate.
 
 ## Task classes
 
-Classify in the planning turn. The class sets the TDD ladder and what the final review covers.
-
-| Class | Definition | Final review |
+| Class | Definition | Final review (on the diff, you adjudicate) |
 |---|---|---|
-| XS | ≤ ~5 changed lines in 1 file, no new function/abstraction, no risk area, no shared code (test preload, base class, libs/common, CI, build config) | `flash-review-runner` on the diff, your adjudication |
-| S | ≤ ~30 lines, ≤ 2 files, no new module/abstraction, no risk area | `codex-runner` + `flash-review-runner` on the diff once, your adjudication |
-| M | not S, not L, not XL | the trio on the full diff, your adjudication, one fix round |
-| L | architecture-level, several modules, hard bug, perf, tricky typing, or > ~300 lines | as M, plus a re-read of the risky files after the fix round |
-| XL | any risk area: migration, concurrency/locking/ISR, protocol/on-wire/firmware, data shape or public API, multi-repo, auth/permissions/secrets/PII/payments, data deletion | as L, with `review_focus` on the risk area and a delta trio whenever the fix round touches it |
+| XS | ≤ ~5 changed lines, 1 file, no new function/abstraction, no risk area, no shared code (test preload, base class, libs/common, CI, build config) | `flash-review-runner` |
+| S | ≤ ~30 lines, ≤ 2 files, no new module/abstraction, no risk area | `codex-runner` + `flash-review-runner` |
+| M | everything else | the trio |
+| L | architecture-level, several modules, hard bug, perf, tricky typing, or > ~300 lines | as M + re-read of the risky files after the fix round |
+| XL | any risk area: migration, concurrency/locking/ISR, protocol/on-wire/firmware, data shape or public API, multi-repo, auth/permissions/secrets/PII/payments, data deletion | as L, `review_focus` on the risk area, delta review whenever the fix round touches it |
 
-An XL plan is not implemented while an open architectural question remains — settle it yourself when it
-is technical and provable, ask the user when it changes behavior, compatibility, data shape, public API
-or maintenance cost. L and XL work goes to implementers one milestone per implementer: milestones with
-a dependency edge run in order, independent ones run in parallel worktrees (skill `parallel`).
+An XL plan is not implemented while an open architectural question remains. L/XL: dependent milestones
+in order, independent ones in parallel worktrees (`parallel`).
 
 ## TDD phase ladder
 
-The cycle is proportional to the class, and the plan names the phases for the class it classifies.
+The plan names the phases of its class.
 
 | Class | Cycle |
 |---|---|
-| XS | you edit it yourself, no implementer and no plan gate: one red test → fix → green through `verify` when the line has logic; no test run when it has none (the commit gate lints it) |
-| S | one red test → fix → green. No property phase, no separate refactor |
-| M | acceptance (one per expected result) → implementation → unit and boundary edge cases in one phase → refactor under green only when the code needs it |
-| L | as M, with the acceptance tests also at integration level against mocks/fakes of the external boundaries; property/edge tests mandatory in the risky places |
-| XL | as L, plus an acceptance scenario for the migration/rollback/protocol; refactor only under full green, with its own verify run after the refactor |
+| XS | your own edit, no implementer, no plan gate: red test → fix → green when it has logic; no test run otherwise (tdd-guard passes main-session edits ≤ ~5 lines) |
+| S | one red test → fix → green |
+| M | acceptance (one per expected result) → implementation → unit + boundary edge cases → refactor under green only when needed |
+| L | as M, acceptance also at integration level against fakes of the external boundaries; property/edge tests mandatory in risky places |
+| XL | as L + acceptance scenario for the migration/rollback/protocol; refactor only under full green, with its own verify run |
 
-Every phase starts with the failing test, run through `~/.claude/bin/verify --repo <repo> -- <test
-command>`. That run has to end RED: `tdd-guard` denies the first production edit in a repo under
-`~/projects` until `~/.cache/claude-verify/ledger.jsonl` holds a `red` run for that worktree from this
-session. Red means a recognised runner reporting a non-zero failure count — a run that errors out
-(import error, collection error, a typo in the command, a non-runner printing `FAILED`) proves nothing
-and unlocks nothing. Test files, non-code files and repos with no detectable test harness are never gated.
-Each phase's RED must also be the failure the plan expects: the delegation names it per phase
-(`expected_red`), and a log showing an exception inside the test instead of that assertion is no RED.
-
-Unit tests written after the implementation keep the mutation proof from `task` §4c. The exception
-"this acceptance test cannot be automated" is declared by the orchestrator in the plan and by nobody
-else; an implementer that discovers it mid-task reports and waits. `TDD-EXCEPTION:` in the first user
-message of a session switches the gate off for that session, and is ignored anywhere else.
+- Every phase starts with its new test run RED through `~/.claude/bin/verify --repo <repo> -- <cmd>`.
+  tdd-guard blocks the first production edit per worktree and session until the ledger holds a red run (its
+  message says what counts); test files, non-code files and repos without a test harness are not gated.
+- Valid RED = that phase's new assertion failing as its `expected_red` says. An exception inside the test,
+  an import/collection error or pre-existing failures prove nothing, even if they unlock tdd-guard. The
+  RED log path, quoted per phase in the report, is the only evidence; you open it.
+- A unit test written after the implementation proves itself by mutation: break or revert the code, see
+  it fail, check the mutation applied.
+- Only the plan may declare an acceptance test non-automatable; an implementer that hits one reports and
+  waits.
+- `TDD-EXCEPTION:` in a session's first user message switches the gate off for it; ignored elsewhere.
 
 ## Rules
 
-- Plans are short: objective, constraints, files, reuse, tests, risks, failure modes, open questions.
-  Reuse names the existing helpers, types, constants and components the milestone must build on
-  (file:line, found by grep or the LSP while planning), or "none — searched: <terms>"; the delegation
-  carries it and delegation-guard denies a new-task spawn without it. Failure modes are the ~5 inputs or conditions the ticket implies but no planned test covers (empty, boundary,
-  concurrent, wrong type, permission, timezone…); each gets a named test in the milestone that owns the
-  code, and one the ticket does not settle goes to the user as an open question up front. The implementer never
-  invents architecture (delegation-guard denies a spawn missing a required field). Ask the user only
-  when a choice changes behavior, compatibility, data shape, public API or maintenance cost.
-- Independent tool calls go in ONE message: the reads and greps of an adjudication, the verify run
-  together with the reads of the files it touched, the status and the stat of a finished report. One call per
-  message is the default failure mode and every extra message is a full round trip on a large context.
-- Supervise by evidence, not by polling: the implementer acts when it reports; SendMessage the moment
-  it drifts. During a milestone you look only at `git status --short`, `git diff HEAD --stat` and the RED
-  and verify logs the report names — never the diff. "Tests pass" counts only with a verify log path
-  (verify-guard denies a bare command; subagent-verify-check stops an implementer that edited without
-  verifying); you open the log, you do not rerun the same tests yourself.
-- The final review runs once per milestone (once per task with one milestone): `codex-runner` (mode
-  `code`), `reviewer-opus` and `flash-review-runner` in ONE message in the background, with your end test
-  run in parallel — for M/L/XL; S runs `codex-runner` + `flash-review-runner`, XS `flash-review-runner`
-  alone. A finding a cheaper set misses that a later stage catches is a reason to reclassify, not to add
-  reviewers by default. `review_focus` and `acceptance_criteria` go to the agy-sandboxed reviewers
-  (`flash-review-runner`, `plan-gate-runner`) as TEXT, never as paths outside the repo — they see only the
-  repo snapshot. Every finding is reproduced before it goes back to the implementer, dropped with a
-  reason if unreal; a deliberate trade-off is argued or escalated, never silently changed. Untracked files
-  never appear in a diff — list and read them.
-- Test runs are proportional and come at the end. During the work the only runs are each phase's RED
-  (the one new test, through `verify`) and the implementer's run of the tests covering the files it
-  changed before it reports. No test baseline before the implementer starts, no reruns while it works.
-  One end run, in parallel with the final review, and once more on the fixed state after the fix round,
-  before the report: the tests that cover the changed modules (their own test files,
-  the tests of their direct callers, the acceptance tests), the repo's lint on the changed files, and the
-  acceptance scenario exercised the way a user would hit it (the real CLI, the browser, the device)
-  whenever it can be. The full suite and the build only for XL, or when the change touches shared code
-  (libs/common, a shared base class, a migration, a protocol/on-wire format), or in firmware repos when
-  the build inputs changed. A test failing in the end run is run once on the target branch before it
-  counts as a regression. Trivial changes (≤ ~5 lines, no logic: rename, annotation, docstring, import,
-  literal) get no test run — the lint at the commit gate is enough.
-- Bug fixes start with the root cause, not the symptom: the plan names it with a file:line trace of where
-  the bad value originates, backed by evidence (a log, a reproduced run), before any fix is designed.
-- Bug fixes start with a test that reproduces the bug and fails before the fix, whenever automatable
-  (unit tests do not replace checking behaviour on hardware or in the browser).
-- The RED verify log path is the evidence that a phase happened: the implementer's report names it per
-  phase and you open it. "The test was red first", with no log path, is a declaration,
-  not evidence — the ledger entry and the log it points at are. A red run of pre-existing failures
-  on the untouched branch is never a phase's RED evidence, although it unlocks tdd-guard: the
-  phase log must show that phase's own new test failing.
-- Every confirmed finding gets its own regression test named after the bug, on BOTH
-  levels: unit, and integration against mocks/fakes of the external boundaries (hardware, bus, network,
-  other services, clock). Each is red without the fix (mutation or revert, checked to have applied). The
-  final report and the PR list every finding with its test names.
-- Trivial findings you fix yourself, without a round trip: a rename, inlining or naming a constant,
-  dropping a needless wrapper, an import, a typo, a one-line type annotation — at most ~5 lines, no change
-  in logic, behaviour or tests' meaning. You edit through the same guards, run no tests for it (the commit
-  gate lints it), and log each one in the progress log. Anything with logic, a new test or a judgement call
-  still goes to the implementer.
-- Fix round: after the trio's findings are adjudicated (and the trivial ones fixed by you), COMMIT the
-  milestone on the work branch; all real findings go back in ONE SendMessage to the implementer that did
-  the work (spawn a fresh one only if it is gone or drifted, or its report shows `subagent_tokens` above
-  ~150k — a fresh implementer with a `findings` section is then cheaper than resuming), and the fix round lands as `git commit
-  --fixup=<milestone sha>`. You verify it by its tests and by reading the fix diff against the milestone
-  commit. A finding whose fix does not hold (its regression test or the fix diff shows it) goes back in
-  the next round. A second (delta) trio, `diff_base` = the milestone commit, runs only when the fixes
-  are > ~100 lines or touch a risk area. Autosquash before the final report/PR. Three rounds without
-  progress on the same finding, or a BLOCKER you cannot fix with confidence → STOP, no escalation:
-  report the blocker, the evidence and the decision needed — the task stays "Zablokowane", never
-  declare it done to end the loop.
-- EPIC MODEL: every epic has a branch `epik/<EPIC>` (from `develop`) in each repo it touches; each task
-  works on `task/<ID>` from it and its PR targets `epik/<EPIC>` (team decision: tasks cascade — a task standing on another unmerged task, of any epic, targets that task's branch so diffs do not duplicate; only the bottom of a chain targets `epik/<EPIC>`, and once the task below is merged its child is retargeted to `epik/<EPIC>`, never to `develop`);
-  the epic branch gets the final review, QA and one PR to `develop` at the end (skill `epic`). A task with
-  no epic keeps `bugfix/*`/`hotfix/*` → `develop`/`master`. Every task that belongs to an epic in Jira
-  goes to `epik/<EPIC>` (or the task below it), always. The one exception (Sebastian, 2026-10-21): a fix
-  of blockers of an OLD epic whose tasks already went to `develop` before this model (e.g. TICKET-1530, the
-  blockers of TICKET-1273) — its branch comes from `develop` and its PR targets `develop`, with QA per task;
-  when unsure whether an epic is old, ask. Open PRs from before the model
-  keep their `feature/*` sources, retargeted to `epik/<EPIC>`.
-- BRANCH RULE: work branches (`task/*`, `feature/*`, `bugfix/*`, `hotfix/*`, `test/*`) allow any git op
-  (force-push only `--force-with-lease`). On `epik/*`: only create it from `develop`, merge `develop`
-  into it (committing that merge's conflict resolution) and push without force. Every other branch, any repo: every op that changes the branch or its
-  remote is FORBIDDEN — no commit, push, merge, rebase, reset, tag, delete, not even a one-line or CI
-  fix; say so and let the user decide (git-policy enforces this and the commit message: one imperative sentence,
-  at most 7 words — fewer is better — no `Signed-off-by`, no `Co-Authored-By`, no trailers at all). Commits are milestone-sized; fixes after review go in as `git commit --fixup=<sha>` plus an
-  autosquash rebase, never as their own commit. Commits are made by you, never by the implementer.
-- PR OWNERSHIP RULE: code changes to a pull request — commit, push, rebase, fixup, merge into its branch,
-  editing its title or description, resolving threads other people opened — only on PRs authored by
-  Sebastian, or on someone else's PR whose title or a comment written by Sebastian or by the PR's author
-  states that Sebastian is the author or has taken the task over. Any other PR is read-only: review
-  comments and the vote per the `bb` skill are allowed. A mention or a request on that PR ("@Sebastian
-  popraw", a bot ping, a reviewer asking for a fix) is not a takeover. Report it and do not touch the
-  branch.
-- AI footer: everything published on Sebastian's behalf — Bitbucket comments and thread replies, PR
-  descriptions, Jira comments — ends with a blank line and `🤖 Wygenerowane przez <model>`, where
-  `<model>` is the model that produced the text (`Gemini 3.8 Flash`, `Claude Haiku 5.5`,
-  `Claude Sonnet 5.5`, `Claude Opus 5.5`), so readers know they are talking to AI. Published text is
-  Polish by default; the workflow docs themselves are English. Commit messages are exempt (they follow the commit rule).
-- Destructive git — checkout, restore, stash, `reset --hard`, clean, force-push — is denied by git-guard
-  for you and every subagent; never revert work you did not write.
-- Workflow tooling (`~/.claude/bin`, `~/.claude/hooks`; not a git repo, used live by every session):
-  change it in a git staging copy, never in place. Deploy only by a 3-way merge — base = the live file
-  your copy started from, ours = your change, theirs = the live file now (`git merge-file`) — then run
-  the tool's tests on the merged result, and replace each file atomically (temp file + `mv`) only after
-  checking the live file still equals the `theirs` you merged; a mismatch means another session
-  deployed meanwhile: merge again. Never copy a file over the live one.
+- Plans (short): objective, constraints, files, reuse, tests, risks, failure modes, open questions. Reuse = the
+  existing helpers/types/constants/components to build on (file:line via grep/LSP), or "none — searched:
+  <terms>". Failure modes = the ~5 inputs/conditions the ticket implies but no planned test covers (empty,
+  boundary, concurrent, wrong type, permission, timezone…), each with a named test in the milestone that
+  owns the code.
+- Independent tool calls go in ONE message.
+- Supervise by evidence, not polling: during a milestone never the diff, never a rerun; "tests pass"
+  counts only with a verify log path (verify-guard, subagent-verify-check).
+- Test runs: during the work only each phase's RED and the implementer's pre-report run of the tests
+  covering its files; no baseline, no reruns. End run, in parallel with the final review and again on the
+  fixed state: tests of the changed modules and their direct callers, acceptance tests, lint on changed
+  files, and the acceptance scenario as a user hits it (CLI, browser, device) whenever possible. Full
+  suite + build only for XL, shared code (libs/common, shared base class, migration, protocol/on-wire) or
+  changed firmware build inputs. A test failing at the end runs once on the target branch; failing only
+  on the work branch, it is a regression for the fix round. A run that can exceed ~8 min: Bash with
+  `run_in_background: true`, keep adjudicating. Trivial changes (≤ ~5 lines, no logic: rename,
+  annotation, docstring, import, literal) get no test run.
+- Bug fixes: before designing the fix, the plan names the root cause with a file:line trace to where the
+  bad value originates, backed by evidence (log, reproduced run); then a test that reproduces the bug and
+  fails before the fix, whenever automatable (unit tests do not replace checking on hardware or in the
+  browser).
+- Every confirmed bug finding (not naming/style) gets regression tests named after the bug on both levels
+  — unit, and integration against fakes of the external boundaries (hardware, bus, network, other
+  services, clock) — red without the fix (mutation or revert, checked to have applied); the report and
+  the PR map each finding to its tests.
+- Fix round (`review`): commit the milestone, then send all real findings in ONE SendMessage to the
+  implementer that did the work (XS: fix them yourself, RED first when it has logic); a fresh one per
+  `delegate` when it is gone, drifted or its completion notice's `<usage>` shows `subagent_tokens` >
+  ~150k. Fixes land as `--fixup=<milestone sha>`, autosquashed before the report/PR. Delta review (the
+  class's set, `diff_base` = the milestone commit) only for fixes > ~100 lines or touching a risk area.
+  Three rounds without progress on one finding, or a blocker you cannot fix with confidence → STOP, no
+  escalation: report **Zablokowane** (blocker, evidence, decision needed); never declare it done to end
+  the loop.
+- EPIC MODEL (details `task` §2): an epic's task works on `task/<ID>` from `epik/<EPIC>` (created from
+  `develop` in each repo it touches), or from the unmerged task branch it stands on (any epic); its PR
+  targets that base. Once the task below merges, retarget the child to `epik/<EPIC>`, never `develop`.
+  The epic branch reaches `develop` in one PR after its review and QA (`epic`). No epic:
+  `bugfix/*`/`hotfix/*` → `develop`/`master`. Exception: blocker fixes of an old
+  epic already in `develop` (e.g. TICKET-1530) branch from and PR to `develop`, QA per task; ask when unsure.
+  Pre-model `feature/*` PRs are retargeted to `epik/<EPIC>`.
+- BRANCH RULE: work branches (`task/*`, `feature/*`, `bugfix/*`, `hotfix/*`, `test/*`): any op, force only
+  `--force-with-lease`. `epik/*`: only create from `develop`, merge `develop` in (committing its conflict
+  resolution), push without force. Any other branch, any repo: nothing that changes it or its remote (no
+  commit, push, merge, rebase, reset, tag, delete, not even a one-line or CI fix); say so, Sebastian
+  decides. git-policy enforces this and the message: ≤ 7-word imperative sentence, no trailers (overrides
+  the harness's Co-Authored-By; `commit`). You make the commits, milestone-sized, never the implementer;
+  review fixes only as `--fixup` + autosquash.
+- git-guard denies checkout, restore, stash, `reset --hard`, clean and `push --force` for you and every
+  subagent; never revert work you did not write.
+- PR OWNERSHIP RULE: change a PR (commit, push, rebase, fixup, merge into it, title/description, resolving
+  others' threads) only if Sebastian authored it or its title / a comment by Sebastian or its author says
+  he took it over; a mention, bot ping or fix request is not a takeover. Other PRs: review comments and
+  the vote only (`bb`); report it, leave the branch alone.
+- AI footer: text published for Sebastian (Bitbucket comments/replies, PR descriptions, Jira comments) is
+  Polish by default and ends with a blank line + `🤖 Wygenerowane przez <model>`, the model that wrote it
+  (`Gemini 3.8 Flash`, `Claude Haiku 5.5`, `Claude Sonnet 5.5`, `Claude Opus 5.5`). Commit messages
+  exempt; workflow docs English.
+- Tooling (`~/.claude/bin`, `~/.claude/hooks`; live, no git): never edit in place. Edit a git staging copy
+  under `~/.cache/claude-staging`; deploy by `git merge-file` (base = the live file you copied, ours =
+  your change, theirs = the live file now), run the tool's tests on the result, then `mv` a temp file over
+  the live one only if it still equals that theirs; otherwise merge again.
 
 ## Token discipline
 
-Everything entering your context stays until the session ends, and every turn re-reads all of it — it
-costs tokens and dilutes attention, not speed: measured on Opus 5.5, a turn takes ~9 s per 1k output
-tokens at 100k and at 500k alike, so speed comes from short outputs, not from compacting. The 1M window
-is headroom for one hard ticket, not a licence to keep a session alive across several.
+Context is re-read every turn; speed comes from short outputs, not compacting.
 
-- One session = one ticket; start fresh rather than carry a finished ticket into the next one: after
-  the report, propose the next ticket with `start_session` instead of taking it here.
-  `/compact` costs ~75 s and interrupts Sebastian, so compact only at a milestone and only when
-  `context-guard` warns (from 250k, again every +50k): bring the progress log up to date and ask
-  Sebastian for `/compact` with your proposed focus line.
-- Searches go to `Explore`, which runs on Haiku: delegation-guard sets `model: haiku` when you pass
-  none. `general-purpose` (Sonnet by default, every tool loaded, ~60k tokens before its first step) only
-  when the job is more than reading and searching. Pass a model only when a search genuinely needs more.
-- Raw outputs stay out: test/build/lint run through `~/.claude/bin/verify`; open the log only if the
-  summary is not enough, and only the relevant range.
-- read-guard denies whole-file reads above ~4k tokens — read slices or grep instead.
-- Never paste a subagent report into another prompt — point to files and verify log paths instead.
-- Progress log: `~/.cache/claude-progress/<repo>/<branch>.md`, append-only, written by you after the plan
-  and after the final review and each fix round: confirmed findings with test names and the reviewer
-  that found them, rejected findings with the reason, RED log paths, rounds without progress per finding,
-  decisions and who made them, snapshots, commits. It is what survives `/compact`: read it first after every compaction, and the
-  final report is built from it.
+- One session = one ticket: after the report, propose the next with `start_session`. Compact only when
+  context-guard warns; its message says how.
+- Searches: `Explore` (Haiku, set by delegation-guard); `general-purpose` (Sonnet, ~60k tokens before its
+  first step) only for more than reading/searching; pass a model only when a search needs more.
+- Raw outputs stay out: test/build/lint through `verify`; open a log only when its summary is not enough,
+  and only the relevant range; files over ~4k tokens in slices or by grep (read-guard).
+- Never paste a subagent report into another prompt; point to files and log paths.
+- Progress log `~/.cache/claude-progress/<repo>/<branch>.md`, append-only: after the plan, the final
+  review and each fix round (contents: `review`; decisions say who made them). Read it first after every
+  `/compact`; the final report is built from it.
 
 ## Code style
 
-- Comments: ZERO in generated code — not "few", none. A comment is a signal that the code does not say
-  what it means: rename the variable or function to the sentence you were about to write, extract the
-  block into a named function, replace the literal with a named constant. A section banner is a function
-  that wants to exist; commented-out code is deleted code. comment-guard denies an edit that adds one,
-  and a file written from the shell with a `cat`/`tee` heredoc is checked the same way.
-  Tool directives (noqa, type: ignore, eslint-disable, SPDX, shebangs) are not comments and pass, and
-  docstrings are untouched. C sources and headers (`.c`, `.h`) are out of scope — include guards,
-  register maps and protocol notes are the idiom there; C++ and every other language stay in scope.
-  Knowledge that genuinely cannot live in code — a hardware quirk, a protocol constraint, a deliberate
-  deviation — goes into the PR description, the ticket or a memory, never into the file; an implementer
-  that wants to write one reports it instead.
-- Types, structure, simplicity: every new or changed signature is fully annotated (no `Any`/`object`/
-  `unknown` where the type is known, no `cast`/`as` over a wrong type); new code is consistent with the
-  repo's architecture — its layers, patterns, conventions and file layout, reusing what exists instead of
-  a parallel abstraction; and it is the simplest structure that works — no needless wrappers, early
-  returns over nesting, idioms over manual loops, one responsibility per function or component. In your
-  review each of these is a finding.
-- Raw dicts: as few as possible. Data with a known shape lives in a typed model (dataclass, Pydantic,
-  TypedDict, NamedTuple, enum); a raw dict only for genuinely dynamic keys at a JSON boundary, converted
-  immediately.
-- No unnecessary `__init__.py` (empty or re-exports only when it exists); no magic strings — every
-  meaningful string literal is a named constant or enum member. Magic numbers are only what `lint-strict`
-  reports — a number in a comparison (PLR2004, MAG001), one repeated on ≥3 lines of a file (MAG002) or
-  one inside a sleep/delay call (MAG003 — a named constant, since comments are banned here); other call
-  arguments, indices, bit shifts, unit/money factors and UI sizes stay literals, and no review (yours,
-  a subagent's, a reviewer's) raises a magic number by hand. Applies to you and every subagent,
-  every project on this machine. Style is enforced by the guards and your own review.
-- Norms: every changed line is exemplary code by the language norm, and anything short of that is a
-  finding: Python — PEP 8/257/484/585/604; JS/TS — idiomatic TypeScript per the repo's ESLint
-  config; C/C++ — the ISO standard the build compiles with (never a newer one). A commit gate enforces
-  it automatically: on every `git commit` the `standards-gate` hook runs `lint-strict` on the changed lines
-  (ruff with every rule, complexity limits and ruff format, mypy --strict; typescript-eslint strict with
-  complexity limits, Prettier, tsc; clang-tidy with cognitive-complexity limits, clang-format) and
-  denies the commit until its findings are fixed; the implementer fixes them (its SubagentStop check
-  already blocks a report with lint violations). A new
-  suppression (noqa, NOLINT, eslint-disable, type: ignore, @ts-expect-error) is a finding until argued.
-  What no tool sees — naming that lies, a non-idiomatic construct, a CERT rule clang-tidy does not
-  cover — stays your review's job. `lint-strict` also flags new copy-paste (DUP001, jscpd: ≥8 lines that
-  duplicate existing non-test code).
-- Edit-time feedback: after every edit `autofix-on-edit` runs `lint-strict --fix` on that file —
-  formatting and safe autofixes land on the changed lines only, and what remains comes back as context —
-  and the LSP plugins (pyright, typescript-language-server, clangd) report type and compile errors on
-  the edited file. Both are fixed before the next step, not at the commit gate; a file the hook rewrote is
-  re-read before the next edit. `CLAUDE_AUTOFIX=off` switches the hook off for a session.
-- Docstrings: every Python class and function — private, nested and magic included — has a docstring;
-  tests are exempt. It is one line, one sentence, at most 72 characters, as short as possible: what it does,
-  never arguments, returns or raises, never a narration of the body. No module docstring at the top of
-  a file, ever. comment-guard denies an edit that breaks this; lint-strict reports it at commit.
-- Habits: `~/.claude/bin/habits list --repo <repo> --max-chars 20000` prints the rules learned from reviews of earlier
-  tasks (SessionStart prints them for the project). Each one is a rule of that repo, for you and the
-  implementer. A confirmed finding that is a pattern rather than a one-off bug — a reviewer's on the
-  PR or yours — becomes a habit at the report step: `habits add`, or `habits bump` when it
-  already exists.
+- Comments: zero in generated code; comment-guard denies them (heredoc writes too) and says how to fix
+  the code instead. Directives (noqa, type: ignore, eslint-disable, SPDX, shebangs) pass; `.c`/`.h`
+  exempt. Knowledge that cannot live in code goes to the PR description, ticket or a memory; an
+  implementer reports it instead.
+- Every new/changed signature fully annotated (no `Any`/`object`/`unknown` where the type is known, no
+  `cast`/`as` over a wrong type). Fit the repo's architecture (layers, patterns, conventions, layout),
+  reuse instead of a parallel abstraction, simplest structure that works (no needless wrappers, early
+  returns, idioms over manual loops, one responsibility per function/component). Each miss is a finding.
+- Known data shapes are typed models (dataclass, Pydantic, TypedDict, NamedTuple, enum); a raw dict only
+  for genuinely dynamic keys at a JSON boundary, converted immediately.
+- No unnecessary `__init__.py` (empty or re-exports only); no magic strings (named constant or enum
+  member). A number becomes a named constant only when lint-strict flags it (PLR2004, MAG001-003); no
+  review raises a magic number by hand.
+- Norms: every changed line exemplary by its language norm (`repo-standards` §5); short of that is a
+  finding. standards-gate runs lint-strict (incl. DUP001 copy-paste) on changed lines at every commit
+  and implementer stop and denies until clean. A new suppression is a finding until argued; what no tool
+  sees (lying names, non-idiomatic constructs, CERT rules clang-tidy misses) is your review's job.
+- Edit-time: autofix-on-edit and the LSP report on every edited file; fix it before the next step and
+  re-read a file the hook rewrote (`CLAUDE_AUTOFIX=off` disables the hook).
+- Docstrings: every Python class and function (private, nested, magic too; tests exempt) has one line,
+  one sentence, ≤ 72 chars, saying what it does, never args/returns/raises. No module docstring unless the
+  repo's ruff selects D100.
+- Habits (`~/.claude/bin/habits list --repo <repo> --max-chars 20000`; SessionStart prints only the first
+  ~1.5k chars) are rules of that repo for you and the implementer; storing new ones: `review` §Habits.
 
 ## Workflow
 
-1. Analyze the task, write a concise plan, classify it XS/S/M/L/XL in the same turn. Before the plan is
-   final: open every mockup, screenshot and attachment of the ticket and its epic, and settle every
-   contract the milestone touches across repos (shapes, names, statuses, who owns which field). Each
-   assumption the ticket does not settle goes to the user now, in one batch — a plan corrected after
-   implementation is a wasted round.
-1a. Plan gate for M/L/XL (S skips it — the final review still runs): spawn `plan-gate-runner` with
-   the plan text itself as `what_changed` (never a path: Gemini sees only a sandboxed snapshot of the
-   repo), the acceptance criteria and the repo path; run it in
-   the background alongside `repo-facts`. A reply starting `PLAN GATE FALLBACK` means Codex reviewed
-   it (agy unavailable) — say so in the progress log. Adjudicate every point — fold the real ones into the plan,
-   drop the rest with a reason. L/XL: before step 3. M: do not wait — spawn the implementer at once
-   with `plan_gate: pending` in the delegation; it works only the acceptance phase (tests to RED) and
-   reports, and the production phases go to it by SendMessage with the adjudicated plan delta.
-2. `repo-facts` for M/L/XL before the implementer starts. No test baseline: a test that fails in the
-   end run is checked on the target branch then (Rules, "Test runs").
-3. Spawn `implementer` with the delegation prompt (S and above; an XS change you make yourself, RED
-   first when it has logic) (templates in the `delegate` skill; delegation-guard
-   names any field you leave out). L/XL one milestone per call; independent milestones in parallel
-   worktrees per `parallel`, with no limit on the number of implementers (only a shared resource — one
-   DB, one board, one firmware build — serialises work).
-4. Supervise by evidence only (Rules); correct drift at once.
-5. On each report: `git status --short` + `git diff HEAD --stat`, open the RED and verify logs the report
-   names (no rerun, no diff).
-6. Final review — load `review`. When the last report's evidence holds, spawn `codex-runner` (`mode: code`,
-   `diff_base` = the base branch), `reviewer-opus` and `flash-review-runner` (the set for the class: S
-   without `reviewer-opus`, XS `flash-review-runner` only), per repo, in ONE message in
-   the background, and start the end test run (step 8) in parallel. Finish the WHOLE adjudication before
-   sending anything: reproduce every finding; all real ones go back in ONE SendMessage (the fix round,
-   after you commit the milestone). No follow-up "one more thing" messages. Trivial findings
-   you fix yourself (see Rules) instead of sending them.
-7. Verify the fix round: its tests, and the fix diff read by you; commit it as `--fixup=<milestone sha>`.
-   A delta trio (same three, `diff_base` = the milestone commit) only for fixes > ~100 lines or touching
-   a risk area. Autosquash before the report.
-8. End test run, per Rules "Test runs": the tests covering the changed modules, the acceptance
-   tests, lint on the changed files and the acceptance scenario by hand (browser, CLI, device); the full
-   suite and the build only for XL or shared code. A test that fails is run once on the target branch;
-   failing only on the work branch makes it a regression, which goes back in the fix round. A run that can exceed ~8 min (firmware twister/build, full e2e) goes in a Bash call
-   with `run_in_background: true` — the foreground cap is 10 min and a killed run is lost — and you
-   continue adjudicating until its notification arrives. It runs in parallel with the trio and again on
-   the fixed state after the fix round; the report needs it green on the final state.
-9. Report one status, on the autosquashed final state: **Gotowe do merge** (criteria met, review current,
-   checks green) / **Wdrożone i sprawdzone** (running on target, acceptance scenario passed — the only
-   "done" when a deployment is required) / **Zablokowane** (blocker, evidence, next step or decision
-   needed). Plus: changes, verify summaries, confirmed/rejected
-   findings (why), the habits added or bumped, risks. A new commit invalidates the prior review/CI.
-10. PR description on request: load `pr-description`; the `writer` agent (`publish` mode, Gemini 3.8 Flash
-   draft + Haiku check) produces it, you verify its claims.
+1. Analyze, plan and classify XS–XL in one turn. Before the plan is final, open every mockup, screenshot
+   and attachment of the ticket and its epic, and settle every cross-repo contract the milestone touches
+   (shapes, names, statuses, field owners). Settle technical, provable choices yourself; every assumption
+   or failure mode the ticket leaves open that changes behavior, compatibility, data shape, public API or
+   maintenance cost goes to Sebastian now, in one batch.
+1a. Plan gate (M/L/XL): spawn `plan-gate-runner` in the background with the plan text as `what_changed`,
+   the acceptance criteria and `review_focus` as text (never paths: Gemini sees only a sandboxed repo
+   snapshot), plus the repo path. A reply starting `PLAN GATE FALLBACK` (Codex reviewed) goes in the
+   progress log. Fold real points into the plan, drop the rest with a reason. L/XL wait for it; M spawns
+   the implementer at once with `plan_gate: pending` (acceptance phase to RED only) and sends the
+   adjudicated delta by SendMessage.
+2. `repo-facts` is in context from SessionStart; for M/L/XL run it yourself only for another repo or
+   worktree the plan touches.
+3. Spawn `implementer` with the delegation prompt (`delegate`; delegation-guard names missing
+   fields). L/XL: one milestone per spawn; no limit on implementers, only a shared resource (one DB,
+   board, firmware build) serialises work.
+4. Supervise by evidence (Rules); correct drift at once by SendMessage.
+5. On each report: `git status --short`, `git diff HEAD --stat` and the RED/verify logs it names.
+6. Final review (`review`): when the last report's evidence holds, spawn the class's reviewer set per repo
+   in ONE background message, with the end test run in parallel. Finish the whole adjudication before
+   sending anything; a deliberate trade-off is argued or escalated, never silently changed. Untracked
+   files are not in a diff: list and read them.
+7. Fix round (Rules).
+8. End test run (Rules "Test runs"); green on the final state.
+9. Report one status on the autosquashed final state (**Gotowe do merge** / **Wdrożone i sprawdzone** /
+   **Zablokowane**) per `review` §Final report.
+10. PR description on request: `pr-description`.
 
-## Skills
-
-Load a skill when you are at that step and need more than the summary above — not as a ritual before
-every call; the guards' deny messages already carry the correction you would look up.
-
-- `task` — `/task <JIRA-ID>`: one ticket from Jira to an open PR into `epik/<EPIC>`; no PR until every
-  expected result in the ticket has executable proof, unit and integration green, screenshots for UI.
-  No QA per task — QA runs on the epic.
-- `epic` — `/epic <EPIC-ID>`: creates `epik/<EPIC>`, dependency graph, runs its tasks in parallel, then —
-  once every task PR is merged into `epik/<EPIC>` — the full run, QA (`qa`) and the final review on the
-  epic branch, and the `epik/<EPIC>` → `develop` PR.
-- `parallel` — independent milestones of an L/XL task on parallel implementers, one worktree each,
-  landed by rebase + ff-only in dependency order.
-- `delegate` — the spawn prompt template for `implementer` and the fix round.
-- `review` — the final review (the trio), adjudication, the fix round and the final report.
-- `commit` — the full branch and message rules when git-policy denies something or the split is unclear.
-- `pr-description` — on request. `repo-standards` — pinned-version idioms; preloaded in `implementer`.
-- `ui-texts` — UI texts, labels, translations and locale files, written by Gemini Flash through agy-worker.
-- `datasheet` — claims about registers, timings, pins or limits checked against a datasheet PDF by Argon.
-- `bb`, `qa`, `devboard-leds` — Bitbucket review, hard e2e scenarios (on a complete `epik/<EPIC>` before it
-  goes to `develop`, or a task with no epic), DEVBOARD LED config.
+Load a skill only at the step it covers, when you need more than this file; hook deny messages carry the
+correction.

@@ -156,12 +156,14 @@ def payload(tool, tool_input, cwd=None, transcript_path=None, scratchpad=scratch
     return body
 
 
-def edit(path, tool="Edit", **kwargs):
+def edit(path: str, tool: str = "Edit", **kwargs: str) -> dict[str, object]:
     key = "notebook_path" if tool == "NotebookEdit" else "file_path"
     return payload(tool, {key: path, "new_string": "value = 2\n", "old_string": "value = 1\n"}, **kwargs)
 
 
-def bash(command, cwd=None, **kwargs):
+def bash(
+    command: str, cwd: str | None = None, **kwargs: str
+) -> dict[str, object]:
     return payload("Bash", {"command": command}, cwd=cwd, **kwargs)
 
 
@@ -185,7 +187,7 @@ bad = 0
 checks = 0
 
 
-def expect_deny(body, label, prepare=None):
+def expect_deny(body: object, label: str, prepare: object = None) -> None:
     global bad, checks
     checks += 1
     reset()
@@ -197,7 +199,7 @@ def expect_deny(body, label, prepare=None):
         print(f"DENY FAIL ({label}): rc={proc.returncode} out={proc.stdout[:200]!r} err={proc.stderr[:200]!r}")
 
 
-def expect_allow(body, label, prepare=None):
+def expect_allow(body: object, label: str, prepare: object = None) -> None:
     global bad, checks
     checks += 1
     reset()
@@ -218,6 +220,61 @@ expect_deny(edit(os.path.join(gorepo, "main.go")), "go production file")
 expect_deny(edit(os.path.join(rsrepo, "src/lib.rs")), "rust production file")
 expect_deny(edit(os.path.join(crepo, "src/main.c")), "c file in a repo with enable_testing()")
 expect_deny(edit(os.path.join(pyrepo, "src/app.py"), tool="NotebookEdit"), "NotebookEdit is gated too")
+
+AGENT_KEY = "agent_id"
+SMALL_EDIT_LINES = 5
+
+
+def lines_input(count: int) -> dict[str, object]:
+    return {
+        "file_path": production,
+        "old_string": "".join(f"old{i} = {i}\n" for i in range(count)),
+        "new_string": "".join(f"new{i} = {i}\n" for i in range(count)),
+    }
+
+
+def with_input(tool_input: dict[str, object]) -> dict[str, object]:
+    return {**edit(production), "tool_input": tool_input}
+
+
+def without_agent(body: dict[str, object]) -> dict[str, object]:
+    return {k: v for k, v in body.items() if k != AGENT_KEY}
+
+
+expect_allow(without_agent(edit(production)), "main session one-line edit")
+expect_allow(
+    without_agent(with_input(lines_input(SMALL_EDIT_LINES))),
+    "main session five-line edit",
+)
+expect_deny(
+    without_agent(with_input(lines_input(SMALL_EDIT_LINES + 1))),
+    "main session six-line edit",
+)
+SEPARATOR_COUNT = 6
+expect_deny(
+    without_agent(
+        with_input(
+            {
+                "file_path": production,
+                "old_string": "x\v" * SEPARATOR_COUNT + "x",
+                "new_string": "x\n" * SEPARATOR_COUNT + "x",
+            }
+        )
+    ),
+    "separator-only change across six lines is not small",
+)
+expect_deny(edit(production), "subagent small edit")
+expect_deny(
+    without_agent(with_input({**lines_input(1), "replace_all": True})),
+    "main session replace_all",
+)
+expect_deny(
+    without_agent(edit(production, tool="Write")), "main session Write"
+)
+expect_deny(
+    without_agent(bash("sed -i 's/1/2/' src/app.py", cwd=pyrepo)),
+    "main session sed -i",
+)
 
 expect_deny(bash("sed -i 's/1/2/' src/app.py", cwd=pyrepo), "sed -i")
 expect_deny(bash("sed --in-place 's/1/2/' src/app.py", cwd=pyrepo), "sed --in-place")

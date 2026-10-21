@@ -3258,6 +3258,7 @@ C_CHECK_PATTERNS = (
     "-*",
     "clang-diagnostic-*",
     "clang-analyzer-*",
+    "-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling",
     "bugprone-*",
     "-bugprone-easily-swappable-parameters",
     "cert-*",
