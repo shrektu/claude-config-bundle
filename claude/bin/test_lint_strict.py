@@ -31,7 +31,7 @@ EXIT_USAGE = 2
 MAIN = "main"
 FEATURE = "feature"
 NO_TOOL = "/nonexistent/tool"
-PINNED_SHEBANG = "#!__HOME__/.pyenv/versions/3.14.3/bin/python3"
+PORTABLE_SHEBANG = "#!/usr/bin/env python3"
 TOOL_OVERRIDES = (
     "LINT_STRICT_PRETTIER",
     "LINT_STRICT_CLANG_TIDY",
@@ -1392,7 +1392,7 @@ def test_unreadable_untracked_script_without_suffix_is_not_checked(
     repo: Path,
     log_dir: Path,
 ) -> None:
-    write(repo, "tool", PINNED_SHEBANG + "\n" + CLEAN_MODULE)
+    write(repo, "tool", PORTABLE_SHEBANG + "\n" + CLEAN_MODULE)
     (repo / "tool").chmod(0)
 
     run = lint(repo, log_dir, "--json")
@@ -1539,10 +1539,10 @@ def test_syntax_error_on_changed_line_is_reported(
     assert any(path == "broken.py" for path, _, _ in violations(run))
 
 
-def test_script_is_executable_with_pinned_interpreter() -> None:
+def test_script_is_executable_with_portable_interpreter() -> None:
     assert os.access(SCRIPT, os.X_OK)
     first = SCRIPT.read_text(encoding="utf-8").splitlines()[0]
-    assert first == PINNED_SHEBANG
+    assert first == PORTABLE_SHEBANG
 
 
 RECORDER = """

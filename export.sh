@@ -66,6 +66,14 @@ check_leaks() {
   { echo "export: private content found:"; printf '%s' "$hits"; } >&2
   exit 3
 }
+check_shebangs() {
+  local pinned
+  pinned=$(find "$OUT/claude" -type f -exec awk 'FNR == 1 { if (/^#!__HOME__\//) print FILENAME; nextfile }' {} + | sed "s#^$OUT/##" | sort)
+  [ -n "$pinned" ] || return 0
+  rm -f "$OUT/manifest.txt"
+  { echo "export: machine-specific interpreter in shebang:"; echo "$pinned"; } >&2
+  exit 3
+}
 mkdir -p "$OUT"
 rm -f "$OUT.tar.gz"
 find "$OUT" -mindepth 1 -maxdepth 1 ! -name .git ! -name .gitignore -exec rm -rf {} +
@@ -147,6 +155,7 @@ if [ -f "$HERE/retire.json" ]; then cp "$HERE/retire.json" "$OUT/"; fi
   echo "files:"; (cd "$OUT" && find . -path ./.git -prune -o -type f -print | sort | sed 's/^/  /')
 } > "$OUT/manifest.txt"
 check_leaks
+check_shebangs
 if grep -rIl "$HOME" "$OUT" >/dev/null 2>&1; then echo "WARNING: unrendered home paths remain:"; grep -rIl "$HOME" "$OUT"; fi
 tar --exclude=.git -czf "$OUT.tar.gz" -C "$(dirname "$OUT")" "$(basename "$OUT")"
 echo "bundle: $OUT"
