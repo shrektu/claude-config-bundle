@@ -1,4 +1,4 @@
-#!__HOME__/.pyenv/versions/3.14.3/bin/python3
+#!/usr/bin/env python3
 """Store short rules learned from reviews and print the relevant ones.
 
 The store is a JSON file (HABITS_FILE, default ~/.claude/lessons/habits.json).

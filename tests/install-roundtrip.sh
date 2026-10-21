@@ -305,6 +305,19 @@ if grep -q "\./\.git/" "$EXPORTED/manifest.txt"; then fail "manifest lists .git 
 check_grep "$EXPORTED/manifest.txt" "./retire.json" "manifest lists retire.json"
 check_grep "$EXPORTED/claude/settings.json" "__HOME__/.claude/hooks/git-policy.py" "export: home path replaced"
 
+PINNED_EXPORTED=$WORK/pinned-exported
+HABITS_LIVE=$H1/.claude/bin/habits
+cp -p "$HABITS_LIVE" "$WORK/habits.portable"
+{ echo "#!$H1/.pyenv/versions/3.14.3/bin/python3"; tail -n +2 "$WORK/habits.portable"; } > "$HABITS_LIVE"
+env -i HOME="$H1" PATH="$FAKEBIN:/usr/bin:/bin" USER="${USER:-tester}" TERM=dumb \
+  bash "$H1/.claude/bundle/export.sh" "$PINNED_EXPORTED" >"$WORK/export-pinned.log" 2>&1
+PINNED_STATUS=$?
+cp -p "$WORK/habits.portable" "$HABITS_LIVE"
+CHECKS=$((CHECKS + 1))
+if [ "$PINNED_STATUS" != 3 ]; then fail "export refuses a machine-specific shebang (exit $PINNED_STATUS, see $WORK/export-pinned.log)"; fi
+check_grep "$WORK/export-pinned.log" "claude/bin/habits" "pinned-shebang export log names claude/bin/habits"
+check_gone "$PINNED_EXPORTED.tar.gz"
+
 check_file "$EXPORTED/claude/templates/rules-standards.md"
 
 mkdir -p "$EXPORTED/claude/bin/__pycache__" "$EXPORTED/claude/hooks/__pycache__"

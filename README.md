@@ -155,5 +155,8 @@ keep company-specific content out. They are never exported themselves.
   checked case-insensitively against everything exported, binaries and `manifest.txt` included. Any hit
   prints the `file:line` matches, writes no manifest and no tarball, and exits 3.
 
+The export also exits 3, with no manifest and no tarball, when any exported script starts with a shebang
+under your home directory (`#!$HOME/...`); use `#!/usr/bin/env python3` instead.
+
 Independent of these files, `*.bak*` files, `.pytest_cache`, `.ruff_cache`, `__pycache__` and
 `claude/skills/synced` are never exported.
