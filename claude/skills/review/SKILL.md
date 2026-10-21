@@ -72,7 +72,7 @@ request for a ticket or evidence. Taste is not a defect. Bitbucket threads follo
 
 Progress log after the final review and each fix round: confirmed findings with test names and reviewer,
 rejected ones with the reason, RED log paths, rounds without progress per finding, milestone SHA,
-decisions and who made them.
+snapshots, decisions and who made them.
 
 ## Habits
 

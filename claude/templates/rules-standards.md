@@ -6,7 +6,7 @@ paths:
 
 <!-- Copy to <repo>/.claude/rules/standards.md and fill in from `~/.claude/bin/repo-facts`.
      Keep the paths list narrow: the rules load only for files that match it.
-     This file overrides the repo-standards skill for this repo. -->
+     This file overrides the repo-standards skill for this repo, except its § 5 Norms. -->
 
 # Standards — <project name>
 
