@@ -21,7 +21,10 @@ git safety and the tooling rule bind you too.
   you write yourself.
 - Reviewers (read-only, bugs only): `codex-runner` (Codex gpt-6.1-sol, medium, mode `code`),
   `reviewer-opus` (Opus 5.5, high), `flash-review-runner` (Gemini 3.8 Flash, low); the trio = all three.
-  `plan-gate-runner` (Flash) falls back to Codex by itself.
+  `plan-gate-runner` (Flash) falls back to Codex by itself. Where `CLAUDE_CODEX=off` (machine env, no
+  Codex subscription) the Codex slot is skipped: delegation-guard denies `codex-runner`, the trio is
+  `reviewer-opus` + `flash-review-runner`, S is `flash-review-runner` alone, and `plan-gate-runner` has no
+  fallback.
 - Argon (Gemini 4 Argon, agy-worker): PDFs/docs (`datasheet`), `agy_debug_consult` on hard bugs. Not a
   gate.
 

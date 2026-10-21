@@ -2,6 +2,7 @@
 """Regression matrix for delegation-guard.py (the sibling file by default; pass another path as argv[1])."""
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -191,8 +192,19 @@ garbage = [
 ]
 
 
+SWITCH_VARS = ("CLAUDE_CODEX", "CLAUDE_CODEX_GATE")
+
+
+def hook_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Return os.environ without the Codex switches, plus extra."""
+    base = {k: v for k, v in os.environ.items() if k not in SWITCH_VARS}
+    return {**base, **(extra or {})}
+
+
 def run(
-    tool_input: dict[str, object], tool_name: str = "Agent"
+    tool_input: dict[str, object],
+    tool_name: str = "Agent",
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     payload = json.dumps({"tool_name": tool_name, "tool_input": tool_input})
     done = subprocess.run(
@@ -202,6 +214,7 @@ def run(
         text=True,
         timeout=10,
         check=False,
+        env=hook_env(env),
     )
     return done.returncode, done.stdout.strip(), done.stderr.strip()
 
@@ -238,6 +251,7 @@ for raw in garbage:
         text=True,
         timeout=10,
         check=False,
+        env=hook_env(),
     )
     ok = done.returncode == 0 and not done.stderr and done.stdout == ""
     bad += not ok
@@ -309,6 +323,86 @@ for agent, expected_model in SEARCH_AGENTS.items():
             f"SEARCH DEFAULT FAIL {agent} -> rc={rc} {out[:300]} {err[-160:]}"
         )
 
+codex_spawn: dict[str, object] = {
+    "subagent_type": "codex-runner",
+    "prompt": "review the diff",
+    "description": "code review",
+    "run_in_background": True,
+}
+CODEX_OFF_NEEDLES = (
+    "Codex is off on this machine (CLAUDE_CODEX=off)",
+    "skip the Codex slot",
+    "reviewer-opus",
+    "flash-review-runner",
+)
+rc, out, err = run(codex_spawn, env={"CLAUDE_CODEX": "off"})
+try:
+    decision = json.loads(out)["hookSpecificOutput"]
+except ValueError:
+    decision = {}
+off_reason = decision.get("permissionDecisionReason", "")
+ok = (
+    rc == 0
+    and not err
+    and decision.get("permissionDecision") == "deny"
+    and decision.get("hookEventName") == "PreToolUse"
+    and "updatedInput" not in decision
+    and all(needle in off_reason for needle in CODEX_OFF_NEEDLES)
+)
+bad += not ok
+if not ok:
+    print(f"CODEX OFF DENY FAIL -> rc={rc} {out[:300]} {err[-160:]}")
+
+EDGE_CHECKS = 0
+for off_value in ("OFF", " off ", "0", "false", "no", "No"):
+    for key in ("subagent_type", "agent_type"):
+        spawn: dict[str, object] = {key: "codex-runner", "prompt": "review it"}
+        rc, out, err = run(spawn, env={"CLAUDE_CODEX": off_value})
+        EDGE_CHECKS += 1
+        if not (
+            rc == 0
+            and not err
+            and '"deny"' in out
+            and "skip the Codex slot" in out
+            and "updatedInput" not in out
+        ):
+            bad += 1
+            print(f"OFF VALUE FAIL {off_value!r} {key} -> {out[:200]}")
+
+for on_value in ("on", "", "1", "yes", "true"):
+    rc, out, err = run(
+        {"subagent_type": "codex-runner", "prompt": "review it"},
+        env={"CLAUDE_CODEX": on_value},
+    )
+    EDGE_CHECKS += 1
+    if not (rc == 0 and out == "" and not err):
+        bad += 1
+        print(f"ON VALUE FAIL {on_value!r} -> {out[:200]}")
+
+OFF = {"CLAUDE_CODEX": "off"}
+for other in ("reviewer-opus", "flash-review-runner", "writer", STRONG_AGENT):
+    rc, out, err = run({"subagent_type": other, "prompt": "x"}, env=OFF)
+    EDGE_CHECKS += 1
+    if not (rc == 0 and out == "" and not err):
+        bad += 1
+        print(f"OFF UNTOUCHED FAIL {other} -> {out[:200]}")
+
+rc, out, err = run({"subagent_type": AGENT, "prompt": "fix it"}, env=OFF)
+EDGE_CHECKS += 1
+if '"deny"' not in out:
+    bad += 1
+    print(f"OFF IMPLEMENTER NOT VALIDATED -> {out[:200]}")
+rc, out, err = run({"subagent_type": AGENT, "prompt": FULL}, env=OFF)
+EDGE_CHECKS += 1
+if out != "":
+    bad += 1
+    print(f"OFF IMPLEMENTER FULL FAIL -> {out[:200]}")
+rc, out, err = run({"subagent_type": "Explore", "prompt": "x"}, env=OFF)
+EDGE_CHECKS += 1
+if '"model": "haiku"' not in out:
+    bad += 1
+    print(f"OFF SEARCH DEFAULT FAIL -> {out[:200]}")
+
 rc, out, err = run(
     {"subagent_type": AGENT, "prompt": FULL.replace("reuse", "notes")}
 )
@@ -334,10 +428,18 @@ bad += not spot6
 if not spot6:
     print(f"SPOT6 FAIL -> {out[:300]}")
 
-total = len(deny) + len(allow) + len(garbage) + 4 + len(SEARCH_AGENTS) + 3
+total = (
+    len(deny)
+    + len(allow)
+    + len(garbage)
+    + 4
+    + len(SEARCH_AGENTS)
+    + 4
+    + EDGE_CHECKS
+)
 print(
     f"hook: {hook}\ndeny cases: {len(deny)}, allow cases: {len(allow)}, "
-    f"garbage: {len(garbage)}, spot checks: 7, "
+    f"garbage: {len(garbage)}, spot checks: 8, "
     f"slowest run: {slowest * 1000:.0f} ms, FAILURES: {bad}"
 )
 print(("FAIL " if bad else "PASS ") + f"{total - bad}/{total}")

@@ -2,6 +2,7 @@
 """PreToolUse(Agent|Task) hook: an implementer may only be spawned with a complete delegation prompt."""
 
 import json
+import os
 import re
 import sys
 from typing import Callable, NamedTuple
@@ -19,6 +20,15 @@ PHASE_MARKERS = ("tdd_phases", "tdd phases")
 SEARCH_AGENT_MODELS = {"Explore": "haiku", "general-purpose": "sonnet"}
 GUARD_PREFIX = "delegation-guard: "
 SEARCH_MODEL_REASON = GUARD_PREFIX + "search agent defaults to {model}"
+CODEX_SWITCH_VAR = "CLAUDE_CODEX"
+CODEX_OFF_VALUES = frozenset({"off", "0", "false", "no"})
+CODEX_AGENT = "codex-runner"
+CODEX_OFF_REASON = (
+    "Codex is off on this machine (CLAUDE_CODEX=off): skip the Codex slot. "
+    f"`{CODEX_AGENT}` is not spawned and nothing is spawned in its place; "
+    "the final review set is `reviewer-opus` + `flash-review-runner` "
+    "(class S: `flash-review-runner` alone)."
+)
 REUSE_LINE_RE = re.compile(r"^\s*reuse\b", re.IGNORECASE | re.MULTILINE)
 FIX_ROUND_LINE_RE = re.compile(r"^\s*findings\b", re.IGNORECASE | re.MULTILINE)
 GIT_SAFETY_MARKER = "Never revert or discard changes you did not make"
@@ -150,7 +160,14 @@ def default_search_model(tool_input: dict[str, object], model: str) -> None:
     print(json.dumps({"hookSpecificOutput": decision}))
 
 
-def subagent_type(tool_input):
+def codex_is_off() -> bool:
+    """Tell whether this machine has Codex switched off."""
+    value = os.environ.get(CODEX_SWITCH_VAR, "")
+    return value.strip().lower() in CODEX_OFF_VALUES
+
+
+def subagent_type(tool_input: dict[str, object]) -> str | None:
+    """Return the stripped subagent type of a spawn, if it has one."""
     for key in SUBAGENT_KEYS:
         value = tool_input.get(key)
         if isinstance(value, str) and value.strip():
@@ -180,6 +197,8 @@ def main():
         if agent in SEARCH_AGENT_MODELS and not has_model:
             default_search_model(tool_input, SEARCH_AGENT_MODELS[agent])
             return
+        if agent == CODEX_AGENT and codex_is_off():
+            deny(CODEX_OFF_REASON)
         if agent not in IMPLEMENTER_TYPES:
             return
         prompt = tool_input.get("prompt")
