@@ -465,13 +465,13 @@ def test_hab092_skips_test_files() -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("ROOT = '__HOME__/project'\n", ["HAB070"]),
+        ("ROOT = '/home/sam/project'\n", ["HAB070"]),
         ("ROOT = '/Users/anna/Code/x'\n", ["HAB070"]),
-        ("ROOT = f'__HOME__/{name}'\n", ["HAB070"]),
+        ("ROOT = f'/home/sam/{name}'\n", ["HAB070"]),
         ("ROOT = '/opt/app/home/x/'\n", []),
         ("ROOT = '/home/'\n", []),
         ("ROOT = 'project'\n", []),
-        ("def f():\n    '''See __HOME__/x/ for it.'''\n", []),
+        ("def f():\n    '''See /home/sam/x/ for it.'''\n", []),
     ],
 )
 def test_hab070_flags_home_directory_literals(
@@ -481,7 +481,7 @@ def test_hab070_flags_home_directory_literals(
 
 
 def test_hab070_skips_test_files() -> None:
-    text = "ROOT = '__HOME__/project'\n"
+    text = "ROOT = '/home/sam/project'\n"
 
     assert codes(text, TEST_CTX) == []
 

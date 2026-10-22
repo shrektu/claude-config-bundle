@@ -1981,7 +1981,7 @@ SUBCOMMANDS = {
     "harvest-done": cmd_harvest_done,
     "static": cmd_static,
 }
-OFFLINE_SUBCOMMANDS = frozenset({"static"})
+OFFLINE_SUBCOMMANDS = frozenset({"static", "harvest-mark", "harvest-done"})
 
 
 def main(argv: list[str]) -> int:
