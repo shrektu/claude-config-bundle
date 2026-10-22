@@ -1028,6 +1028,57 @@ def test_main_dispatches_harvest_mark(
     assert (tmp_path / HARVEST_STATE_NAME).exists()
 
 
+def test_main_harvest_mark_needs_no_credentials(
+    harvest: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module, _, _, _ = harvest
+    monkeypatch.setattr(
+        module, "CRED_PATH", str(tmp_path / "missing-credentials")
+    )
+
+    code = module.main(
+        ["harvest-mark", REPO, str(HARVEST_PR_ID), str(REVIEW_THREAD_ID)]
+    )
+
+    assert code == 0
+    assert (tmp_path / HARVEST_STATE_NAME).exists()
+
+
+def test_main_harvest_done_needs_no_credentials(
+    harvest: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module, _, _, _ = harvest
+    monkeypatch.setattr(
+        module, "CRED_PATH", str(tmp_path / "missing-credentials")
+    )
+
+    code = module.main(["harvest-done"])
+
+    assert code == 0
+    assert (tmp_path / HARVEST_STATE_NAME).exists()
+
+
+def test_main_online_subcommand_still_needs_credentials(
+    harvest: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module, _, _, _ = harvest
+    monkeypatch.setattr(
+        module, "CRED_PATH", str(tmp_path / "missing-credentials")
+    )
+
+    code = module.main(["harvest"])
+
+    assert code == 2
+    assert "brak poświadczeń" in capsys.readouterr().err
+
+
 def test_harvest_since_prefers_option_then_state_then_default(
     bb_sweep: Harness,
 ):

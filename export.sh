@@ -67,6 +67,7 @@ check_leaks() {
   exit 3
 }
 check_shebangs() {
+  [ -d "$OUT/claude" ] || return 0
   local pinned
   pinned=$(find "$OUT/claude" -type f -exec awk 'FNR == 1 { if (/^#!__HOME__\//) print FILENAME; nextfile }' {} + | sed "s#^$OUT/##" | sort)
   [ -n "$pinned" ] || return 0

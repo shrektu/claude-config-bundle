@@ -764,6 +764,7 @@ def test_non_empty_catch_is_not_reported(tmp_path: Path) -> None:
     assert hits(report, EMPTY_CATCH) == []
 
 
+@pytest.mark.skipif(shutil.which("jscpd") is None, reason="jscpd missing")
 def test_clone_overlapping_added_lines_names_the_other_fragment(
     tmp_path: Path,
 ) -> None:

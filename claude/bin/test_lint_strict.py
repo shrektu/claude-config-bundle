@@ -5170,7 +5170,7 @@ HAB092 = HabitCase(
 HAB070 = HabitCase(
     "HAB070",
     "app/paths.py",
-    "ROOT = '__HOME__/project'\n",
+    "ROOT = '/home/sam/project'\n",
     "ROOT = 'project'\n",
 )
 HAB013_BASE = "VALUE = 1\n" * 999
