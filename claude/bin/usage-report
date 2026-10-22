@@ -6,8 +6,10 @@ import glob
 import json
 import os
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
+from pathlib import PurePath
 
 PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
 SUBAGENT_MARKER = "/subagents/"
@@ -25,13 +27,53 @@ BIG_READ_CHARS = 3_000 * CHARS_PER_TOKEN
 TOP_TOOLS = 8
 CODEX_TOOL = "mcp__codex-worker__codex_review_changes"
 RECORD_KEY_PREFIX = "record-"
-VERIFY_MARKER = "verify"
-
-TEST_COMMAND = re.compile(
-    r"\b(pytest|vitest|npm (run )?(test|lint|build|e2e)|make (test|lint|build|check|benchmark)"
-    r"|ruff|eslint|tsc\b|playwright|cargo (test|build|clippy)|go test|uv run pytest|alembic"
-    r"|pio (run|test)|ctest|cmake --build|docker (compose )?build)"
+VERIFY_NAME = "verify"
+OPTIONS_END = "--"
+SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+MAX_SHELL_DEPTH = 3
+KEYWORDS = frozenset(
+    {"if", "then", "elif", "else", "while", "until", "do", "!", "time", "{"}
 )
+NO_OPTION_VALUES: frozenset[str] = frozenset()
+WRAPPER_VALUE_OPTIONS = {
+    "env": frozenset({"-u", "-C", "--unset", "--chdir"}),
+    "command": NO_OPTION_VALUES,
+    "exec": NO_OPTION_VALUES,
+    "nohup": NO_OPTION_VALUES,
+    "sudo": frozenset({"-u", "-g", "--user", "--group"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+}
+VERIFY_VALUE_OPTIONS = frozenset({"-t", "--tail", "-n", "--name", "--repo"})
+DURATION_WRAPPER = "timeout"
+LOOKUP_WRAPPER = "command"
+LOOKUP_OPTIONS = frozenset({"-v", "-V"})
+OPTION_PREFIX = "-"
+LONG_OPTION_PREFIX = "--"
+COMMENT_PREFIX = "#"
+NEWLINE = "\n"
+BACKSLASH = "\\"
+QUOTES = "'\""
+SEPARATOR_CHARS = ";&|()" + NEWLINE
+INLINE_WHITESPACE = " \t\r"
+WORD_BREAKS = INLINE_WHITESPACE + SEPARATOR_CHARS
+ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+DURATION = re.compile(r"\d")
+HEREDOC = re.compile(
+    r"""(?P<skip>'[^']*'|"(?:\\.|[^"\\])*")"""
+    r"""|(?<!<)<<(?P<dash>-?)\s*(?:'(?P<single>[^'\n]+)'"""
+    r"""|"(?P<double>[^"\n]+)"|\\?(?P<bare>[A-Za-z_][\w-]*))"""
+)
+
+RUNNER_BODY = (
+    r"(?:pytest|vitest|npm (?:run )?(?:test|lint|build|e2e)"
+    r"|make (?:test|lint|build|check|benchmark)"
+    r"|ruff|eslint|tsc\b|playwright|cargo (?:test|build|clippy)|go test"
+    r"|alembic|pio (?:run|test)|ctest|cmake --build|docker (?:compose )?build)"
+)
+RUNNER_PREFIX = r"(?:(?:uv run|poetry run|npx|pnpm exec|python3?\s+-m)\s+)?"
+EXECUTED_RUNNER = re.compile(RUNNER_PREFIX + RUNNER_BODY)
+WRAPPED_RUNNER = re.compile(r"\b" + RUNNER_BODY)
 
 
 @dataclass
@@ -107,6 +149,161 @@ def result_text(content) -> str:
     return content if isinstance(content, str) else str(content or "")
 
 
+def strip_heredoc_bodies(command: str) -> str:
+    """Drop heredoc body lines and their delimiter lines from a command."""
+    lines = command.split(NEWLINE)
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        kept.append(lines[index])
+        index += 1
+        for terminator in heredoc_terminators(lines[index - 1]):
+            end = terminator_index(lines, index, terminator)
+            if end is None:
+                break
+            index = end + 1
+    return NEWLINE.join(kept)
+
+
+def heredoc_terminators(line: str) -> list[re.Pattern[str]]:
+    """Build the terminator-line patterns of the heredocs a line opens."""
+    return [
+        re.compile(
+            ("\t*" if match["dash"] else "")
+            + re.escape(match["single"] or match["double"] or match["bare"])
+        )
+        for match in HEREDOC.finditer(line)
+        if not match["skip"]
+    ]
+
+
+def terminator_index(
+    lines: list[str], start: int, terminator: re.Pattern[str]
+) -> int | None:
+    """Return the index of the heredoc terminator line, if there is one."""
+    for index in range(start, len(lines)):
+        if terminator.fullmatch(lines[index]):
+            return index
+    return None
+
+
+def strip_comments(command: str) -> str:
+    """Remove line continuations and unquoted comments from a command."""
+    out: list[str] = []
+    quote = ""
+    word_start = True
+    index = 0
+    while index < len(command):
+        char = command[index]
+        escaped = command[index + 1 : index + 2]
+        if char == BACKSLASH and quote != "'":
+            if escaped != NEWLINE:
+                out.append(char + escaped)
+            index += 2
+            word_start = False
+            continue
+        if char == COMMENT_PREFIX and word_start and not quote:
+            index = command.find(NEWLINE, index)
+            if index < 0:
+                break
+            continue
+        if quote and char == quote:
+            quote = ""
+        elif not quote and char in QUOTES:
+            quote = char
+        out.append(char)
+        word_start = not quote and char in WORD_BREAKS
+        index += 1
+    return "".join(out)
+
+
+def command_segments(command: str) -> list[list[str]]:
+    """Split a command into the word lists of its simple commands."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=SEPARATOR_CHARS)
+    lexer.whitespace = INLINE_WHITESPACE
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    segments: list[list[str]] = [[]]
+    try:
+        for token in lexer:
+            if set(token) <= set(SEPARATOR_CHARS):
+                segments.append([])
+            else:
+                segments[-1].append(token)
+    except ValueError:
+        return []
+    return [words for words in segments if words]
+
+
+def command_words(words: list[str]) -> list[str]:
+    """Strip assignments, keywords and wrappers before the real command."""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if ENV_ASSIGNMENT.match(word) or word in KEYWORDS:
+            continue
+        wrapper = PurePath(word).name
+        if wrapper not in WRAPPER_VALUE_OPTIONS:
+            return words[index - 1 :]
+        options_start = index
+        while index < len(words) and words[index].startswith(OPTION_PREFIX):
+            value_option = words[index] in WRAPPER_VALUE_OPTIONS[wrapper]
+            index += 2 if value_option else 1
+        if wrapper == LOOKUP_WRAPPER and LOOKUP_OPTIONS.intersection(
+            words[options_start:index]
+        ):
+            return []
+        has_duration = index < len(words) and DURATION.match(words[index])
+        if wrapper == DURATION_WRAPPER and has_duration:
+            index += 1
+    return []
+
+
+def shell_command_string(args: list[str]) -> str | None:
+    """Return the script string given to a shell by its -c style flag."""
+    for position, arg in enumerate(args):
+        is_short_flag = arg.startswith(OPTION_PREFIX) and not arg.startswith(
+            LONG_OPTION_PREFIX
+        )
+        if is_short_flag and "c" in arg:
+            return args[position + 1] if position + 1 < len(args) else None
+    return None
+
+
+def verify_arguments(args: list[str]) -> list[str]:
+    """Return the arguments verify wraps, after its own options."""
+    index = 0
+    while index < len(args) and args[index].startswith(OPTION_PREFIX):
+        if args[index] == OPTIONS_END:
+            return args[index + 1 :]
+        index += 2 if args[index] in VERIFY_VALUE_OPTIONS else 1
+    return args[index:]
+
+
+def count_runs(command: str, depth: int = 0) -> tuple[int, int]:
+    """Count verify-wrapped and raw runner invocations in a command."""
+    verify_runs = raw_runs = 0
+    cleaned = strip_comments(strip_heredoc_bodies(command))
+    for segment in command_segments(cleaned):
+        words = command_words(segment)
+        if not words:
+            continue
+        name = PurePath(words[0]).name
+        rest = words[1:]
+        script = shell_command_string(rest) if name in SHELLS else None
+        if script is not None and depth < MAX_SHELL_DEPTH:
+            inner_verify, inner_raw = count_runs(script, depth + 1)
+            verify_runs += inner_verify
+            raw_runs += inner_raw
+        elif name == VERIFY_NAME:
+            wrapped = " ".join(verify_arguments(rest))
+            verify_runs += bool(WRAPPED_RUNNER.search(wrapped))
+        else:
+            raw_runs += bool(EXECUTED_RUNNER.match(" ".join([name, *rest])))
+    return verify_runs, raw_runs
+
+
 def scan(path: str, stats: Stats) -> None:
     is_sub = SUBAGENT_MARKER in path
     tool_names = {}
@@ -147,11 +344,9 @@ def scan(path: str, stats: Stats) -> None:
                             unbounded_reads.add(block.get("id"))
                     elif name == "Bash":
                         command = str(params.get("command") or "")
-                        if TEST_COMMAND.search(command):
-                            if VERIFY_MARKER in command:
-                                stats.tests_verify += 1
-                            else:
-                                stats.tests_raw += 1
+                        verify_runs, raw_runs = count_runs(command)
+                        stats.tests_verify += verify_runs
+                        stats.tests_raw += raw_runs
             elif kind == "user" and isinstance(message.get("content"), list):
                 for block in message["content"]:
                     if not isinstance(block, dict) or block.get("type") != "tool_result":
