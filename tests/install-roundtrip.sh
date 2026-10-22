@@ -68,7 +68,7 @@ done
 for a in implementer $RETIRED_AGENTS; do echo "old agent" > "$H1/.claude/agents/$a.md"; done
 cat > "$H1/.claude/settings.json" <<'JSON'
 {
-  "env": { "MAX_MCP_OUTPUT_TOKENS": "1000000", "LOCAL_ONLY": "keep-me" },
+  "env": { "MAX_MCP_OUTPUT_TOKENS": "1000000", "LOCAL_ONLY": "keep-me", "CLAUDE_MODE": "personal", "CLAUDE_CODEX": "off" },
   "permissions": {
     "allow": ["mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)", "Bash(ls*)",
               "Agent(implementer)", "Agent(implementer-hard)", "Agent(implementer-opus)", "Agent(commander-opus)",
@@ -203,6 +203,7 @@ check_grep "$H1/.claude.json" "$H1/.local/bin/agy" ".claude.json: AGY_BIN not re
 check_grep "$H1/.codex/config.toml" "$H1/.claude/mcp/codex-worker/codex_worker.py" "codex config: rendered path"
 check_grep "$WORK/install1.log" "retired: $H1/.claude/skills/orchestrate" "install log: retirement of the old skill"
 check_grep "$WORK/install1.log" "retired settings entries" "install log: retirement of stale settings"
+check_grep "$WORK/install1.log" "mode: personal (CLAUDE_MODE in ~/.claude/settings.json env)" "install log: personal mode line"
 
 CHECKS=$((CHECKS + 1))
 python3 - "$H1/.claude/settings.json" "$ROOT/claude/settings.json" "$H1" <<'PY' || fail "settings.json content"
@@ -224,6 +225,10 @@ if "MAX_MCP_OUTPUT_TOKENS" in env:
     problems.append("env.MAX_MCP_OUTPUT_TOKENS still set")
 if env.get("LOCAL_ONLY") != "keep-me":
     problems.append("local env entry lost")
+if env.get("CLAUDE_MODE") != "personal":
+    problems.append(f"env.CLAUDE_MODE={env.get('CLAUDE_MODE')!r}")
+if "CLAUDE_CODEX" in env:
+    problems.append("env.CLAUDE_CODEX not retired")
 allow = settings.get("permissions", {}).get("allow", [])
 for stale in ("mcp__codex__*", "Agent(haiku-worker)", "Agent(claude-reviewer)",
               "Agent(implementer-hard)", "Agent(implementer-opus)", "Agent(commander-opus)"):
@@ -277,6 +282,10 @@ run_install "$H1" "$ROOT/install.sh" "$WORK/install2.log"
 check "second install exit status (see $WORK/install2.log)" $?
 check_grep "$WORK/install2.log" "files changed: 0" "second install: no file changes"
 check_grep "$WORK/install2.log" "settings.json: unchanged" "second install: settings unchanged"
+check_grep "$WORK/install2.log" "mode: personal (CLAUDE_MODE in ~/.claude/settings.json env)" "second install: personal mode kept"
+CHECKS=$((CHECKS + 1))
+python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['env']; sys.exit(0 if e.get('CLAUDE_MODE')=='personal' and 'CLAUDE_CODEX' not in e else 1)" \
+  "$H1/.claude/settings.json" || fail "second install: CLAUDE_MODE kept and CLAUDE_CODEX still gone"
 CHECKS=$((CHECKS + 1))
 if grep -q "^retired:" "$WORK/install2.log"; then fail "second install retired files again"; fi
 
@@ -337,6 +346,9 @@ check_file "$H2/.claude/hooks/git-policy.py"
 check_file "$H2/.claude/bundle/retire.json"
 check_file "$H2/.claude/hooks/tdd-guard.py"
 check_grep "$H2/.claude/settings.json" "$H2/.claude/hooks/delegation-guard.py" "second home: rendered path"
+check_grep "$WORK/install3.log" "mode: work (default; set env CLAUDE_MODE=personal on a private machine)" "fresh home: work mode line"
+CHECKS=$((CHECKS + 1))
+if grep -qF CLAUDE_MODE "$H2/.claude/settings.json"; then fail "fresh home got a CLAUDE_MODE key"; fi
 
 mkdir -p "$WORK/home-uv" "$WORK/home-none" "$WORK/home-ruff"
 for home in home-uv home-none home-ruff; do stub_venv "$WORK/$home"; done

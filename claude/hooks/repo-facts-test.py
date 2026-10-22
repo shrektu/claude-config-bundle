@@ -6,7 +6,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 script = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(HERE), "bin", "repo-facts")
 MAX_LINES = 40
 MAX_CHARS = 1600
-ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+ENV = {
+    **{k: v for k, v in os.environ.items() if k != "CLAUDE_MODE"},
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_SYSTEM": os.devnull,
+}
 
 
 def write(path, text):
@@ -15,7 +19,7 @@ def write(path, text):
         handle.write(text)
 
 
-def repo(base, name, branch="main"):
+def repo(base: str, name: str, branch: str = "main") -> str:
     path = os.path.join(base, name)
     os.makedirs(path, exist_ok=True)
     done = subprocess.run(("git", "init", "-q", "-b", branch), cwd=path, capture_output=True, text=True, env=ENV)
@@ -24,7 +28,12 @@ def repo(base, name, branch="main"):
     return path
 
 
-def run(target=None, cwd=None, stdin="", env=None):
+def run(
+    target: str | None = None,
+    cwd: str | None = None,
+    stdin: str = "",
+    env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
     args = ["python3", script] + ([target] if target else [])
     done = subprocess.run(args, input=stdin, capture_output=True, text=True, timeout=30,
                           cwd=cwd, env={**ENV, **(env or {})})
@@ -168,7 +177,7 @@ def monorepo_fixture(base):
     return path
 
 
-def check(label, condition, detail=""):
+def check(label: str, condition: object, detail: str = "") -> None:
     global bad
     if not condition:
         bad += 1
@@ -298,6 +307,26 @@ with tempfile.TemporaryDirectory() as base:
 
     rc, out, err = run(cwd=node, stdin="this is not json at all")
     check("cli: non-json stdin falls back to cwd", "branch=feature/x" in out, out)
+
+    epic = repo(base, "epic_repo", "epik/x")
+    for mode, epic_line, hint_line in (
+        (None, True, False),
+        ("work", True, False),
+        ("persnal", True, False),
+        ("personal", False, True),
+        (" Personal ", False, True),
+    ):
+        rc, out, err = run(epic, env={"CLAUDE_MODE": mode} if mode else None)
+        check(
+            f"epic mode={mode!r}: epic line",
+            ("is an epic branch" in out) == epic_line,
+            out,
+        )
+        check(
+            f"epic mode={mode!r}: not-a-work-branch line",
+            ("NOT a work branch" in out) == hint_line,
+            out,
+        )
 
     rc, out, err = run(cwd=py, stdin="")
     check("cli: no argument uses cwd", f"repo: {py}" in out, out)

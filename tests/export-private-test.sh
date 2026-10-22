@@ -402,6 +402,16 @@ printf 'claude\ncodex\n' > "$HERE_DIR/exclude.local"
 run_export
 expect "export with every text file excluded still succeeds: exit" 0 "$STATUS"
 
+new_case
+echo '{"env": {"CLAUDE_MODE": "personal", "CLAUDE_CODEX": "off", "OTHER": "x"}, "autoMode": {"environment": "local"}}' \
+  > "$FAKE_HOME/.claude/settings.json"
+run_export
+expect "machine mode never exported: exit" 0 "$STATUS"
+expect_not_in_file "machine mode never exported" "$OUT/claude/settings.json" CLAUDE_MODE
+expect_not_in_file "retired Codex switch never exported" "$OUT/claude/settings.json" CLAUDE_CODEX
+expect_in_file "other env entries kept" "$OUT/claude/settings.json" '"OTHER": "x"'
+expect_not_in_file "autoMode still dropped" "$OUT/claude/settings.json" autoMode
+
 echo "checks: $CHECKS, FAILURES: $FAILURES"
 if [ "$FAILURES" != 0 ]; then
   echo "logs kept in $WORK"

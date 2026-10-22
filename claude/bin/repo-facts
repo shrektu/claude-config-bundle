@@ -16,6 +16,8 @@ SESSION_START = "SessionStart"
 WORK_BRANCH_PREFIXES = ("task/", "feature/", "bugfix/", "hotfix/", "test/")
 WORK_BRANCH_HINT = "task/*, feature/*, bugfix/*, hotfix/*, test/*"
 EPIC_BRANCH_PREFIX = "epik/"
+MODE_VAR = "CLAUDE_MODE"
+PERSONAL_MODE = "personal"
 HEAD_REF_PREFIX = "ref: refs/heads/"
 GITDIR_PREFIX = "gitdir:"
 
@@ -124,6 +126,11 @@ def git_dir_of(root):
         value = text[len(GITDIR_PREFIX):].strip()
         return value if os.path.isabs(value) else os.path.normpath(os.path.join(root, value))
     return None
+
+
+def personal_mode() -> bool:
+    """Tell whether this machine runs in personal mode."""
+    return os.environ.get(MODE_VAR, "").strip().lower() == PERSONAL_MODE
 
 
 def current_branch(root):
@@ -635,7 +642,8 @@ def main():
     if effort:
         head.append(f"effort={effort}")
     lines = [" ".join(head)]
-    if branch and branch.startswith(EPIC_BRANCH_PREFIX):
+    is_epic = bool(branch) and branch.startswith(EPIC_BRANCH_PREFIX)
+    if is_epic and not personal_mode():
         lines.append(f"branch `{branch}` is an epic branch - only merge develop into it and push without force")
     elif branch and not branch.startswith(WORK_BRANCH_PREFIXES):
         lines.append(f"branch `{branch}` is NOT a work branch ({WORK_BRANCH_HINT}) - do not commit or push here")

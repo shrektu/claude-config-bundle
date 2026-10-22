@@ -1,6 +1,6 @@
 ---
 name: bb
-description: Bitbucket sweep — threads and fixes on Sebastian's PRs, review and vote on others' PRs. Load on /bb or when asked to go through Bitbucket PRs or comments, or to review someone else's PR.
+description: Work mode only (skip where CLAUDE_MODE=personal). Bitbucket sweep — threads and fixes on Sebastian's PRs, review and vote on others' PRs. Load on /bb or when asked to go through Bitbucket PRs or comments, or to review someone else's PR.
 ---
 
 ## 0. Scope

@@ -41,7 +41,8 @@
   ],
   "settings": {
     "env": [
-      "MAX_MCP_OUTPUT_TOKENS"
+      "MAX_MCP_OUTPUT_TOKENS",
+      "CLAUDE_CODEX"
     ],
     "permissions.allow": [
       "mcp__codex__*",

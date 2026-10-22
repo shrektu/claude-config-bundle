@@ -17,8 +17,9 @@ SPOOFED = f"{PROJECTS}/subagents/{SESSION}.jsonl"
 AGENT_ID = "a41b0d4bd296103f3"
 
 
-SWITCH_VARS = ("CLAUDE_CODEX", "CLAUDE_CODEX_GATE")
-CODEX_OFF_REASON = "Codex is off on this machine"
+SWITCH_VARS = ("CLAUDE_MODE", "CLAUDE_CODEX", "CLAUDE_CODEX_GATE")
+PERSONAL = {"CLAUDE_MODE": "personal"}
+CODEX_OFF_REASON = "Personal mode (CLAUDE_MODE=personal)"
 
 
 def hook_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -260,7 +261,7 @@ codex_off_cases = [
     },
 ]
 for off_payload in codex_off_cases:
-    rc, out, err = run(off_payload, env={"CLAUDE_CODEX": "off"})
+    rc, out, err = run(off_payload, env=PERSONAL)
     off_reason = ""
     if out.strip():
         off_reason = json.loads(out)["hookSpecificOutput"][
@@ -276,22 +277,22 @@ RUNNER_CALL = {
     "transcript_path": SUB,
     "agent_type": "codex-runner",
 }
-for off_value in ("OFF", " off ", "0", "false", "no"):
+for off_value in ("personal", "PERSONAL", " Personal ", "personal\n"):
     for payload in (
         {"tool_name": CODEX, "transcript_path": MAIN},
         RUNNER_CALL,
         {"tool_name": CODEX},
     ):
-        rc, out, err = run(payload, env={"CLAUDE_CODEX": off_value})
+        rc, out, err = run(payload, env={"CLAUDE_MODE": off_value})
         edge_checks += 1
         if not (rc == 0 and err == "" and CODEX_OFF_REASON in out):
             bad += 1
             print(f"OFF VALUE FAIL {off_value!r} {payload} -> {out[:200]!r}")
 
-for on_value in ("on", "", "1", "yes"):
+for on_value in ("work", "", "persnal", "WORK", "off", "1"):
     rc, out, err = run(
         RUNNER_CALL,
-        env={"CLAUDE_CODEX": on_value},
+        env={"CLAUDE_MODE": on_value},
     )
     edge_checks += 1
     if not (rc == 0 and out.strip() == "" and err == ""):
@@ -300,7 +301,7 @@ for on_value in ("on", "", "1", "yes"):
 
 rc, out, err = run(
     {"tool_name": CODEX, "transcript_path": MAIN},
-    env={"CLAUDE_CODEX": "on"},
+    env={"CLAUDE_MODE": "work"},
 )
 edge_checks += 1
 if CODEX_OFF_REASON in out or not denies(out):
@@ -309,7 +310,7 @@ if CODEX_OFF_REASON in out or not denies(out):
 
 rc, out, err = run(
     {"tool_name": CODEX, "transcript_path": SUB, "agent_type": "codex-runner"},
-    env={"CLAUDE_CODEX": "off", "CLAUDE_CODEX_GATE": "off"},
+    env={**PERSONAL, "CLAUDE_CODEX_GATE": "off"},
 )
 edge_checks += 1
 if CODEX_OFF_REASON not in out:
@@ -318,7 +319,7 @@ if CODEX_OFF_REASON not in out:
 
 rc, out, err = run(
     {"tool_name": CODEX_IMPLEMENT, "transcript_path": MAIN},
-    env={"CLAUDE_CODEX": "off"},
+    env=PERSONAL,
 )
 edge_checks += 1
 if "escalation was removed" not in out or CODEX_OFF_REASON in out:
@@ -327,12 +328,19 @@ if "escalation was removed" not in out or CODEX_OFF_REASON in out:
 
 rc, out, err = run(
     {"tool_name": "Bash", "tool_input": {"command": "ls"}},
-    env={"CLAUDE_CODEX": "off"},
+    env=PERSONAL,
 )
 edge_checks += 1
 if not (rc == 0 and out.strip() == "" and err == ""):
     bad += 1
-    print(f"OTHER TOOL UNDER CODEX OFF FAIL -> {out[:200]!r}")
+    print(f"OTHER TOOL UNDER PERSONAL FAIL -> {out[:200]!r}")
+
+for leftover in ("off", "0", "false", "no"):
+    rc, out, err = run(RUNNER_CALL, env={"CLAUDE_CODEX": leftover})
+    edge_checks += 1
+    if not (rc == 0 and out.strip() == "" and err == ""):
+        bad += 1
+        print(f"LEFTOVER CLAUDE_CODEX FAIL {leftover!r} -> {out[:200]!r}")
 
 total = (
     len(deny)
