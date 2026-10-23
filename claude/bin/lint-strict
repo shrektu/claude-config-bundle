@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Check only the changed lines of a git repository against language norms.
 
 The scope (working tree, index, merge-base or tracked files) decides which
@@ -130,6 +130,7 @@ DIFF_FLAGS = ("--no-color", "--no-ext-diff", "--no-textconv", "-M")
 REGULAR_FILE_MODES = frozenset({"100644", "100755"})
 RENAME_OR_COPY = frozenset({"R", "C"})
 DELETED = "D"
+ADDED = "A"
 RAW_NEW_MODE_FIELD = 1
 RAW_STATUS_FIELD = -1
 HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -145,11 +146,15 @@ SUPPRESSION_PATTERN = re.compile(
 
 TEST_FILE_PATTERNS = ("test_*.py", "*_test.py", "*-test.py", "conftest.py")
 STUB_SUFFIX = ".pyi"
-TEST_DIRECTORIES = frozenset({"tests", "test"})
+TEST_DIRECTORIES = frozenset({"tests", "tests_pg", "test"})
 
 RUFF_TOOL = "ruff"
 RUFF_NOT_FOUND = "ruff not found (set LINT_STRICT_RUFF or put it on PATH)"
 RUFF_FAILED = "ruff failed"
+IMPLICIT_NAMESPACE_RULE = "INP001"
+NON_PACKAGE_DIRECTORIES = frozenset(
+    {"alembic", "migrations", "scripts", "docs", "docker"},
+)
 RUFF_IGNORED = (
     "W191",
     "E111",
@@ -169,7 +174,6 @@ RUFF_IGNORED = (
     "D213",
     "D100",
     "D104",
-    "INP001",
     "T201",
     "T203",
     "S603",
@@ -199,7 +203,7 @@ RUFF_TEST_IGNORED = (
     "FBT001",
     "FBT002",
     "FBT003",
-    "INP001",
+    IMPLICIT_NAMESPACE_RULE,
     "PLC2701",
 )
 PEP257_CONFIG = 'lint.pydocstyle.convention="pep257"'
@@ -419,6 +423,7 @@ class LintTarget:
     language: Language
     changed_lines: frozenset[int]
     text_source: TextSource
+    new_file: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,7 +767,13 @@ def diff_target(
     changed = changed_lines_of(repo, entry, arguments)
     if not changed:
         return None
-    return LintTarget(entry.path, language, changed, source)
+    return LintTarget(
+        entry.path,
+        language,
+        changed,
+        source,
+        new_file=entry.status == ADDED,
+    )
 
 
 def unstaged_paths(repo: Repo, paths: tuple[str, ...]) -> frozenset[str]:
@@ -795,7 +806,13 @@ def untracked_target(repo: Repo, name: str) -> LintTarget | NotChecked | None:
     if not line_count:
         return None
     changed = frozenset(range(1, line_count + 1))
-    return LintTarget(name, language, changed, TextSource.DISK)
+    return LintTarget(
+        name,
+        language,
+        changed,
+        TextSource.DISK,
+        new_file=True,
+    )
 
 
 def untracked_targets(repo: Repo, paths: tuple[str, ...]) -> CollectedTargets:
@@ -1429,6 +1446,18 @@ def ruff_items(
     return items if isinstance(items, list) else None
 
 
+def namespace_finding_applies(repo: Repo, target: LintTarget) -> bool:
+    """Tell whether INP001 counts for a new file outside exempt places."""
+    directories = PurePosixPath(target.path).parts[:-1]
+    if not target.new_file or not NON_PACKAGE_DIRECTORIES.isdisjoint(
+        directories,
+    ):
+        return False
+    root = subproject_root(repo, target)
+    parent = repo.absolute_path(target.path).parent
+    return parent not in {root, root / SOURCE_DIRECTORY}
+
+
 def run_ruff_batch(
     settings: RuffSettings,
     repo: Repo,
@@ -1461,6 +1490,10 @@ def run_ruff_batch(
             for violation in found
             if violation.path in by_path
             and violation.line in by_path[violation.path].changed_lines
+            and (
+                violation.rule != IMPLICIT_NAMESPACE_RULE
+                or namespace_finding_applies(repo, by_path[violation.path])
+            )
         ),
     )
 
@@ -5159,8 +5192,13 @@ class MagicBackend:
     languages: frozenset[Language] = NON_LOCALE_LANGUAGES
 
     def run(self, repo: Repo, targets: Sequence[LintTarget]) -> BackendResult:
-        """Flag magic numbers on the changed lines of non-test targets."""
-        checked = [t for t in targets if not static_is_test(t.path)]
+        """Flag magic numbers on changed lines of non-test, non-.d.ts code."""
+        checked = [
+            t
+            for t in targets
+            if not static_is_test(t.path)
+            and not t.path.endswith(DECLARATION_SUFFIX)
+        ]
         if not checked:
             return BackendResult()
         results = [magic_target_results(repo, target) for target in checked]

@@ -1,12 +1,12 @@
 ---
 name: epic
-description: Work mode only (skip where CLAUDE_MODE=personal). A whole Jira epic — its epik/<EPIC> branch, its tasks in parallel sessions, QA and the final review of the epic branch before it goes to develop. Load when Sebastian writes /epic with an epic ID (e.g. /epic TICKET-1273) or asks for a whole epic to be done.
+description: Work mode only (skip where CLAUDE_MODE=personal). A whole Jira epic — its epic/<EPIC>-<desc> branch, its tasks in parallel sessions, QA and the final review of the epic branch before it goes to develop. Load when Sebastian writes /epic with an epic ID (e.g. /epic TICKET-1273) or asks for a whole epic to be done.
 ---
 
 Input: the epic ID (`TICKET-1273`). Execute, do not only plan: after the analysis start at once without
 asking, and keep starting tasks until the epic is done or only blocked ones remain. Each task runs in its
 own session (`start_session`, `/task <ID>`); this session owns the graph, the epic run, QA and the
-`epik/<EPIC>` → `develop` PR. Load `task` once at the start.
+`epic/<EPIC>-<desc>` → `develop` PR. Load `task` once at the start.
 
 ## 1. Collect the epic
 
@@ -16,7 +16,7 @@ in-progress tasks leave the plan but stay in the graph as satisfied dependencies
 
 ## 1a. The epic branch
 
-Model: CLAUDE.md EPIC MODEL. At the start create `epik/<EPIC>` from `develop` in every repo the epic
+Model: CLAUDE.md EPIC MODEL. At the start create `epic/<EPIC>-<desc>` from `develop` in every repo the epic
 touches if missing (`task` §2, or `POST /repositories/acme/<repo>/refs/branches`). Task code lands on
 it only through merged task PRs.
 
@@ -52,18 +52,18 @@ React when a task session reports. A blocked task does not stop the epic: cut it
 graph, carry on, list it in the report. Two tasks fighting over one file → a missing edge: add it, stop
 the one further from completion, give the reason in the report.
 
-## 6. Verify the whole epic — on `epik/<EPIC>`, before it goes to develop
+## 6. Verify the whole epic — on `epic/<EPIC>-<desc>`, before it goes to develop
 
-Only once every task PR is merged into `epik/<EPIC>`: the epic's defects live where the tasks meet.
+Only once every task PR is merged into `epic/<EPIC>-<desc>`: the epic's defects live where the tasks meet.
 
 **Early assembly (optional).** While task PRs are open: per repo, in a worktree, a throwaway
-`test/<EPIC>-integration` = `epik/<EPIC>` + the open task branches in merge order — never a PR source,
+`test/<EPIC>-integration` = `epic/<EPIC>-<desc>` + the open task branches in merge order — never a PR source,
 never pushed. A conflict is a finding about the graph or the order.
 
-**Sync with develop.** Before the run merge the current `develop` into `epik/<EPIC>` and resolve
+**Sync with develop.** Before the run merge the current `develop` into `epic/<EPIC>-<desc>` and resolve
 conflicts.
 
-**The run** on `epik/<EPIC>` (stack from it):
+**The run** on `epic/<EPIC>-<desc>` (stack from it):
 
 - **unit** — the full suites of every repo the epic touched (they carry every task's regression tests);
 - **integration** — the epic's own flows that cross tasks, which no single task checked;
@@ -75,12 +75,12 @@ of the tasks): each expected result with proof per `task` §4 (executable, red w
 changes). A row no task implements is an **epic scope gap**: report it and name the missing task; never
 slip it into some PR.
 
-**When something fails.** The fix goes through a PR into `epik/<EPIC>`: the owning task's branch if its
-PR is open, else a new `task/<ID>-fix` from `epik/<EPIC>` with its own PR; never a direct commit on the
+**When something fails.** The fix goes through a PR into `epic/<EPIC>-<desc>`: the owning task's branch if its
+PR is open, else a new `feature/<ID>-<desc>-fix` from `epic/<EPIC>-<desc>` with its own PR; never a direct commit on the
 epic branch. After the merge, run the whole again.
 
-**Final.** Run and QA green on the final SHAs → the trio on `epik/<EPIC>` against `develop`, per repo,
-`review_focus` on where the tasks meet; then, after asking Sebastian, one PR per repo `epik/<EPIC>` →
+**Final.** Run and QA green on the final SHAs → the trio on `epic/<EPIC>-<desc>` against `develop`, per repo,
+`review_focus` on where the tasks meet; then, after asking Sebastian, one PR per repo `epic/<EPIC>-<desc>` →
 `develop` (title `[EPIC][<EPIC>] …`, description per `pr-description` with the epic matrix, the QA table
 with SHAs and links to every merged task PR).
 
@@ -88,10 +88,10 @@ With a blocked task, verify the epic as it stands; the report names the matrix r
 
 ## 7. Report
 
-A table: task, class, PRs (links), status (open / merged into `epik/<EPIC>`), what it rested on. Plus:
+A table: task, class, PRs (links), status (open / merged into `epic/<EPIC>-<desc>`), what it rested on. Plus:
 the epic matrix (expected result → proof → outcome) with the run and QA result, scope gaps and missing
 tasks, the critical path and what really set the duration, the PR merge order, blocked tasks with the
 blocker and the decision needed, and dependency edges missing from Jira (worth adding to the tickets).
 
-**Gotowe do merge** for an epic: every task PR merged into `epik/<EPIC>`, run and QA green on its final
-SHAs, a current final review, and the `epik/<EPIC>` → `develop` PR(s) open.
+**Gotowe do merge** for an epic: every task PR merged into `epic/<EPIC>-<desc>`, run and QA green on its final
+SHAs, a current final review, and the `epic/<EPIC>-<desc>` → `develop` PR(s) open.

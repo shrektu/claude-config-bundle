@@ -308,7 +308,7 @@ with tempfile.TemporaryDirectory() as base:
     rc, out, err = run(cwd=node, stdin="this is not json at all")
     check("cli: non-json stdin falls back to cwd", "branch=feature/x" in out, out)
 
-    epic = repo(base, "epic_repo", "epik/x")
+    epic = repo(base, "epic_repo", "epic/x-foo")
     for mode, epic_line, hint_line in (
         (None, True, False),
         ("work", True, False),
@@ -327,6 +327,17 @@ with tempfile.TemporaryDirectory() as base:
             ("NOT a work branch" in out) == hint_line,
             out,
         )
+
+    new_epic = repo(base, "new_epic_repo", "epic/x")
+    rc, out, err = run(new_epic, env={"CLAUDE_MODE": "work"})
+    check("epic/ prefix: epic line", "is an epic branch" in out, out)
+    plain_non_work = "NOT a work branch" in out
+    check("epic/ prefix: not a plain non-work branch", not plain_non_work, out)
+
+    old_task = repo(base, "old_task_repo", "task/x")
+    rc, out, err = run(old_task, env={"CLAUDE_MODE": "work"})
+    check("task/ prefix: NOT a work branch", "NOT a work branch" in out, out)
+    check("task/ prefix: not an epic", "is an epic branch" not in out, out)
 
     rc, out, err = run(cwd=py, stdin="")
     check("cli: no argument uses cwd", f"repo: {py}" in out, out)

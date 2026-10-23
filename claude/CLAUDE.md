@@ -102,15 +102,16 @@ The plan names the phases of its class.
   escalation: report **Zablokowane** (blocker, evidence, decision needed); never declare it done to end
   the loop.
 - EPIC MODEL (work mode only; personal mode: work branch from the default branch (main), PR to it on
-  GitHub) (details `task` §2): an epic's task works on `task/<ID>` from `epik/<EPIC>` (created from
+  GitHub) (details `task` §2): names are `epic/<EPIC>-<desc>` and `feature/<ID>-<desc>`, `<desc>` a
+  short English kebab-case summary of the Jira title, the same in every repo (never `epik/`, `task/`).
+  An epic's task works on `feature/<ID>-<desc>` from `epic/<EPIC>-<desc>` (created from
   `develop` in each repo it touches), or from the unmerged task branch it stands on (any epic); its PR
-  targets that base. Once the task below merges, retarget the child to `epik/<EPIC>`, never `develop`.
+  targets that base. Once the task below merges, retarget the child to the epic branch, never `develop`.
   The epic branch reaches `develop` in one PR after its review and QA (`epic`). No epic:
   `bugfix/*`/`hotfix/*` → `develop`/`master`. Exception: blocker fixes of an old
   epic already in `develop` (e.g. TICKET-1530) branch from and PR to `develop`, QA per task; ask when unsure.
-  Pre-model `feature/*` PRs are retargeted to `epik/<EPIC>`.
-- BRANCH RULE: work branches (`task/*`, `feature/*`, `bugfix/*`, `hotfix/*`, `test/*`): any op, force only
-  `--force-with-lease`. `epik/*` (work mode only): only create from `develop`, merge `develop` in
+- BRANCH RULE: work branches (`feature/*`, `bugfix/*`, `hotfix/*`, `test/*`): any op, force only
+  `--force-with-lease`. `epic/*` (work mode only): only create from `develop`, merge `develop` in
   (committing its conflict resolution), push without force. Any other branch, any repo: nothing that
   changes it or its remote (no commit, push, merge, rebase, reset, tag, delete, not even a one-line or CI
   fix); say so, Sebastian decides. git-policy enforces this and the message: ≤ 7-word imperative
@@ -158,9 +159,10 @@ Context is re-read every turn; speed comes from short outputs, not compacting.
   returns, idioms over manual loops, one responsibility per function/component). Each miss is a finding.
 - Known data shapes are typed models (dataclass, Pydantic, TypedDict, NamedTuple, enum); a raw dict only
   for genuinely dynamic keys at a JSON boundary, converted immediately.
-- No unnecessary `__init__.py` (empty or re-exports only); no magic strings (named constant or enum
-  member). A number becomes a named constant only when lint-strict flags it (PLR2004, MAG001-003); no
-  review raises a magic number by hand.
+- `__init__.py`: every source package directory has one, a regular package per PEP 420 (empty is
+  fine, re-exports per habit H077); test directories follow the repo's convention (check the existing
+  ones). No magic strings (named constant or enum member). A number becomes a named constant only
+  when lint-strict flags it (PLR2004, MAG001-003); no review raises a magic number by hand.
 - Norms: every changed line exemplary by its language norm (`repo-standards` §5); short of that is a
   finding. standards-gate runs lint-strict (incl. DUP001 copy-paste) on changed lines at every commit
   and implementer stop and denies until clean. A new suppression is a finding until argued; what no tool

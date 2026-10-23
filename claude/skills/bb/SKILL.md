@@ -102,6 +102,8 @@ say so in the report.
   dependencies pointing the wrong way;
 - clear simplifications (needless layers or wrappers, repeated blocks, nesting → early return, manual loop
   → idiom, a function or component to split), with one sentence on what to change it to;
+- `__init__.py`: a source package directory without one (implicit namespace package, PEP 420) → label
+  `brak __init__.py`; in tests only a break of the repo's convention (compare the existing test dirs);
 - magic strings and repeated string literals, duplication of an existing helper, a raw dict for a known
   shape, error paths ending in success, names that lie, functions doing several things, dead code;
 - real bugs and team habits (including getattr/hasattr/setattr on a known field with a non-literal name).
@@ -207,9 +209,23 @@ reviewed.
   collective comment; report only.
 
 **Others' threads.** Close only threads you opened; one of yours that someone else closed you never
-reopen or comment on. If the author left one unfixed, you may
-reply in it with file:line; if that reviewer is wrong, reply in it with evidence that the author's
-original code is right.
+reopen or comment on. You may join another reviewer's discussion on any non-draft PR you review when
+you add something checked:
+- the reviewer or the author is wrong about the code, a library or a norm → reply with evidence
+  (file:line, commit, a doc quote or link), e.g. that the author's original code is right;
+- a better solution than the one discussed → recommend it with its source, checked per Method 3, never
+  from memory (here naming the norm and linking it is allowed, unlike Writing's clean-code labels):
+  - Python: a PEP (number and section), the Astral docs (ruff rule, uv, ty), docs.python.org;
+  - TypeScript/JavaScript: the TypeScript Handbook, the ESLint / typescript-eslint rule docs, MDN;
+  - React: react.dev (incl. Rules of React), the docs of the repo's framework and libraries;
+  - C/C++: cppreference / the C standard, SEI CERT C/C++, MISRA, the Zephyr coding guidelines and API
+    docs, the clang-tidy check docs;
+  - Rust: the Rust API Guidelines, the Clippy lint docs; Go: Effective Go, Go Code Review Comments;
+  - any language: the official docs of the language, library or tool, or an established good practice
+    argued in one sentence;
+- the author left the thread's point unfixed → reply with file:line.
+One reply per point, ≤ 3 sentences, § 2 Tone; no agreement-only replies ("+1", "zgadzam się"). A
+blocking problem you find there gets your own thread per the table.
 
 **`approve`** → change the vote to `approve`. While handling `replies`, also approve a PR whose only open
 threads of yours are non-blocking (table); `approve` does not list those.
@@ -250,5 +266,6 @@ and why; votes (where, which); closed threads; what you wait for from people; dr
 you asked authors about (repo, PR, thread link, what you asked); scope reminders left and those closed
 after "intended"; each style remark's internal weight; authors' counter-arguments you verified and the
 result (held → "Racja" and resolve, with evidence; did not → your reply with evidence, thread open);
+your replies in other reviewers' discussions (thread link, the point and its source);
 decisions on Sebastian's PRs waiting for him (§ 1); the habits line per reviewed PR; new and bumped
 habits (id, rule, source), so he can `habits drop <id>`.

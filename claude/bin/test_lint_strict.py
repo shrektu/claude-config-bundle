@@ -305,6 +305,124 @@ def test_module_docstring_not_required(repo: Path, log_dir: Path) -> None:
     assert not found & {"DOC100", "D100", "D104"}
 
 
+def test_inp001_new_source_file_in_non_package_dir(
+    repo: Path,
+    log_dir: Path,
+) -> None:
+    write(repo, "app/service.py", CLEAN_MODULE)
+
+    run = lint(repo, log_dir, "--json")
+
+    assert ("app/service.py", 1, "INP001") in violations(run)
+    assert run.code == EXIT_FAIL
+
+
+def test_inp001_staged_new_file_in_non_package_dir(
+    repo: Path,
+    log_dir: Path,
+) -> None:
+    write(repo, "app/service.py", CLEAN_MODULE)
+    git(repo, "add", "app/service.py")
+
+    run = lint(repo, log_dir, "--json")
+
+    assert ("app/service.py", 1, "INP001") in violations(run)
+
+
+def test_inp001_not_reported_when_package_has_init(
+    repo: Path,
+    log_dir: Path,
+) -> None:
+    write(repo, "app/__init__.py", "")
+    write(repo, "app/service.py", CLEAN_MODULE)
+
+    run = lint(repo, log_dir, "--json")
+
+    assert "INP001" not in rules_at(run, "app/service.py")
+
+
+def test_inp001_not_reported_for_edited_existing_file(
+    repo: Path,
+    log_dir: Path,
+) -> None:
+    write(repo, "app/old.py", CLEAN_MODULE)
+    commit_all(repo)
+    write(repo, "app/old.py", '"""Edited module."""\n\nVALUE = 1\n')
+
+    run = lint(repo, log_dir, "--json")
+
+    assert "INP001" not in rules_at(run, "app/old.py")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "alembic/versions/0001_a.py",
+        "migrations/env.py",
+        "scripts/plain.py",
+        "docs/conf.py",
+        "docker/entry.py",
+        "backend/migrations/0002_b.py",
+        "app/test_service.py",
+        "tests/helpers.py",
+        "manage.py",
+        "src/main.py",
+    ],
+)
+def test_inp001_exempt_new_files(
+    repo: Path,
+    log_dir: Path,
+    name: str,
+) -> None:
+    write(repo, name, CLEAN_MODULE)
+
+    run = lint(repo, log_dir, "--json")
+
+    assert "INP001" not in rules_at(run, name)
+
+
+def test_inp001_subproject_root_file_not_flagged(
+    repo: Path,
+    log_dir: Path,
+) -> None:
+    write(repo, "backend/pyproject.toml", "[project]\nname = 'backend'\n")
+    write(repo, "backend/main.py", CLEAN_MODULE)
+    write(repo, "backend/src/main.py", CLEAN_MODULE)
+    write(repo, "backend/app/new.py", CLEAN_MODULE)
+
+    run = lint(repo, log_dir, "--json")
+
+    assert "INP001" not in rules_at(run, "backend/main.py")
+    assert "INP001" not in rules_at(run, "backend/src/main.py")
+    assert ("backend/app/new.py", 1, "INP001") in violations(run)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("backend/main.py", False),
+        ("backend/src/main.py", False),
+        ("backend/app/new.py", True),
+    ],
+)
+def test_inp001_subproject_root_file_not_flagged_unit(
+    ls: ModuleType,
+    tmp_path: Path,
+    name: str,
+    expected: bool,
+) -> None:
+    write(tmp_path, "backend/pyproject.toml", "[project]\nname = 'backend'\n")
+    target = ls.LintTarget(
+        name,
+        ls.Language.PYTHON,
+        frozenset({1}),
+        ls.TextSource.DISK,
+        new_file=True,
+    )
+
+    assert ls.namespace_finding_applies(ls.Repo(tmp_path), target) is expected
+
+
 def test_doc101_module_docstring_on_changed_line(
     repo: Path,
     log_dir: Path,
@@ -2519,6 +2637,21 @@ def test_magic_backend_ignores_test_files(
     run = lint(repo, log_dir, "--json")
 
     assert not rules_at(run, name) & MAGIC_RULE_NAMES
+
+
+def test_magic_backend_ignores_declaration_files(
+    repo: Path,
+    log_dir: Path,
+) -> None:
+    write(
+        repo,
+        "src/schema.d.ts",
+        "".join(f"interface R{n} {{\n  422: string;\n}}\n" for n in range(3)),
+    )
+
+    run = lint(repo, log_dir, "--json")
+
+    assert not rules_at(run, "src/schema.d.ts") & MAGIC_RULE_NAMES
 
 
 def test_magic_backend_reads_index_text_in_staged_mode(

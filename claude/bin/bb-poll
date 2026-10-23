@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+import argparse
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import urllib.error
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum, auto
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+from urllib.parse import quote
+
+BIN_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BIN_DIR))
+
+
+def load_sweep() -> ModuleType:
+    """Ładuje bb-sweep jako moduł, żeby użyć jego klienta Bitbucketa."""
+    name = "bb_sweep"
+    loader = importlib.machinery.SourceFileLoader(
+        name, str(BIN_DIR / "bb-sweep")
+    )
+    spec = importlib.util.spec_from_loader(name, loader)
+    if spec is None:
+        raise ImportError(name)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+bb_sweep = load_sweep()
+WORKSPACE: str = bb_sweep.WORKSPACE
+CACHE_DIR: str = bb_sweep.CACHE_DIR
+OPEN_PRS_QUERY: str = bb_sweep.OPEN_PRS_QUERY
+PR_FIELDS: str = bb_sweep.PR_FIELDS
+NO_ACCESS_CODES: set[int] = bb_sweep.NO_ACCESS_CODES
+pages = bb_sweep.pages
+me = bb_sweep.me
+repo_index = bb_sweep.repo_index
+candidate_repos = bb_sweep.candidate_repos
+my_state = bb_sweep.my_state
+
+STATE_VERSION = 1
+STATE_FILE = "poll-state.json"
+LOCK_FILE = "poll.lock"
+WORK_DIR = "poll-work"
+MODE_ENV = "CLAUDE_MODE"
+PERSONAL_MODE = "personal"
+FULL_SCAN_INTERVAL = timedelta(hours=2)
+INCREMENTAL_MARGIN = timedelta(minutes=2)
+MAX_FAILURES = 3
+REVIEW_TIMEOUT_S = 60 * 60
+MAX_PARALLEL_REVIEWS = 3
+REVIEW_EFFORT = "medium"
+STATE_LOCK = threading.Lock()
+HTTP_TIMEOUT_S = 60
+SHORT_HASH_LEN = 9
+LISTING_PAGELEN = 100
+KEY_SEPARATOR = "#"
+
+type Runner = Callable[..., subprocess.CompletedProcess[str]]
+type Clock = Callable[[], datetime]
+type PrsByRepo = dict[str, list[dict[str, Any]]]
+
+
+class ReviewKind(StrEnum):
+    """Rodzaj review: pierwsze albo kontrola po nowym pushu."""
+
+    FIRST = auto()
+    RECHECK = auto()
+
+
+class ReviewResult(StrEnum):
+    """Wynik uruchomienia claude -p."""
+
+    OK = auto()
+    FAILED = auto()
+    TIMEOUT = auto()
+
+
+class PollStateCorruptError(Exception):
+    """Plik stanu jest uszkodzony albo ma nieznaną wersję."""
+
+
+@dataclass(frozen=True, slots=True)
+class PrEntry:
+    """Stan jednego PR-a: aktualny head i ostatnio zrecenzowany."""
+
+    head: str
+    reviewed_head: str
+    failures: int
+
+
+@dataclass(slots=True)
+class PollState:
+    """Stan pollera zapisywany między uruchomieniami."""
+
+    last_full_scan: str | None
+    last_poll: str | None
+    prs: dict[str, PrEntry]
+    my_uuid: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
+    """PR czekający na review."""
+
+    repo: str
+    pr_id: int
+    title: str
+    url: str
+    head: str
+    updated_on: str
+    kind: ReviewKind
+
+    @property
+    def key(self) -> str:
+        """Klucz PR-a w pliku stanu."""
+        return f"{self.repo}{KEY_SEPARATOR}{self.pr_id}"
+
+
+def utc_now() -> datetime:
+    """Aktualny czas UTC z informacją o strefie."""
+    return datetime.now(UTC)
+
+
+def state_path() -> Path:
+    """Ścieżka pliku stanu pollera."""
+    return Path(CACHE_DIR) / STATE_FILE
+
+
+def read_state() -> PollState | None:
+    """Wczytuje stan; None gdy pliku jeszcze nie ma."""
+    try:
+        raw = state_path().read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        data = json.loads(raw)
+        version = data["version"]
+        prs = {key: PrEntry(**item) for key, item in data["prs"].items()}
+        state = PollState(
+            data["last_full_scan"],
+            data["last_poll"],
+            prs,
+            data.get("my_uuid"),
+        )
+    except (ValueError, KeyError, TypeError, AttributeError) as err:
+        raise PollStateCorruptError(str(err)) from err
+    if version != STATE_VERSION:
+        message = f"wersja stanu {version}"
+        raise PollStateCorruptError(message)
+    return state
+
+
+def write_state(state: PollState) -> None:
+    """Zapisuje stan atomowo przez plik tymczasowy."""
+    path = state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "version": STATE_VERSION,
+        "last_full_scan": state.last_full_scan,
+        "last_poll": state.last_poll,
+        "my_uuid": state.my_uuid,
+        "prs": {key: asdict(entry) for key, entry in state.prs.items()},
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(path)
+
+
+def repos_to_scan(
+    state: PollState, now: datetime, *, full: bool
+) -> tuple[list[str], bool]:
+    """Wybiera repozytoria do skanu: pełna lista albo ostatnio zmienione."""
+    if (
+        full
+        or state.last_full_scan is None
+        or state.last_poll is None
+        or now - datetime.fromisoformat(state.last_full_scan)
+        > FULL_SCAN_INTERVAL
+    ):
+        return candidate_repos(repo_index(refresh=False), deep=False), True
+    since = (
+        (datetime.fromisoformat(state.last_poll) - INCREMENTAL_MARGIN)
+        .astimezone(UTC)
+        .isoformat()
+    )
+    query = quote(f'updated_on>"{since}"')
+    url = (
+        f"repositories/{WORKSPACE}?q={query}"
+        f"&pagelen={LISTING_PAGELEN}&fields=values.slug,next"
+    )
+    updated = {repo["slug"] for repo in pages(url)}
+    pending = {
+        key.rpartition(KEY_SEPARATOR)[0]
+        for key, entry in state.prs.items()
+        if entry.reviewed_head != entry.head and entry.failures < MAX_FAILURES
+    }
+    return sorted(updated | pending), False
+
+
+def scan_repo(repo: str) -> list[dict[str, Any]] | None:
+    """Otwarte PR-y repozytorium; None gdy nie mamy do niego dostępu."""
+    url = (
+        f"repositories/{WORKSPACE}/{repo}/pullrequests"
+        f"?q={quote(OPEN_PRS_QUERY)}&pagelen=50&fields={PR_FIELDS}"
+    )
+    try:
+        return list(pages(url))
+    except urllib.error.HTTPError as err:
+        if err.code in NO_ACCESS_CODES:
+            return None
+        raise
+
+
+def scan(repos: list[str]) -> PrsByRepo:
+    """Zbiera otwarte PR-y repozytoriów, do których mamy dostęp."""
+    result: PrsByRepo = {}
+    for repo in repos:
+        prs = scan_repo(repo)
+        if prs is not None:
+            result[repo] = prs
+    return result
+
+
+def decide(
+    entry: PrEntry | None, head: str, *, voted: bool
+) -> tuple[PrEntry, ReviewKind | None]:
+    """Aktualizuje wpis PR-a i mówi, jakiego review wymaga."""
+    if entry is None:
+        if voted:
+            return PrEntry(head, head, 0), None
+        return PrEntry(head, "", 0), ReviewKind.FIRST
+    if entry.head != head:
+        entry = replace(entry, head=head, failures=0)
+    if voted and not entry.reviewed_head:
+        return replace(entry, reviewed_head=head), None
+    if entry.reviewed_head and entry.reviewed_head != head:
+        return entry, ReviewKind.RECHECK
+    if not entry.reviewed_head:
+        return entry, ReviewKind.FIRST
+    return entry, None
+
+
+def plan_reviews(
+    state: PollState, prs_by_repo: PrsByRepo, my_uuid: str
+) -> list[Candidate]:
+    """Wybiera PR-y do review i aktualizuje wpisy oraz usuwa zamknięte."""
+    candidates: list[Candidate] = []
+    seen: set[str] = set()
+    for repo, prs in prs_by_repo.items():
+        for pr in prs:
+            key = f"{repo}{KEY_SEPARATOR}{pr['id']}"
+            seen.add(key)
+            if pr.get("draft") or pr["author"]["uuid"] == my_uuid:
+                continue
+            head = pr["source"]["commit"]["hash"]
+            entry, kind = decide(
+                state.prs.get(key),
+                head,
+                voted=my_state(pr, my_uuid) is not None,
+            )
+            state.prs[key] = entry
+            if kind is not None and entry.failures < MAX_FAILURES:
+                candidates.append(
+                    Candidate(
+                        repo,
+                        pr["id"],
+                        pr["title"],
+                        pr["links"]["html"]["href"],
+                        head,
+                        pr["updated_on"],
+                        kind,
+                    )
+                )
+    for key in list(state.prs):
+        repo = key.rpartition(KEY_SEPARATOR)[0]
+        if repo in prs_by_repo and key not in seen:
+            del state.prs[key]
+    return sorted(candidates, key=lambda c: c.updated_on)
+
+
+def build_prompt(c: Candidate) -> str:
+    """Składa polecenie dla claude -p dla jednego PR-a."""
+    intro = (
+        "/bb Tryb automatyczny (bb-poll): nikt nie odpowie na pytania. "
+        f"Tylko PR {c.repo}#{c.pr_id} ({c.url}), head {c.head}. "
+    )
+    match c.kind:
+        case ReviewKind.FIRST:
+            task = "Zrób pełne review § 2 i oddaj głos."
+        case ReviewKind.RECHECK:
+            task = (
+                "Nowy push po moim głosie: sprawdź poprawki i moje wątki "
+                "(§ 2 replies), zaktualizuj głos."
+            )
+    outro = (
+        " Nie ruszaj innych PR-ów, bez harvest. Decyzje Sebastiana wpisz do "
+        "raportu. Lokalny klon znajdź w ~/projects po remote, inaczej "
+        "sklonuj do scratchpada. Na końcu raport § 5."
+    )
+    return intro + task + outro
+
+
+def run_review(c: Candidate, runner: Runner) -> ReviewResult:
+    """Uruchamia claude -p dla PR-a; jego wyjście trafia do dziennika."""
+    work = Path(CACHE_DIR) / WORK_DIR
+    work.mkdir(parents=True, exist_ok=True)
+    argv = [
+        "claude",
+        "-p",
+        build_prompt(c),
+        "--model",
+        "opus",
+        "--effort",
+        REVIEW_EFFORT,
+        "--permission-mode",
+        "auto",
+        "--no-session-persistence",
+    ]
+    try:
+        proc = runner(
+            argv,
+            cwd=work,
+            timeout=REVIEW_TIMEOUT_S,
+            text=True,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ReviewResult.TIMEOUT
+    return ReviewResult.OK if proc.returncode == 0 else ReviewResult.FAILED
+
+
+def notify(title: str, message: str, runner: Runner) -> None:
+    """Wysyła powiadomienie; brak notify-send nie przerywa pracy."""
+    try:
+        runner(["notify-send", title, message], check=False)
+    except FileNotFoundError:
+        return
+
+
+def process_review(c: Candidate, state: PollState, runner: Runner) -> None:
+    """Robi jedno review i zapisuje jego wynik w stanie."""
+    with STATE_LOCK:
+        entry = state.prs[c.key]
+        state.prs[c.key] = replace(entry, failures=entry.failures + 1)
+        write_state(state)
+    result = run_review(c, runner)
+    with STATE_LOCK:
+        entry = state.prs[c.key]
+        match result:
+            case ReviewResult.OK:
+                entry = replace(entry, reviewed_head=c.head, failures=0)
+            case ReviewResult.TIMEOUT:
+                entry = replace(entry, failures=MAX_FAILURES)
+            case ReviewResult.FAILED:
+                pass
+        state.prs[c.key] = entry
+        write_state(state)
+    if result is ReviewResult.OK:
+        status = "gotowe"
+    elif entry.failures >= MAX_FAILURES:
+        status = "porzucone"
+    else:
+        status = "błąd"
+    notify(f"bb-poll: {c.repo}#{c.pr_id}", f"{c.title} — {status}", runner)
+
+
+def poll(args: argparse.Namespace, runner: Runner, now: Clock) -> int:
+    """Skanuje Bitbucket i robi review PR-ów czekających na mnie."""
+    try:
+        state = read_state()
+    except PollStateCorruptError as err:
+        print(
+            f"bb-poll: uszkodzony plik stanu {state_path()} ({err}); "
+            "napraw go albo usuń",
+            file=sys.stderr,
+        )
+        return 1
+    state = state or PollState(None, None, {})
+    started = now()
+    try:
+        state.my_uuid = state.my_uuid or me()["uuid"]
+        repos, full_scan = repos_to_scan(state, started, full=args.full)
+        prs_by_repo = scan(repos)
+    except (urllib.error.URLError, TimeoutError) as err:
+        print(f"bb-poll: błąd Bitbucketa: {err}", file=sys.stderr)
+        return 1
+    candidates = plan_reviews(state, prs_by_repo, state.my_uuid)
+    if args.dry_run:
+        for c in candidates:
+            print(
+                f"{c.kind} {c.repo}#{c.pr_id} "
+                f"{c.head[:SHORT_HASH_LEN]} {c.title}"
+            )
+        return 0
+    state.last_poll = started.isoformat()
+    if full_scan:
+        state.last_full_scan = started.isoformat()
+    write_state(state)
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_REVIEWS) as executor:
+        futures = [
+            executor.submit(process_review, c, state, runner)
+            for c in candidates
+        ]
+    for future in futures:
+        future.result()
+    return 0
+
+
+def main(
+    argv: list[str] | None = None,
+    runner: Runner = subprocess.run,
+    now: Clock = utc_now,
+) -> int:
+    """Punkt wejścia: jedno odpytanie Bitbucketa pod blokadą."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--full", action="store_true")
+    args = parser.parse_args(argv)
+    if os.environ.get(MODE_ENV) == PERSONAL_MODE:
+        return 0
+    Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    with (Path(CACHE_DIR) / LOCK_FILE).open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        socket.setdefaulttimeout(HTTP_TIMEOUT_S)
+        return poll(args, runner, now)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

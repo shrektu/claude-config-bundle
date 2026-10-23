@@ -19,8 +19,8 @@ A task may touch several repos (cloud-platform, kiosk, iot-platform…): check; 
 where the code lives, `Explore` before planning.
 
 Branch model, cascade, the old-epic blocker exception and no-epic branches: CLAUDE.md EPIC MODEL. Here:
-the same `task/<ID>` in every repo of the task; a missing `epik/<EPIC>` is created first
-(`git push origin origin/develop:refs/heads/epik/<EPIC>`); a task below from another epic is named in the
+the same `feature/<ID>-<desc>` in every repo of the task; a missing `epic/<EPIC>-<desc>` is created first
+(`git push origin origin/develop:refs/heads/epic/<EPIC>-<desc>`); a task below from another epic is named in the
 PR description (the child merges only after it lands).
 
 Worktrees: `__HOME__/projects/.worktrees/<repo>-<ID>` (`-m<N>` per parallel milestone,
