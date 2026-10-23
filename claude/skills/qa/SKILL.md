@@ -1,12 +1,12 @@
 ---
 name: qa
-description: Work mode only (skip where CLAUDE_MODE=personal). Hard e2e scenarios on an isolated stack with PASS/FAIL/NIEJASNE evidence, for a fully merged epik/<EPIC>, a task with no epic or an old-epic blocker fix. Load on /qa <ID> or when asked to test or click through a ticket.
+description: Work mode only (skip where CLAUDE_MODE=personal). Hard e2e scenarios on an isolated stack with PASS/FAIL/NIEJASNE evidence, for a fully merged epic/<EPIC>-<desc>, a task with no epic or an old-epic blocker fix. Load on /qa <ID> or when asked to test or click through a ticket.
 argument-hint: <EPIC-ID | JIRA-ID>
 ---
 
 Input `$ARGUMENTS`: an epic ID, a task with no epic, or an old-epic blocker fix with its PR to `develop`
 (CLAUDE.md EPIC MODEL; tested on its own task branch). No ID: ask, never guess from the branch. An epic runs only
-once all its task PRs are merged into `epik/<EPIC>`, else say so and stop; any other task of an epic:
+once all its task PRs are merged into `epic/<EPIC>-<desc>`, else say so and stop; any other task of an epic:
 point to the epic run and stop.
 
 You only test: no code fixes, no commits, never touch Sebastian's branches or checkouts. Scenarios, specs,
@@ -23,10 +23,10 @@ not specify is **NIEJASNE** with a concrete question, never settled by what the 
 ## 2. Branches
 
 Repos: `~/projects/cloud-platform` (monorepo), `~/projects/kiosk/*`, any other with its own `.git`. In each
-`git fetch --quiet origin`, then `git branch -r --list "origin/epik/<EPIC>"` (epic) or
+`git fetch --quiet origin`, then `git branch -r --list "origin/epic/<EPIC>-*"` (epic) or
 `git branch -a --list "*<ID>*"` (task). Table: repo → branch → base (`develop`).
 
-**Test a commit, not a directory.** SHA = `origin/epik/<EPIC>`; task: the local task branch if it exists,
+**Test a commit, not a directory.** SHA = `origin/epic/<EPIC>-<desc>`; task: the local task branch if it exists,
 else `origin/<branch>`. Per repo, a fresh worktree of your own:
 
 ```bash
@@ -149,7 +149,7 @@ Below the table:
 
 ## 11. As a gate (from `epic` §6 or `task` 4e)
 
-Gates the `epik/<EPIC>` → `develop` PR (otherwise the task's own PR). A FAIL goes back as a fix (epic:
+Gates the `epic/<EPIC>-<desc>` → `develop` PR (otherwise the task's own PR). A FAIL goes back as a fix (epic:
 `epic` §6 "When something fails"; task: its fix round) with regression tests per CLAUDE.md; point to the
 spec and screenshot paths, never paste them. After the fix lands rerun the FAILs and their area; before the
 final PR, a full run on the final SHAs. NIEJASNE waits for Sebastian; NIE URUCHOMIONY blocks the PR until

@@ -1,6 +1,10 @@
+import functools
 import importlib.machinery
 import importlib.util
+import inspect
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +50,8 @@ SMALL_CAP = 120
 MANY_HABITS = 6
 SEEDED_HABITS = 5
 TIMES = "\N{MULTIPLICATION SIGN}"
+EAGER_ANNOTATION_PYTHONS = ("python3.13", "python3.12")
+PROBE_TIMEOUT_SECONDS = 10
 
 
 def load_module() -> ModuleType:
@@ -623,3 +629,61 @@ def test_list_on_corrupt_store_exits_2(store: Path, tmp_path: Path):
     assert result.returncode == EXIT_USAGE
     assert result.stdout == ""
     assert store.read_bytes() == CORRUPT_CONTENT
+
+
+def test_annotations_resolve_without_type_checking_imports(
+    habits: ModuleType,
+) -> None:
+    defined = [
+        member
+        for _, member in inspect.getmembers(habits)
+        if (inspect.isfunction(member) or inspect.isclass(member))
+        and member.__module__ == MODULE_NAME
+    ]
+
+    annotations = [inspect.get_annotations(member) for member in defined]
+
+    assert defined
+    assert all(isinstance(found, dict) for found in annotations)
+
+
+def runs(python: str | None) -> bool:
+    if python is None:
+        return False
+    probe = subprocess.run(
+        [python, "-c", ""],
+        capture_output=True,
+        check=False,
+        timeout=PROBE_TIMEOUT_SECONDS,
+    )
+    return probe.returncode == EXIT_OK
+
+
+@functools.cache
+def eager_annotation_python() -> str | None:
+    candidates = map(shutil.which, EAGER_ANNOTATION_PYTHONS)
+    return next(filter(runs, candidates), None)
+
+
+@pytest.mark.skipif(
+    eager_annotation_python() is None, reason="no Python before 3.14"
+)
+def test_list_runs_on_python_with_eager_annotations(
+    store: Path, tmp_path: Path
+) -> None:
+    add(store, GLOBAL, REF_A)
+    python = eager_annotation_python()
+    assert python is not None
+
+    result = subprocess.run(
+        [python, str(SCRIPT_PATH), "list", "--all"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, ENV_STORE: str(store)},
+        cwd=tmp_path,
+        check=False,
+        timeout=PROBE_TIMEOUT_SECONDS,
+    )
+
+    assert result.returncode == EXIT_OK, result.stderr
+    assert RULE in result.stdout

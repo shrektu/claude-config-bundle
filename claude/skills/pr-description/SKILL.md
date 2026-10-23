@@ -17,9 +17,9 @@ only to describe it.
 
 `[ID-TASKA] Krótki opis zmian`: the Jira ID (from the branch name if not given; ask if it cannot be
 derived) and a short Polish description. Multi PR (related PRs for one task): `[MULTI][ID-TASKA] …`.
-Epic PR (`epik/<EPIC>` → `develop`): `[EPIC][<EPIC>] …`.
+Epic PR (`epic/<EPIC>-<desc>` → `develop`): `[EPIC][<EPIC>] …`.
 
-Right under it `Target branch: <target>` (CLAUDE.md, EPIC MODEL): `epik/<EPIC>` or the task branch below
+Right under it `Target branch: <target>` (CLAUDE.md, EPIC MODEL): `epic/<EPIC>-<desc>` or the task branch below
 it for an epic's task; `develop` for an epic PR, no-epic work or an old-epic blocker fix; `master` for a
 hotfix. Opening the PR follows `commit` (`/task` opens it ready for review); a Draft only when Sebastian
 asks for one outside `/task`.

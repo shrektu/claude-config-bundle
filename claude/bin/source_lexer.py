@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import PurePosixPath
 
-TEST_DIRS = frozenset({"tests", "test", "__tests__"})
+TEST_DIRS = frozenset({"tests", "tests_pg", "test", "__tests__"})
 TEST_NAME = re.compile(r"test_.*\.py|.*_test\.\w+|.*\.(?:test|spec)\.\w+")
 UPPER_NAME = re.compile(r"[A-Z][A-Z0-9_]*$|k[A-Z]\w*$")
 PYTHON_SUFFIX = ".py"

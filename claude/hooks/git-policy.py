@@ -34,14 +34,14 @@ CD_OPTS = {"-L", "-P", "-e", "-@", "--"}
 CASE_KEYWORD = "case"
 ESAC_KEYWORD = "esac"
 
-WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/", "test/", "task/")
-WORK_BRANCH_HINT = "feature/*, bugfix/*, hotfix/*, test/*, task/*"
-EPIK_BRANCH_PREFIX = "epik/"
-EPIK_HINT = (
-    " On `epik/*` only these are allowed: creating it from develop, "
+WORK_BRANCH_PREFIXES = ("feature/", "bugfix/", "hotfix/", "test/")
+WORK_BRANCH_HINT = "feature/*, bugfix/*, hotfix/*, test/*"
+EPIC_BRANCH_PREFIX = "epic/"
+EPIC_HINT = (
+    " On `epic/*` only these are allowed: creating it from develop, "
     "`git merge develop` (with the commit that concludes it) and "
     "`git push` without force; task code lands there only through "
-    "merged `task/*` PRs."
+    "merged `feature/*` PRs."
 )
 DEVELOP_BRANCH = "develop"
 MERGE_HEAD_FILE = "MERGE_HEAD"
@@ -840,7 +840,7 @@ def pushes_without_force(parsed: Parsed) -> bool:
     )
 
 
-def epik_allows(call: GitCall, parsed: Parsed, state: RepoState) -> bool:
+def epic_allows(call: GitCall, parsed: Parsed, state: RepoState) -> bool:
     """Tell whether the command is allowed on an epic branch."""
     if call.sub == "merge":
         return merges_only_develop(call, parsed, state)
@@ -863,15 +863,15 @@ def rebase_verdict(call: GitCall, action: str, state: RepoState) -> str | None:
     )
 
 
-def epik_verdict(
+def epic_verdict(
     call: GitCall, action: str, parsed: Parsed, state: RepoState
 ) -> str | None:
     """Return the denial for a command on an epic branch, if any."""
-    if epik_allows(call, parsed, state):
+    if epic_allows(call, parsed, state):
         return None
     return (
         f"`git {call.sub}` {action} `{state.branch}`, which is an epic "
-        f"branch, not a work branch.{EPIK_HINT}"
+        f"branch, not a work branch.{EPIC_HINT}"
     )
 
 
@@ -886,16 +886,17 @@ def branch_verdict(call: GitCall, action: str, parsed: Parsed) -> str | None:
         return (
             f"HEAD is detached in {call.opts.directory}, so "
             f"`git {call.sub}` {action} no work branch ({WORK_BRANCH_HINT}). "
-            f"Create one first: `git switch -c task/<ID>`.{HINT}"
+            "Create one first: "
+            f"`git switch -c feature/<ID>-<short-description>`.{HINT}"
         )
     if is_work_branch(state.branch):
         return None
-    if state.branch.startswith(EPIK_BRANCH_PREFIX):
-        return epik_verdict(call, action, parsed, state)
+    if state.branch.startswith(EPIC_BRANCH_PREFIX):
+        return epic_verdict(call, action, parsed, state)
     return (
         f"`git {call.sub}` {action} `{state.branch}`, which is not a work "
         f"branch ({WORK_BRANCH_HINT}). Run it on a work branch instead: "
-        f"`git switch -c task/<ID>`.{HINT}"
+        f"`git switch -c feature/<ID>-<short-description>`.{HINT}"
     )
 
 

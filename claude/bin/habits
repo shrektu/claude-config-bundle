@@ -6,6 +6,8 @@ The store is a JSON file (HABITS_FILE, default ~/.claude/lessons/habits.json).
 for the languages the repository contains and the ones scoped to its origin.
 """
 
+from __future__ import annotations
+
 import argparse
 import dataclasses
 import fcntl
