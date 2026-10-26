@@ -6,7 +6,9 @@ description: A ready-to-paste Bitbucket PR description for a finished task, plus
 Personal mode (`CLAUDE_MODE=personal`): the Bitbucket form below is work mode only. Draft the description
 via `writer` (kind `pr_description`, Polish by default, no footer) and return a title plus a body in
 GitHub Markdown for `gh pr create`. No Bitbucket upload and no screenshot-to-Bitbucket procedure; when the
-UI changes, the screenshots go into the GitHub PR as attachments Sebastian adds, or are described.
+UI changes, the screenshots go into the GitHub PR as attachments Sebastian adds, laid out in the same
+before/after thumbnail table (each cell `<a href="<attachment>"><img src="<attachment>" width="400"></a>`),
+or are described.
 
 Work mode: return title + description as one ready-to-paste Bitbucket Markdown block, no commentary except
 the target-branch line. Publish it (POST/PUT) only inside `/task`/`/epic` or when Sebastian asks; before a
@@ -64,31 +66,46 @@ The footer line is work mode only.
 
 ## Screenshots end to end
 
-A new field, a changed control state or rendered value is a UI change: look, do not assume. Before/after
-when something existing changed. You capture and attach them:
+A new field, a changed control state or rendered value is a UI change: look, do not assume. The section
+is one before/after table of small thumbnails, each a link to its full-size shot; never a full-size image
+inline. You capture and attach them:
 
-1. Capture: `setsid nohup bun run dev --port 3100 &`, then per route (newest build if the glob matches
-   several):
+1. Capture "po" (after) from the work branch: `setsid nohup bun run dev --port 3100 &`, then per route
+   (newest build if the glob matches several):
 
        ~/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell \
          --headless --disable-gpu --no-sandbox --hide-scrollbars \
          --window-size=1440,900 --virtual-time-budget=8000 \
-         --screenshot=$HOME/Downloads/<task-id>/<task-id>-<name>.png http://localhost:3100<route>
+         --screenshot=$HOME/Downloads/<task-id>/<task-id>-<name>-po.png http://localhost:3100<route>
 
    Without `--virtual-time-budget` the shot is blank (taken before React mounts). Restart the dev server
    after a bulk rename (Vite keeps the old module graph). Read every PNG back: identical file sizes mean
    routes resolved to one page; take routes from the route tree, not `paths.ts`.
-2. Upload (expect HTTP 201), then fetch each file back from `api.bitbucket.org/.../downloads/<file>` and
-   check its byte size and `file -b`; the `bitbucket.org` web URL returns 401 to app-password auth and
-   proves nothing:
+2. Capture "przed" (before) for every screen that already existed: `git worktree add --detach
+   <repo>/.worktrees/<task-id>-przed origin/<target>`, `bun install` there, its dev server on port 3101,
+   the same routes, window size and data, saved as `<task-id>-<name>-przed.png`; stop that server and
+   `git worktree remove` it afterwards. A new screen has no "przed".
+3. Thumbnail every shot (400 px wide, the full-size file stays as is):
+
+       python3 -c 'import sys; from PIL import Image; i = Image.open(sys.argv[1]); i.thumbnail((400, 10000)); i.save(sys.argv[2])' \
+         <task-id>-<name>-po.png <task-id>-<name>-po-thumb.png
+
+   Read one thumbnail back to check the change is still visible at that size; if not, add a cropped
+   full-width shot of just that region (`<name>-detail`) as its own row.
+4. Upload full-size shots and thumbnails (expect HTTP 201), then fetch each file back from
+   `api.bitbucket.org/.../downloads/<file>` and check its byte size and `file -b`; the `bitbucket.org` web
+   URL returns 401 to app-password auth and proves nothing:
 
        curl -u "$(cat ~/.config/bitbucket/credentials)" \
          -X POST "https://api.bitbucket.org/2.0/repositories/acme/<repo>/downloads" \
-         -F "files=@/path/to/<task-id>-<name>.png"
+         -F "files=@/path/to/<task-id>-<name>-po.png" -F "files=@/path/to/<task-id>-<name>-po-thumb.png"
 
-3. Embed by the web URL, each with a one-line caption of what it shows (point at the shot showing a fix):
+5. Embed by the web URL as one table, a row per screen; the first column says in one line what changed
+   (point at the row showing a fix); a cell without a shot is `—` (new screen):
 
-       ![<task-id>-<name>.png](https://bitbucket.org/acme/<repo>/downloads/<task-id>-<name>.png)
+       | Ekran | Przed | Po |
+       |---|---|---|
+       | <co się zmieniło> | [![przed](https://bitbucket.org/acme/<repo>/downloads/<task-id>-<name>-przed-thumb.png)](https://bitbucket.org/acme/<repo>/downloads/<task-id>-<name>-przed.png) | [![po](https://bitbucket.org/acme/<repo>/downloads/<task-id>-<name>-po-thumb.png)](https://bitbucket.org/acme/<repo>/downloads/<task-id>-<name>-po.png) |
 
 Screens behind the login (HttpOnly JWT cookie) cannot be captured to disk: check them in the Browser
 pane (sign-in per `task` §5) and list them in the section as missing, with why.
