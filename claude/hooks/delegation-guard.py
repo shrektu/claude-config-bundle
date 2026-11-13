@@ -26,8 +26,8 @@ CODEX_AGENT = "codex-runner"
 CODEX_OFF_REASON = (
     "Personal mode (CLAUDE_MODE=personal): Codex is off, skip the Codex slot. "
     f"`{CODEX_AGENT}` is not spawned and nothing is spawned in its place; "
-    "the final review set is `reviewer-opus` + `flash-review-runner` "
-    "(class S: `flash-review-runner` alone)."
+    "the final review set is `reviewer-opus` + `gemini-review-runner` "
+    "(class S: `gemini-review-runner` alone)."
 )
 REUSE_LINE_RE = re.compile(r"^\s*reuse\b", re.IGNORECASE | re.MULTILINE)
 FIX_ROUND_LINE_RE = re.compile(r"^\s*findings\b", re.IGNORECASE | re.MULTILINE)

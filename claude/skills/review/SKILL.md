@@ -25,7 +25,7 @@ repo): `project_path`, `diff_base` = the base branch, `review_focus`, `acceptanc
 | L | module boundaries, integration tests against the fakes, perf and typing claims, regressions in every caller |
 | XL | the risk area: migration and rollback, on-wire/protocol compatibility, concurrency and ISR paths, auth and tenancy, irreversible steps |
 
-Flash `AGY-UNAVAILABLE`: no retry, say so in the report. XS: spawn `codex-runner` (`mode: code`)
+Gemini `AGY-UNAVAILABLE`: no retry, say so in the report. XS: spawn `codex-runner` (`mode: code`)
 instead; S: Codex alone stands; M/L/XL: the other two stand. In personal mode (Codex is off) XS and S
 spawn `reviewer-opus` instead.
 
@@ -99,6 +99,6 @@ One status:
 - **Zablokowane** — blocker, evidence, exact next step or decision needed.
 
 Then: changes, tests run (verify summary lines), what you tested by hand and how, confirmed findings with
-their regression tests and finder (Codex, Opus, Flash, you), rejected ones with the reason, whether a
+their regression tests and finder (Codex, Opus, Gemini, you), rejected ones with the reason, whether a
 delta review ran and why, habits added or bumped, remaining risks. A tree change after the review
 invalidates it (a tree-preserving autosquash does not); CI counts only green on the final pushed commit.

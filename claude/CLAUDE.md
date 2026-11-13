@@ -21,11 +21,11 @@ git safety and the tooling rule bind you too.
 - Writers only draft: check every claim against the code before it goes out; labels and one-line replies
   you write yourself.
 - Reviewers (read-only, bugs only): `codex-runner` (Codex gpt-6.1-sol, medium, mode `code`),
-  `reviewer-opus` (Opus 5.5, high), `flash-review-runner` (Gemini 3.8 Flash, low); the trio = all three.
-  `plan-gate-runner` (Flash) falls back to Codex by itself. In personal mode (`CLAUDE_MODE=personal` in
+  `reviewer-opus` (Opus 5.5, high), `gemini-review-runner` (Gemini, low); the trio = all three.
+  `plan-gate-runner` (Gemini) falls back to Codex by itself. In personal mode (`CLAUDE_MODE=personal` in
   this machine's settings env; unset = work; SessionStart prints a notice) the Codex slot is skipped:
-  delegation-guard denies `codex-runner`, the trio is `reviewer-opus` + `flash-review-runner`, S is
-  `flash-review-runner` alone, and `plan-gate-runner` has no fallback.
+  delegation-guard denies `codex-runner`, the trio is `reviewer-opus` + `gemini-review-runner`, S is
+  `gemini-review-runner` alone, and `plan-gate-runner` has no fallback.
 - Argon (Gemini 4 Argon, agy-worker): PDFs/docs (`datasheet`), `agy_debug_consult` on hard bugs. Not a
   gate.
 
@@ -33,8 +33,8 @@ git safety and the tooling rule bind you too.
 
 | Class | Definition | Final review (on the diff, you adjudicate) |
 |---|---|---|
-| XS | ≤ ~5 changed lines, 1 file, no new function/abstraction, no risk area, no shared code (test preload, base class, libs/common, CI, build config) | `flash-review-runner` |
-| S | ≤ ~30 lines, ≤ 2 files, no new module/abstraction, no risk area | `codex-runner` + `flash-review-runner` |
+| XS | ≤ ~5 changed lines, 1 file, no new function/abstraction, no risk area, no shared code (test preload, base class, libs/common, CI, build config) | `gemini-review-runner` |
+| S | ≤ ~30 lines, ≤ 2 files, no new module/abstraction, no risk area | `codex-runner` + `gemini-review-runner` |
 | M | everything else | the trio |
 | L | architecture-level, several modules, hard bug, perf, tricky typing, or > ~300 lines | as M + re-read of the risky files after the fix round |
 | XL | any risk area: migration, concurrency/locking/ISR, protocol/on-wire/firmware, data shape or public API, multi-repo, auth/permissions/secrets/PII/payments, data deletion | as L, `review_focus` on the risk area, delta review whenever the fix round touches it |
@@ -125,7 +125,7 @@ The plan names the phases of its class.
   the vote only (`bb`); report it, leave the branch alone.
 - AI footer: text published for Sebastian (Bitbucket comments/replies, PR descriptions, Jira comments) is
   Polish by default in both modes; in work mode only it ends with a blank line + `🤖 Wygenerowane przez
-  <model>`, the model that wrote it (`Gemini 3.8 Flash`, `Claude Haiku 5.5`, `Claude Sonnet 5.5`,
+  <model>`, the model that wrote it (`Gemini 4 Hydrogen`, `Claude Haiku 5.5`, `Claude Sonnet 5.5`,
   `Claude Opus 5.5`); personal mode has no footer. Commit messages exempt; workflow docs English.
 - Tooling (`~/.claude/bin`, `~/.claude/hooks`; live, no git): never edit in place. Edit a git staging copy
   under `~/.cache/claude-staging`; deploy by `git merge-file` (base = the live file you copied, ours =
@@ -146,6 +146,9 @@ Context is re-read every turn; speed comes from short outputs, not compacting.
 - Progress log `~/.cache/claude-progress/<repo>/<branch>.md`, append-only: after the plan, the final
   review and each fix round (contents: `review`; decisions say who made them). Read it first after every
   `/compact`; the final report is built from it.
+- Notes vault `~/projects/notes` (Obsidian, when present): cross-repo knowledge only (architecture map,
+  environments, decisions, audits, plans); read `README.md` there first, put new standalone notes there,
+  never per-service docs (those stay in the repo's `docs/`).
 
 ## Code style
 

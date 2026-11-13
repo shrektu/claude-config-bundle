@@ -334,7 +334,7 @@ CODEX_OFF_NEEDLES = (
     "Personal mode (CLAUDE_MODE=personal)",
     "skip the Codex slot",
     "reviewer-opus",
-    "flash-review-runner",
+    "gemini-review-runner",
 )
 rc, out, err = run(codex_spawn, env=PERSONAL)
 try:
@@ -391,7 +391,7 @@ for leftover in ("off", "0", "false", "no"):
         print(f"LEFTOVER CLAUDE_CODEX FAIL {leftover!r} -> {out[:200]}")
 
 OFF = PERSONAL
-for other in ("reviewer-opus", "flash-review-runner", "writer", STRONG_AGENT):
+for other in ("reviewer-opus", "gemini-review-runner", "writer", STRONG_AGENT):
     rc, out, err = run({"subagent_type": other, "prompt": "x"}, env=OFF)
     EDGE_CHECKS += 1
     if not (rc == 0 and out == "" and not err):

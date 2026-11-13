@@ -1,6 +1,6 @@
 ---
 name: ui-texts
-description: UI texts (ui-writer) and translations (Gemini Flash via agy-worker). Load when you write or translate UI texts, labels, messages, i18n keys or locale files, also when Sebastian asks only to "translate" a new key.
+description: UI texts (ui-writer) and translations (Gemini via agy-worker). Load when you write or translate UI texts, labels, messages, i18n keys or locale files, also when Sebastian asks only to "translate" a new key.
 ---
 
 1. Find the locale files (`locales/`, `i18n/`, `*.json` with language keys) and the `i18n:check` script
@@ -12,7 +12,7 @@ description: UI texts (ui-writer) and translations (Gemini Flash via agy-worker)
 4. Keys to translate: new and changed ones from the diff or Sebastian's list. Parameters stay `{{param}}`,
    never a number. Plurals: send the target key of every CLDR category of the target language (pl: `_one`,
    `_few`, `_many`, `_other`; the list is in the `i18n:check` config, e.g. `plurals`) with the source
-   `_one`/`_other` text; describe the forms in `context` in words, never with numbers (they make Flash run
+   `_one`/`_other` text; describe the forms in `context` in words, never with numbers (they make Gemini run
    commands → `AGY-UNAVAILABLE`).
 5. Call `mcp__agy-worker__agy_translate` (`project_path`, `entries`, `source_lang`, `target_lang`,
    `glossary`, `context`) with its default model.

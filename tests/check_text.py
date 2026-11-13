@@ -91,7 +91,7 @@ REQUIRED_SKILLS = (
 RETIRED_SKILLS = ("rownolegle", "epik", "teksty-ui", "tdd", "quality-bar")
 REQUIRED_AGENTS = (
     "codex-runner",
-    "flash-review-runner",
+    "gemini-review-runner",
     "implementer",
     "plan-gate-runner",
     "reviewer-opus",
@@ -137,9 +137,9 @@ README_REVIEW_TERMS = (
 README_WORKFLOW_TERMS = (
     "CLAUDE_MODE",
     "plan-gate-runner",
-    "flash-review-runner",
+    "gemini-review-runner",
     "reviewer-opus",
-    "Gemini 3.8 Flash",
+    "Gemini",
     "evidence",
     "agy_debug_consult",
     "Argon",

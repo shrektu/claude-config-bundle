@@ -1,6 +1,6 @@
 ---
 name: ui-writer
-description: Sonnet 5.5 check of Gemini Flash drafts of customer-facing UI text (mode publish) and of UI strings against the glossary (mode terms, work mode only). Never publishes.
+description: Sonnet 5.5 check of Gemini drafts of customer-facing UI text (mode publish) and of UI strings against the glossary (mode terms, work mode only). Never publishes.
 tools: mcp__agy-worker__agy_write, Read, Grep, Glob, Bash
 model: claude-sonnet-5-5
 effort: medium

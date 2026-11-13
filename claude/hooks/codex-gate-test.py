@@ -227,11 +227,11 @@ rc, out, err = run({"tool_name": CODEX, "transcript_path": MAIN})
 reason = ""
 if out.strip():
     reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
-needles = ["gpt-6.1-sol medium", "plan-gate-runner", "Gemini Flash"]
+needles = ["gpt-6.1-sol medium", "plan-gate-runner", "Gemini first"]
 missing = [needle for needle in needles if needle not in reason]
 stale = [
     word
-    for word in ("gpt-6-astra", STRONG, "Argon", "gpt-6.1-sol high,")
+    for word in ("gpt-6-astra", STRONG, "Argon", "Flash", "gpt-6.1-sol high,")
     if word in reason
 ]
 if missing or stale:

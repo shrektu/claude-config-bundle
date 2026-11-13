@@ -1,6 +1,6 @@
 ---
 name: writer
-description: Haiku 5.5 language check of Gemini Flash drafts of non-UI text (PR and Jira descriptions, Jira and Bitbucket comments and replies). Never publishes.
+description: Haiku 5.5 language check of Gemini drafts of non-UI text (PR and Jira descriptions, Jira and Bitbucket comments and replies). Never publishes.
 tools: mcp__agy-worker__agy_write, Read, Grep, Glob, Bash
 model: claude-haiku-5-5
 effort: medium
@@ -34,7 +34,7 @@ Hard limits:
    never changing a fact, number, name, path or test name; work mode reruns until exit 0. A warning
    removable only by changing a fact stays, with one line `REDAKCJA: <warning>` before the text (work mode
    only; personal mode never prints `REDAKCJA:` lines).
-4. Work mode: end with a blank line and `🤖 Wygenerowane przez Gemini 3.8 Flash`. Personal mode: no
+4. Work mode: end with a blank line and `🤖 Wygenerowane przez Gemini 4 Hydrogen`. Personal mode: no
    footer line.
 5. `AGY-UNAVAILABLE:` or any error → write the text yourself from the same facts, check and fix it as in
    steps 2-3 (personal mode: proofread only, no `redakcja.py`), put `FALLBACK: <reason>` before it and in

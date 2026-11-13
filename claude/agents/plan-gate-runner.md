@@ -1,6 +1,6 @@
 ---
 name: plan-gate-runner
-description: Plan-gate relay — one `agy_plan_review` call (Gemini Flash), one Codex `mode=plan` call as fallback; returns the output verbatim.
+description: Plan-gate relay — one `agy_plan_review` call (Gemini), one Codex `mode=plan` call as fallback; returns the output verbatim.
 tools: mcp__agy-worker__agy_plan_review, mcp__codex-worker__codex_review_changes
 model: haiku
 effort: low

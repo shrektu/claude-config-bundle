@@ -61,8 +61,8 @@ from pydantic import BaseModel, ValidationError
 mcp = FastMCP("agy-worker")
 
 DEFAULT_ARGON_MODEL = "gemini-4-argon-high"
-DEFAULT_FLASH_MODEL = "gemini-3.8-flash-medium"
-DEFAULT_FLASH_LOW_MODEL = "gemini-3.8-flash-low"
+DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen-medium"
+DEFAULT_GEMINI_LOW_MODEL = "gemini-4-hydrogen-low"
 ARGON_MARKER = "argon"
 PLAN_TIMEOUT_SECONDS = 1800
 DATASHEET_TIMEOUT_SECONDS = 1800
@@ -176,11 +176,11 @@ def structured[ModelT: BaseModel](
 
 
 def reject_argon(tool: str, model: str) -> None:
-    """Refuse an Argon model for a tool that is Flash only."""
+    """Refuse an Argon model for a tool that never uses Argon."""
     if ARGON_MARKER in model.lower():
         fail(
             f"{tool} never uses Argon models; "
-            f"pass a Flash model instead of {model}"
+            f"pass a non-Argon Gemini model instead of {model}"
         )
 
 
@@ -417,7 +417,7 @@ def agy_plan_review(  # noqa: PLR0913
     project_path: str,
     acceptance_criteria: str = "",
     extra_context: str = "",
-    model: str = DEFAULT_FLASH_LOW_MODEL,
+    model: str = DEFAULT_GEMINI_LOW_MODEL,
 ) -> str:
     """Adversarial plan review by Gemini in a sandboxed worktree."""
     request = PlanRequest(
@@ -457,9 +457,9 @@ def agy_translate(  # noqa: PLR0913
     target_lang: str,
     glossary: str = "",
     context: str = "",
-    model: str = DEFAULT_FLASH_MODEL,
+    model: str = DEFAULT_GEMINI_MODEL,
 ) -> str:
-    """Translate UI strings with Gemini Flash and validate placeholders."""
+    """Translate UI strings with Gemini and validate placeholders."""
     request = TranslateRequest(
         project_path,
         entries,
@@ -480,9 +480,9 @@ def agy_code_review(  # noqa: PLR0913
     project_path: str,
     acceptance_criteria: str = "",
     extra_context: str = "",
-    model: str = DEFAULT_FLASH_LOW_MODEL,
+    model: str = DEFAULT_GEMINI_LOW_MODEL,
 ) -> str:
-    """Bug-only code review of a diff by Gemini Flash in a sandbox."""
+    """Bug-only code review of a diff by Gemini in a sandbox."""
     request = CodeReviewRequest(
         diff_base,
         review_focus,
@@ -502,9 +502,9 @@ def agy_write(  # noqa: PLR0913
     facts: str,
     template: str = "",
     language: str = "pl",
-    model: str = DEFAULT_FLASH_LOW_MODEL,
+    model: str = DEFAULT_GEMINI_LOW_MODEL,
 ) -> str:
-    """Write a PR, Jira, review or UI text from facts with Gemini Flash."""
+    """Write a PR, Jira, review or UI text from facts with Gemini."""
     request = WriteRequest(
         project_path, kind, facts, template, language, model
     )

@@ -9,13 +9,13 @@ from helpers_test import (
     DATASHEET_CLAIMS,
     DATASHEET_STRUCTURED,
     DATASHEET_SUCCESS_TEXT,
+    GEMINI_LOW_MODEL,
+    GEMINI_MEDIUM_MODEL,
     PLAN_SUCCESS_TEXT,
     REAL_BWRAP,
     REVIEW_BODY,
     TRANSLATE_ENTRIES,
     TRANSLATE_STRUCTURED,
-    FLASH_LOW_MODEL,
-    FLASH_MEDIUM_MODEL,
     FakeAgy,
     make_pdf,
     plan_review,
@@ -99,7 +99,7 @@ def test_plan_review_success_on_allowlisted_repo(
     assert result == PLAN_SUCCESS_TEXT
 
 
-def test_plan_review_defaults_to_flash_low(
+def test_plan_review_defaults_to_gemini_low(
     fake_agy: FakeAgy, allowlisted_repo: Path
 ) -> None:
     result = plan_review(allowlisted_repo)
@@ -107,19 +107,19 @@ def test_plan_review_defaults_to_flash_low(
     argv = fake_agy.invocation().argv
     assert result.startswith(
         "Gemini review completed "
-        f"(mode=plan, model={FLASH_LOW_MODEL}, workspace=clean)."
+        f"(mode=plan, model={GEMINI_LOW_MODEL}, workspace=clean)."
     )
-    assert argv[argv.index("--model") + 1] == FLASH_LOW_MODEL
+    assert argv[argv.index("--model") + 1] == GEMINI_LOW_MODEL
 
 
 def test_plan_review_explicit_model_overrides_default(
     fake_agy: FakeAgy, allowlisted_repo: Path
 ) -> None:
-    result = plan_review(allowlisted_repo, model=FLASH_MEDIUM_MODEL)
+    result = plan_review(allowlisted_repo, model=GEMINI_MEDIUM_MODEL)
 
     argv = fake_agy.invocation().argv
-    assert f"model={FLASH_MEDIUM_MODEL}," in result
-    assert argv[argv.index("--model") + 1] == FLASH_MEDIUM_MODEL
+    assert f"model={GEMINI_MEDIUM_MODEL}," in result
+    assert argv[argv.index("--model") + 1] == GEMINI_MEDIUM_MODEL
 
 
 def test_plan_review_not_allowlisted_does_not_spawn_agy(
@@ -148,8 +148,8 @@ def test_datasheet_check_formats_verdict_buckets_with_pages(
     assert result == DATASHEET_SUCCESS_TEXT
 
 
-@pytest.mark.usefixtures("fake_agy")
 def test_translate_success_returns_translations_json(
+    fake_agy: FakeAgy,
     allowlisted_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,13 +163,15 @@ def test_translate_success_returns_translations_json(
     )
 
     assert json.loads(result) == {
-        "model": FLASH_MEDIUM_MODEL,
+        "model": GEMINI_MEDIUM_MODEL,
         "translations": {
             "greeting": "Cześć {{name}}",
             "bye": "Do widzenia",
         },
         "problems": [],
     }
+    argv = fake_agy.invocation().argv
+    assert argv[argv.index("--model") + 1] == GEMINI_MEDIUM_MODEL
 
 
 def test_translate_refuses_argon_model_without_spawning(
