@@ -302,6 +302,12 @@ def test_flask_session_get_is_not_hab118() -> None:
         ("pkg/mod.py", "__all__ = ['a']\n", None, []),
         ("libs/pkg/__init__.py", "__all__ = ['a']\n", None, []),
         ("pkg/__init__.py", "__all__ = ['a']\n", "acme/acme-common", []),
+        (
+            "pkg/__init__.py",
+            "from .a import b\n",
+            "acme/payments-service",
+            [],
+        ),
     ],
 )
 def test_hab077_flags_init_reexports(

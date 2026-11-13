@@ -31,6 +31,7 @@ EXIT_USAGE = 2
 MAIN = "main"
 FEATURE = "feature"
 NO_TOOL = "/nonexistent/tool"
+PAYMENTS_SERVICE_URL = "git@bitbucket.org:acme/payments-service.git"
 PORTABLE_SHEBANG = "#!/usr/bin/env python3"
 TOOL_OVERRIDES = (
     "LINT_STRICT_PRETTIER",
@@ -784,6 +785,34 @@ def test_formatting_drift_on_changed_line_is_fmt(
 
     assert ("fmt.py", 4, "FMT") in violations(run)
     assert run.code == EXIT_FAIL
+
+
+def test_payments_service_skips_format_and_line_length(
+    repo: Path,
+    log_dir: Path,
+) -> None:
+    git(repo, "remote", "add", "origin", PAYMENTS_SERVICE_URL)
+    write(repo, "fmt.py", '"""Fmt."""\n\nA = 1\n')
+    commit_all(repo)
+    append(repo, "fmt.py", "B = {  'a':1 }\n")
+    append(repo, "fmt.py", f'C = "{"x" * 100}"\n')
+
+    run = lint(repo, log_dir, "--json")
+
+    assert not {"FMT", "E501"} & rules_at(run, "fmt.py")
+    assert run.code == EXIT_PASS, run.out
+
+
+def test_payments_service_skips_repeated_magic_number(
+    repo: Path,
+    log_dir: Path,
+) -> None:
+    git(repo, "remote", "add", "origin", PAYMENTS_SERVICE_URL)
+    write(repo, "a.py", REPEATED_SOURCES["a.py"])
+
+    run = lint(repo, log_dir, "--json")
+
+    assert "MAG002" not in rules_at(run, "a.py")
 
 
 def test_reformat_three_lines_below_changed_line_is_not_fmt(

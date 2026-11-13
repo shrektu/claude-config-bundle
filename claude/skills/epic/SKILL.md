@@ -82,7 +82,8 @@ epic branch. After the merge, run the whole again.
 **Final.** Run and QA green on the final SHAs → the trio on `epic/<EPIC>-<desc>` against `develop`, per repo,
 `review_focus` on where the tasks meet; then, after asking Sebastian, one PR per repo `epic/<EPIC>-<desc>` →
 `develop` (title `[EPIC][<EPIC>] …`, description per `pr-description` with the epic matrix, the QA table
-with SHAs and links to every merged task PR).
+with SHAs and links to every merged task PR). Never a PR to Kubernetes (`task` §2): the epic PR's
+`## Wdrożenie (DevOps)` merges the tasks' sections into one list in deployment order.
 
 With a blocked task, verify the epic as it stands; the report names the matrix rows left unchecked.
 

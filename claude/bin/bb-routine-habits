@@ -20,7 +20,8 @@ def habit_line(habit: dict[str, object]) -> str:
 def main() -> None:
     """Print the NAWYKI block for the Bitbucket sweep routines."""
     habits = json.loads(HABITS_FILE.read_text())["habits"]
-    ordered = sorted(habits, key=lambda habit: (-int(habit["count"]), str(habit["id"])))
+    routine_habits = [habit for habit in habits if not habit.get("skip_routine")]
+    ordered = sorted(routine_habits, key=lambda habit: (-int(habit["count"]), str(habit["id"])))
     lines = [BLOCK_START, HEADER.format(day=date.today().isoformat(), count=len(ordered))]
     lines.extend(habit_line(habit) for habit in ordered)
     lines.append(BLOCK_END)

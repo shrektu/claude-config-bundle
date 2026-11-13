@@ -252,8 +252,8 @@ def c_marker(directory):
 
 LANGUAGES = (
     Language("python", (".py",), ("tests",), ("test_*.py", "*_test.py"), python_marker),
-    Language("typescript", (".ts", ".tsx", ".js", ".jsx"), ("tests", "__tests__"),
-             ("*.test.*", "*.spec.*"), typescript_marker),
+    Language("typescript", (".ts", ".tsx", ".js", ".jsx"), ("tests", "__tests__", "e2e"),
+             ("*.test.*", "*.spec.*", "*.e2e.*"), typescript_marker),
     Language("go", (".go",), (), ("*_test.go",), go_marker),
     Language("rust", (".rs",), ("tests", "benches"), (), rust_marker),
     Language("c", (".c", ".h"), ("tests",), ("test_*.c", "*_test.c"), c_marker),
