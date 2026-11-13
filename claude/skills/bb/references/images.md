@@ -16,6 +16,14 @@
 12. https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/441269780-magic_number_przyciski.png
 13. https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/2072902637-magic_number_kapelusz.png
 14. https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/1349108499-magic_number_wykres.png
+15. https://bitbucket.org/%7B%7D/%7Bb617a868-6a12-4ab5-bde5-6a6cd837c1ee%7D/images/100012809-055a8c7ba1426236f7bc1b6ecc502244.png
+16. https://bitbucket.org/%7B%7D/%7B6d30e958-1075-4553-9479-089aea2dd826%7D/images/12890605-image.png
+17. https://bitbucket.org/%7B%7D/%7Bb617a868-6a12-4ab5-bde5-6a6cd837c1ee%7D/images/2977784209-image.png
+18. https://bitbucket.org/repo/XRpXqRq/images/1330324891-obraz.png
+19. https://bitbucket.org/repo/XRpXqRq/images/2063295624-obraz.png
+20. https://bitbucket.org/repo/XRpXqRq/images/2032023977-image.png
+21. https://bitbucket.org/%7B%7D/%7B85ad9512-edb3-4050-86f5-f7f600c68fec%7D/images/3259040981-image.png
+22. https://bitbucket.org/%7B%7D/%7B85ad9512-edb3-4050-86f5-f7f600c68fec%7D/images/893447350-image.png
 
 ## getattr / hasattr / setattr
 
@@ -31,6 +39,12 @@
 10. https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/3336167004-getattr_terminal.png
 11. https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/1054861707-getattr_sprawdzian.png
 12. (setattr) https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/349871427-setattr_znak.png
+13. https://bitbucket.org/%7B%7D/%7B85ad9512-edb3-4050-86f5-f7f600c68fec%7D/images/672002033-image.png
+14. https://bitbucket.org/%7B%7D/%7B85ad9512-edb3-4050-86f5-f7f600c68fec%7D/images/102774004-image.png
+15. https://bitbucket.org/%7B%7D/%7B40b8d3ef-4cfc-4dc8-9499-0ecdb4cada90%7D/images/3775896684-image.png
+16. https://bitbucket.org/%7B%7D/%7B274bc723-942c-46e8-944f-789e79035dca%7D/images/1888952980-image.png
+17. https://bitbucket.org/%7B%7D/%7Bb617a868-6a12-4ab5-bde5-6a6cd837c1ee%7D/images/2678562013-image.png
+18. https://bitbucket.org/%7B%7D/%7B40b8d3ef-4cfc-4dc8-9499-0ecdb4cada90%7D/images/3749283331-image.png
 
 ## commented-out code
 
@@ -44,3 +58,15 @@
 8. https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/3074647051-zakomentowany_zombie.png
 9. https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/2886674815-zakomentowany_paragon.png
 10. https://bitbucket.org/%7B%7D/%7Ba348dca3-e81e-4e65-901a-0bfa7efab43e%7D/images/4145752556-zakomentowany_roznice.png
+
+## reply without an argument
+
+1. https://bitbucket.org/%7B%7D/%7Bb617a868-6a12-4ab5-bde5-6a6cd837c1ee%7D/images/3190673418-image.png
+2. https://bitbucket.org/%7B%7D/%7B34e280b9-cea9-4eb2-9556-d46658853447%7D/images/2388055017-image.png
+3. https://bitbucket.org/%7B%7D/%7B34e280b9-cea9-4eb2-9556-d46658853447%7D/images/479642964-image.png
+4. https://bitbucket.org/%7B%7D/%7B40b8d3ef-4cfc-4dc8-9499-0ecdb4cada90%7D/images/1854323978-image.png
+5. https://bitbucket.org/%7B%7D/%7B40b8d3ef-4cfc-4dc8-9499-0ecdb4cada90%7D/images/1303264958-image.png
+6. https://bitbucket.org/%7B%7D/%7B40b8d3ef-4cfc-4dc8-9499-0ecdb4cada90%7D/images/2144646496-image.png
+7. https://bitbucket.org/%7B%7D/%7B40b8d3ef-4cfc-4dc8-9499-0ecdb4cada90%7D/images/2918512567-image.png
+8. https://bitbucket.org/%7B%7D/%7B40b8d3ef-4cfc-4dc8-9499-0ecdb4cada90%7D/images/4281511937-image.png
+9. https://bitbucket.org/%7B%7D/%7Ba53bc33c-50e7-4149-9472-6d0e0c7cbb64%7D/images/1259588874-image.png

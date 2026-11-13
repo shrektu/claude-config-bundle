@@ -16,8 +16,8 @@ from agy_workspace import (
 )
 from helpers_test import (
     ARGON_MODEL,
-    FLASH_LOW_MODEL,
-    FLASH_MEDIUM_MODEL,
+    GEMINI_LOW_MODEL,
+    GEMINI_MEDIUM_MODEL,
     IGNORED_FILE,
     NO_TOOLS_SENTENCE,
     TRACKED_FILE,
@@ -46,12 +46,12 @@ CODE_FINDINGS = (
 )
 CODE_SUCCESS_TEXT = (
     "Gemini review completed "
-    f"(mode=code, model={FLASH_LOW_MODEL}, workspace=clean).\n\n"
+    f"(mode=code, model={GEMINI_LOW_MODEL}, workspace=clean).\n\n"
     "Findings:\n" + CODE_FINDINGS
 )
 WRITTEN_TEXT = "Dodano obsługę przerwania zamiast pętli odpytującej."
 WRITE_SUCCESS_TEXT = (
-    f"Gemini text completed (model={FLASH_LOW_MODEL}, kind=pr_description, "
+    f"Gemini text completed (model={GEMINI_LOW_MODEL}, kind=pr_description, "
     "workspace=clean).\n\n" + WRITTEN_TEXT
 )
 DEBUG_FINDINGS = "H1 tracked.txt:1 — stale value — rerun with logging"
@@ -325,7 +325,7 @@ def test_code_review_success_contract(
 
     assert result == CODE_SUCCESS_TEXT
     argv = fake_agy.invocation().argv
-    assert argv[argv.index("--model") + 1] == FLASH_LOW_MODEL
+    assert argv[argv.index("--model") + 1] == GEMINI_LOW_MODEL
 
 
 def test_code_review_explicit_model_overrides_default(
@@ -336,12 +336,12 @@ def test_code_review_explicit_model_overrides_default(
     monkeypatch.setenv("AGY_FAKE_RESPONSE", CODE_FINDINGS)
 
     result = code_review(
-        edited_repo(allowlisted_repo), model=FLASH_MEDIUM_MODEL
+        edited_repo(allowlisted_repo), model=GEMINI_MEDIUM_MODEL
     )
 
-    assert f"model={FLASH_MEDIUM_MODEL}," in result
+    assert f"model={GEMINI_MEDIUM_MODEL}," in result
     argv = fake_agy.invocation().argv
-    assert argv[argv.index("--model") + 1] == FLASH_MEDIUM_MODEL
+    assert argv[argv.index("--model") + 1] == GEMINI_MEDIUM_MODEL
 
 
 def test_write_success_contract(
@@ -355,7 +355,7 @@ def test_write_success_contract(
 
     assert result == WRITE_SUCCESS_TEXT
     argv = fake_agy.invocation().argv
-    assert argv[argv.index("--model") + 1] == FLASH_LOW_MODEL
+    assert argv[argv.index("--model") + 1] == GEMINI_LOW_MODEL
 
 
 def test_write_explicit_model_overrides_default(
@@ -365,13 +365,13 @@ def test_write_explicit_model_overrides_default(
 ) -> None:
     monkeypatch.setenv("AGY_FAKE_RESPONSE", WRITTEN_TEXT)
 
-    result = write(allowlisted_repo, model=FLASH_MEDIUM_MODEL)
+    result = write(allowlisted_repo, model=GEMINI_MEDIUM_MODEL)
 
     assert result == WRITE_SUCCESS_TEXT.replace(
-        FLASH_LOW_MODEL, FLASH_MEDIUM_MODEL
+        GEMINI_LOW_MODEL, GEMINI_MEDIUM_MODEL
     )
     argv = fake_agy.invocation().argv
-    assert argv[argv.index("--model") + 1] == FLASH_MEDIUM_MODEL
+    assert argv[argv.index("--model") + 1] == GEMINI_MEDIUM_MODEL
 
 
 def test_write_review_comment_kind_reaches_agy(

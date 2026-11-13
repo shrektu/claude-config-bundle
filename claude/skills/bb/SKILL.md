@@ -188,7 +188,9 @@ reply), except when conceding: one sentence "Racja — <evidence>" first.
   the target branch), thread open, vote `request-changes`.
 - No argument against a bug or style remark ("tak ma być", "jest dobrze", "lepiej żeby została", "nie
   trzeba", "działa od lat", just an image) → thread stays open; reply ≤ 3 sentences: why it is not an
-  argument, the evidence, what you expect (a reason or a fix).
+  argument, the evidence, what you expect (a reason or a fix). The first such reply on a PR ends with
+  one image picked by `shuf` from `references/images.md` § "reply without an argument", in the Images
+  format; later ones on that PR go without.
 - A claimed fix the code does not show → one sentence where it is missing (file:line), thread open.
 
 **Tone: assertive, with a light jab.** Evidence closes a thread, not the number of rounds, and the tone

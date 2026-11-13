@@ -171,7 +171,7 @@ for a in $RETIRED_AGENTS; do
 done
 CHECKS=$((CHECKS + 1))
 AGENTS_LEFT=$(cd "$H1/.claude/agents" && ls | LC_ALL=C sort | tr '\n' ' ')
-[ "$AGENTS_LEFT" = "codex-runner.md flash-review-runner.md implementer.md plan-gate-runner.md reviewer-opus.md ui-writer.md writer.md " ] || fail "agents left after install: $AGENTS_LEFT"
+[ "$AGENTS_LEFT" = "codex-runner.md gemini-review-runner.md implementer.md plan-gate-runner.md reviewer-opus.md ui-writer.md writer.md " ] || fail "agents left after install: $AGENTS_LEFT"
 check_grep "$WORK/install1.log" "for t in tdd-guard " "install log: post-install hint runs the tdd-guard matrix"
 check_grep "$WORK/install1.log" " comment-guard " "install log: post-install hint runs the comment-guard matrix"
 check_grep "$WORK/install1.log" "test_codex_worker.py" "install log: post-install hint names the worker test"

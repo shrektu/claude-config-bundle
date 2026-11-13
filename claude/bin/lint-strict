@@ -333,6 +333,12 @@ DOCKERFILE_PYTHON_MINOR = re.compile(
 VERSION_NUMBER = re.compile(r"(\d+\.\d+(?:\.\d+)*)")
 
 FORMAT_RULE = "FMT"
+LINE_TOO_LONG_RULE = "E501"
+REPO_EXEMPT_RULES = {
+    "acme/payments-service": frozenset(
+        {FORMAT_RULE, LINE_TOO_LONG_RULE, MagicRule.REPEATED},
+    ),
+}
 FORMAT_MESSAGE = "{tool} would reformat lines {first}-{last}"
 RUFF_FORMAT_TOOL = "ruff format"
 FORMAT_COLUMN = 1
@@ -5514,11 +5520,13 @@ def build_report(
     collected = collect_targets(repo, scope)
     targets = collected.targets
     result = run_backends(repo, targets, backends)
+    exempt = REPO_EXEMPT_RULES.get(origin_slug(repo.root) or "", frozenset())
+    kept = {v for v in result.violations if v.rule not in exempt}
     return Report(
         mode=scope.mode,
         tools=tuple(dict.fromkeys(result.tools)),
         target_count=len(targets),
-        violations=tuple(sorted(set(result.violations), key=violation_order)),
+        violations=tuple(sorted(kept, key=violation_order)),
         not_checked=tuple(
             sorted(
                 result.not_checked + collected.not_checked,

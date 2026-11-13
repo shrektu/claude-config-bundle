@@ -47,16 +47,16 @@ a specialist behind a thin relay.
   tests and commits.
 - `implementer` (Claude Sonnet 5.5, effort medium): the one implementer. Edits files, runs tests through
   `verify`, fixes its own failures. It makes no architecture decisions and has no iteration limit.
-- Plan gate: `plan-gate-runner` relays the plan to Gemini 3.8 Flash (`agy_plan_review`); when Gemini is
+- Plan gate: `plan-gate-runner` relays the plan to Gemini (`agy_plan_review`); when Gemini is
   unavailable it falls back to Codex (`codex-runner`, gpt-6.1-sol, reasoning effort high), with no
   fallback in personal mode (`CLAUDE_MODE=personal`). Findings are input
   to the orchestrator's adjudication, never orders.
 - Final review (the trio): `codex-runner` (gpt-6.1-sol, effort medium, bugs only), `reviewer-opus` (Claude
-  Opus 5.5, read-only) and `flash-review-runner` (Gemini 3.8 Flash, low) review the diff in parallel
+  Opus 5.5, read-only) and `gemini-review-runner` (Gemini, low) review the diff in parallel
   once per milestone (once per task with one milestone). After adjudication the milestone is committed and
   the fix round lands as a `--fixup` commit, verified by its tests and by reading the fix diff. A delta trio
   runs only for fixes over about 100 lines or in a risk area. The fixups are autosquashed before the report.
-- `writer` (Claude Haiku 5.5): Gemini Flash drafts every text the customer never sees (PR descriptions,
+- `writer` (Claude Haiku 5.5): Gemini drafts every text the customer never sees (PR descriptions,
   Jira comments, Bitbucket review comments and replies) and Haiku checks it; `ui-writer` (Claude Sonnet
   5.5) does the same for UI text shown on the frontend, with no footer. Everything published on
   Sebastian's behalf ends with the footer `🤖 Wygenerowane przez <model>`.
@@ -95,7 +95,7 @@ from local transcripts) and `bb-sweep`.
 ## agy-worker (Argon)
 
 `claude/mcp/agy-worker/` is an MCP server that drives the Antigravity CLI (`agy`) for the plan gate, the
-Flash code review, the writer, datasheet PDFs and `agy_debug_consult`. Every call runs `agy` inside a
+Gemini code review, the writer, datasheet PDFs and `agy_debug_consult`. Every call runs `agy` inside a
 bubblewrap sandbox (`/usr/bin/bwrap`, with `/usr/bin/xdg-dbus-proxy` for the session bus) on a throwaway
 workspace, so the model can read what it is handed and nothing else. `allowed-remotes.txt` is the allowlist of
 git remotes (one glob per line, for example `github.com/*`) the sandboxed run may fetch; install.sh installs
@@ -136,8 +136,8 @@ One per-machine setting picks the mode: `"CLAUDE_MODE": "personal"` in the `env`
 Personal mode turns off:
 
 - Codex: delegation-guard denies every `codex-runner` spawn and codex-gate denies every Codex call (relay
-  agents included), so the final review runs as `reviewer-opus` + `flash-review-runner` (class S: Flash
-  alone; Flash unavailable: `reviewer-opus`) and the plan gate has no Codex fallback.
+  agents included), so the final review runs as `reviewer-opus` + `gemini-review-runner` (class S: Gemini
+  alone; Gemini unavailable: `reviewer-opus`) and the plan gate has no Codex fallback.
 - The company language checks: `redakcja.py`, the style guide, the glossary and the `terms` mode;
   `writer` and `ui-writer` proofread themselves, and `agy_write` sends no company style guide.
 - The AI footer on published text, and the epic-branch handling (`repo-facts` no longer reports an

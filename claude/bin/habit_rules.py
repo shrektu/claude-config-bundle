@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 CLOUD_REPO = "acme/cloud-platform"
 DEVICE_REPO = "acme/device-service"
+PAYMENTS_REPO = "acme/payments-service"
+REEXPORT_REPOS = frozenset({PAYMENTS_REPO})
 COMMON_SLUG_PART = "common"
 MAX_FILE_LINES = 1000
 NEWLINE = "\n"
@@ -514,8 +516,11 @@ def database_access_hits(source: PythonSource) -> Iterator[HabitHit]:
 
 def is_reexport_exempt(context: HabitContext) -> bool:
     """Tell whether re-exports are the norm for the file's location."""
-    return LIBS_DIR in path_directories(context.path) or COMMON_SLUG_PART in (
-        context.repo_slug or ""
+    slug = context.repo_slug or ""
+    return (
+        LIBS_DIR in path_directories(context.path)
+        or COMMON_SLUG_PART in slug
+        or slug in REEXPORT_REPOS
     )
 
 

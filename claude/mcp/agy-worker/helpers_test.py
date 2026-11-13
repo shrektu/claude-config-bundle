@@ -25,8 +25,8 @@ MAX_AUTH_SECONDS = 10
 EXECUTABLE_MODE = 0o755
 TRACKED_FILE = "tracked.txt"
 IGNORED_FILE = "ignored.log"
-FLASH_LOW_MODEL = "gemini-3.8-flash-low"
-FLASH_MEDIUM_MODEL = "gemini-3.8-flash-medium"
+GEMINI_LOW_MODEL = "gemini-4-hydrogen-low"
+GEMINI_MEDIUM_MODEL = "gemini-4-hydrogen-medium"
 ORIGIN_URL = "https://github.com/acme/widgets.git"
 FOREIGN_URL = "https://gitlab.com/acme/widgets.git"
 GIT_IDENTITY = [
@@ -42,7 +42,7 @@ REVIEW_FOCUS = "ordering and rollback"
 REVIEW_BODY = "IMPORTANT\n- step 3 breaks the rollback\nPASS"
 PLAN_SUCCESS_TEXT = (
     "Gemini review completed "
-    f"(mode=plan, model={FLASH_LOW_MODEL}, workspace=clean).\n\n"
+    f"(mode=plan, model={GEMINI_LOW_MODEL}, workspace=clean).\n\n"
     "Findings:\n" + REVIEW_BODY
 )
 DATASHEET_CLAIMS = [
@@ -273,7 +273,7 @@ if mode == "auth":
     sys.stderr.flush()
     time.sleep(HANG_SECONDS)
 elif arguments[:1] == ["models"]:
-    print("gemini-4-argon-low\\ngemini-3.8-flash-medium")
+    print("gemini-4-argon-low\\ngemini-4-hydrogen-medium")
 elif mode == "empty":
     sys.stderr.write(
         'jetski: no output produced - a tool required the "command" '

@@ -424,6 +424,112 @@ UNIT
 check "verify-runner-not-command-word: unit, runner is the command word or a launcher target" \
   "$(ledger_script "$TMP/unit-runner-word.py" 2>&1)" "36 36"
 
+for LAUNCHER in poetry pdm hatch yarn; do
+  cp "$STUBS/failing-runner" "$STUBS/$LAUNCHER"
+done
+check "verify-launcher-option-value: reported uv run --package shape is red" \
+  "$(outcome_of "cd $PLAIN && $STUBS/uv run --frozen --package cloud-platform-devices pytest tests -q")" red
+check "verify-launcher-option-value: uv run --package= stays red" \
+  "$(outcome_of "$STUBS/uv run --frozen --package=cloud-platform-devices pytest tests -q")" red
+check "verify-launcher-option-value: uv global --directory is red" \
+  "$(outcome_of "$STUBS/uv --directory services/devices run pytest")" red
+check "verify-launcher-option-value: uvx --from is red" \
+  "$(outcome_of "$STUBS/uvx --from pytest==8.3 pytest")" red
+check "verify-launcher-option-value: poetry -C is red" \
+  "$(outcome_of "$STUBS/poetry -C svc run pytest")" red
+check "verify-launcher-option-value: pdm run --venv is red" \
+  "$(outcome_of "$STUBS/pdm run --venv test pytest")" red
+check "verify-launcher-option-value: hatch -e is red" \
+  "$(outcome_of "$STUBS/hatch -e test run pytest")" red
+check "verify-launcher-option-value: pnpm --filter exec is red" \
+  "$(outcome_of "$STUBS/pnpm --filter web exec vitest")" red
+check "verify-launcher-option-value: yarn dlx -p is red" \
+  "$(outcome_of "$STUBS/yarn dlx -p vitest@2 vitest")" red
+check "verify-launcher-option-value: npx --package is red" \
+  "$(outcome_of "$STUBS/npx --package vitest@2 vitest")" red
+check "verify-launcher-option-value: bunx -p is red" \
+  "$(outcome_of "$STUBS/bunx -p vitest@2 vitest")" red
+check "verify-launcher-option-value: value named like a runner stays error" \
+  "$(outcome_of "$STUBS/uv run --with pytest ruff check")" error
+check "verify-launcher-option-value: uv run -w is red" \
+  "$(outcome_of "$STUBS/uv run -w httpx pytest")" red
+check "verify-launcher-option-value: short value named like a runner stays error" \
+  "$(outcome_of "$STUBS/uv run -w pytest ruff check")" error
+
+cat > "$TMP/unit-launcher-option.py" <<'UNIT'
+CASES = (
+    ("cd services/devices && uv run --frozen --package cloud-platform-devices pytest tests -q", True),
+    ("uv run --package=cloud-platform-devices pytest", True),
+    ("uv run --with httpx pytest", True),
+    ("uv run --with-editable ../common pytest", True),
+    ("uv run --with-requirements req.txt pytest", True),
+    ("uv run --python 3.13 pytest", True),
+    ("uv run -p 3.13 pytest", True),
+    ("uv run --directory services/devices pytest", True),
+    ("uv run --project services/devices pytest", True),
+    ("uv run --extra dev --group test --env-file .env pytest", True),
+    ("uv run --index-url https://pypi.org/simple -i x pytest", True),
+    ("uv --directory services/devices run pytest", True),
+    ("uv --project svc --cache-dir /tmp/c run --frozen pytest", True),
+    ("uv run -- pytest -q", True),
+    ("uv run --package pytest ruff check", False),
+    ("uv run --with pytest ruff check", False),
+    ("uv --directory pytest run ruff check", False),
+    ("uvx --from pytest==8.3 pytest", True),
+    ("uvx --from=pytest==8.3 pytest", True),
+    ("uvx --with pytest-xdist pytest", True),
+    ("uvx --python 3.13 pytest", True),
+    ("uvx -p 3.13 pytest", True),
+    ("uvx --with pytest ruff", False),
+    ("poetry -C svc run pytest", True),
+    ("poetry --directory svc run pytest", True),
+    ("poetry -P svc run pytest", True),
+    ("poetry run --project svc pytest", True),
+    ("poetry --directory=svc run pytest", True),
+    ("pdm -p svc run pytest", True),
+    ("pdm run --venv test pytest", True),
+    ("pdm run --project svc pytest", True),
+    ("pdm run --skip pre_test pytest", True),
+    ("hatch -e test run pytest", True),
+    ("hatch --env test run pytest", True),
+    ("hatch --project svc run pytest", True),
+    ("hatch --data-dir d --cache-dir c run pytest", True),
+    ("hatch --env=test run pytest", True),
+    ("pnpm --filter web exec vitest", True),
+    ("pnpm -F web exec vitest", True),
+    ("pnpm --dir web exec vitest", True),
+    ("pnpm -C web exec vitest", True),
+    ("pnpm exec --resume-from web vitest", True),
+    ("pnpm dlx --package vitest@2 vitest", True),
+    ("pnpm --filter=web exec vitest", True),
+    ("yarn dlx -p vitest@2 vitest", True),
+    ("yarn dlx --package vitest@2 vitest", True),
+    ("npx --package vitest@2 vitest", True),
+    ("npx -p vitest@2 vitest", True),
+    ("npx -w web vitest", True),
+    ("npx --workspace web vitest", True),
+    ("npx --package=vitest@2 vitest", True),
+    ("bunx --package vitest@2 vitest", True),
+    ("bunx -p vitest@2 vitest", True),
+    ("bunx -p vitest ruff", False),
+    ("uv run -w httpx pytest", True),
+    ("uv run -w pytest ruff check", False),
+    ("uv run --no-sources-package httpx pytest", True),
+    ("uv run --no-sources-package pytest ruff check", False),
+    ("uvx -b constraints.txt pytest", True),
+    ("uvx --torch-backend cpu pytest", True),
+    ("pnpm --store-dir s --registry r --reporter silent --loglevel warn exec vitest", True),
+    ("pnpm --filter-prod web --workspace-concurrency 2 exec vitest", True),
+    ("pnpm dlx --allow-build esbuild --cpu x64 --os linux --libc glibc vitest", True),
+    ("npx -c 'vitest run' pytest", True),
+    ("npx --call 'vitest run' pytest", True),
+)
+failed = [command for command, want in CASES if names_known_runner(command) != want]
+print(len(CASES) - len(failed), len(CASES), *failed, sep="\n")
+UNIT
+check "verify-launcher-option-value: unit, option values are skipped" \
+  "$(ledger_script "$TMP/unit-launcher-option.py" 2>&1 | head -2 | paste -sd' ')" "65 65"
+
 cat > "$TMP/unit-comments.py" <<'UNIT'
 CASES = (
     ('printf "x"; exit 1;# pytest', 'printf "x"; exit 1;'),

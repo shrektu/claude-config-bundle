@@ -37,7 +37,8 @@
     "skills/qa/references/scenariusze.md",
     "bin/ai-review-gate",
     "bin/test_ai_review_gate.py",
-    "bin/review-checkpoint"
+    "bin/review-checkpoint",
+    "agents/flash-review-runner.md"
   ],
   "settings": {
     "env": [
@@ -52,7 +53,8 @@
       "Agent(implementer-opus)",
       "Agent(commander-opus)",
       "Agent(implementer-strong)",
-      "Write(/__HOME__/.claude/hooks/**)"
+      "Write(/__HOME__/.claude/hooks/**)",
+      "Agent(flash-review-runner)"
     ]
   }
 }

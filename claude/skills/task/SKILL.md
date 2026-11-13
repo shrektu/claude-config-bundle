@@ -18,6 +18,10 @@ expected results, the repos, UI or not, data/protocol/migration (→ XL).
 A task may touch several repos (cloud-platform, kiosk, iot-platform…): check; when the ticket does not show
 where the code lives, `Explore` before planning.
 
+Kubernetes is DevOps' repo, never a task repo: no branch, commit or PR there (manifests, Helm, values,
+secrets, ingress), even when the change needs it. What the cluster needs goes into the PR description's
+`## Wdrożenie (DevOps)` (`pr-description`).
+
 Branch model, cascade, the old-epic blocker exception and no-epic branches: CLAUDE.md EPIC MODEL. Here:
 the same `feature/<ID>-<desc>` in every repo of the task; a missing `epic/<EPIC>-<desc>` is created first
 (`git push origin origin/develop:refs/heads/epic/<EPIC>-<desc>`); a task below from another epic is named in the
@@ -99,7 +103,8 @@ curl -s -u "$(cat ~/.config/bitbucket/credentials)" -X POST \
 Ready for review, not draft. Title and description per `pr-description` (`writer`, `publish` mode).
 Several repos: `[MULTI][ID] …`, then a second `PUT` adds the mutual `## Powiązane PR` links and resends
 the `title`. The base PR of a stack before the one on it; a required deployment order (e.g. `common`
-before consumers) goes in `## Dodatkowy kontekst`. Jira status and comments stay Sebastian's unless he
+before consumers) goes in `## Dodatkowy kontekst`. No PR to Kubernetes (§2): a change needing
+anything on the cluster carries `## Wdrożenie (DevOps)`. Jira status and comments stay Sebastian's unless he
 asks.
 
 ## 7. Report

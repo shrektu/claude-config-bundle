@@ -9,8 +9,8 @@ hook = sys.argv[1] if len(sys.argv) > 1 else str(HERE / "mode-notice.py")
 SWITCH_VARS = ("CLAUDE_MODE", "CLAUDE_CODEX", "CLAUDE_CODEX_GATE")
 NOTICE = (
     "mode: personal (CLAUDE_MODE=personal) - Codex off: final review = "
-    "reviewer-opus + flash-review-runner (S: flash-review-runner alone; "
-    "Flash unavailable -> reviewer-opus), plan gate without Codex fallback; "
+    "reviewer-opus + gemini-review-runner (S: gemini-review-runner alone; "
+    "Gemini unavailable -> reviewer-opus), plan gate without Codex fallback; "
     "no redakcja, company style guide, glossary or `terms` checks "
     "(writer and ui-writer proofread themselves); "
     "no AI footer on published text.\n"

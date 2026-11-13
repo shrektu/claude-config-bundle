@@ -68,6 +68,34 @@ TEST_SCRIPT = "test"
 DIRECT_LAUNCHERS = frozenset({"uvx", "npx", "bunx"})
 LAUNCHER_PAIRS = frozenset({("uv", "run"), ("poetry", "run"), ("pdm", "run"), ("hatch", "run"),
                             ("pnpm", "exec"), ("pnpm", "dlx"), ("yarn", "dlx")})
+UV_VALUE_OPTS = frozenset({
+    "-w", "--with", "--with-editable", "--with-requirements", "--from", "-p", "--python", "--directory",
+    "--project", "--package", "--extra", "--no-extra", "--group", "--no-group", "--only-group",
+    "--env-file", "-i", "--index", "--index-url", "--default-index", "--extra-index-url", "-f",
+    "--find-links", "--index-strategy", "--keyring-provider", "--resolution", "--prerelease",
+    "--fork-strategy", "--exclude-newer", "--exclude-newer-package", "--link-mode", "-C",
+    "--config-setting", "--config-settings-package", "--no-build-isolation-package", "-P",
+    "--upgrade-package", "--reinstall-package", "--no-binary-package", "--no-build-package",
+    "--refresh-package", "--cache-dir", "--config-file", "--color", "--python-preference",
+    "--python-platform", "--allow-insecure-host", "-c", "--constraints", "--overrides", "-b",
+    "--build-constraints", "--no-sources-package", "--torch-backend"})
+LAUNCHER_VALUE_OPTS = {
+    "uv": UV_VALUE_OPTS,
+    "uvx": UV_VALUE_OPTS,
+    "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
+    "pdm": frozenset({"-p", "--project", "--venv", "--skip"}),
+    "hatch": frozenset({"-e", "--env", "-p", "--project", "--data-dir", "--cache-dir"}),
+    "pnpm": frozenset({
+        "-C", "--dir", "-F", "--filter", "--filter-prod", "--resume-from", "--package",
+        "--allow-build", "--cpu", "--os", "--libc", "--store-dir", "--state-dir",
+        "--npmrc-auth-file", "--workspace-packages", "--registry", "--https-proxy", "--http-proxy",
+        "--no-proxy", "--reporter", "--loglevel", "--test-pattern",
+        "--changed-files-ignore-pattern", "--workspace-concurrency"}),
+    "yarn": frozenset({"-p", "--package"}),
+    "npx": frozenset({"-p", "--package", "-w", "--workspace", "-c", "--call"}),
+    "bunx": frozenset({"-p", "--package"}),
+}
+END_OF_OPTIONS = "--"
 MODULE_LAUNCHER = re.compile(r"^python[0-9.]*$")
 MODULE_FLAG = "-m"
 ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -239,16 +267,30 @@ def strip_prefix(tokens):
     return tokens[index:]
 
 
-def launcher_target(head, tokens, following):
-    if head in DIRECT_LAUNCHERS:
-        return following[0] if following else ""
-    if following and (head, following[0]) in LAUNCHER_PAIRS:
-        return following[1] if len(following) > 1 else ""
+def skip_options(tokens, index, value_opts):
+    """Index of the first operand from index on, past options and their values."""
+    while index < len(tokens) and tokens[index].startswith(OPTION_PREFIXES):
+        option = tokens[index]
+        index += 1
+        if option == END_OF_OPTIONS:
+            break
+        if option in value_opts:
+            index += 1
+    return index
+
+
+def launcher_target(head, tokens):
+    """The command word a known launcher starts, or an empty string."""
     if MODULE_LAUNCHER.match(head) and MODULE_FLAG in tokens:
-        index = tokens.index(MODULE_FLAG)
-        if index + 1 < len(tokens):
-            return os.path.basename(tokens[index + 1])
-    return ""
+        index = tokens.index(MODULE_FLAG) + 1
+        return os.path.basename(tokens[index]) if index < len(tokens) else ""
+    value_opts = LAUNCHER_VALUE_OPTS.get(head, frozenset())
+    index = skip_options(tokens, 1, value_opts)
+    if head not in DIRECT_LAUNCHERS:
+        if index >= len(tokens) or (head, tokens[index]) not in LAUNCHER_PAIRS:
+            return ""
+        index = skip_options(tokens, index + 1, value_opts)
+    return os.path.basename(tokens[index]) if index < len(tokens) else ""
 
 
 def names_known_runner(cmd):
@@ -266,7 +308,7 @@ def names_known_runner(cmd):
             return True
         if head in PACKAGE_MANAGERS and following[:2] == [RUN_SUBCOMMAND, TEST_SCRIPT]:
             return True
-        if launcher_target(head, tokens, following) in SINGLE_RUNNERS:
+        if launcher_target(head, tokens) in SINGLE_RUNNERS:
             return True
     return False
 

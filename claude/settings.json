@@ -9,7 +9,7 @@
       "Agent(codex-runner)",
       "Agent(implementer)",
       "Agent(reviewer-opus)",
-      "Agent(flash-review-runner)",
+      "Agent(gemini-review-runner)",
       "Agent(writer)",
       "Agent(ui-writer)",
       "Agent(plan-gate-runner)",

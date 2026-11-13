@@ -9,7 +9,7 @@ import pytest
 from agy_errors import AgyUnavailableError
 from agy_runner import AgyJob, AgyRun
 from helpers_test import (
-    FLASH_LOW_MODEL,
+    GEMINI_LOW_MODEL,
     MAX_AUTH_SECONDS,
     WHAT_CHANGED,
     FakeAgy,
@@ -150,7 +150,7 @@ def test_plan_review_findings_use_repo_relative_paths(
 
     assert result == (
         "Gemini review completed "
-        f"(mode=plan, model={FLASH_LOW_MODEL}, workspace=clean).\n\n"
+        f"(mode=plan, model={GEMINI_LOW_MODEL}, workspace=clean).\n\n"
         "Findings:\nsee ratelimit.py#L14 and auth.py:3"
     )
     assert list(fake_agy.work_dir.iterdir()) == []
@@ -249,7 +249,7 @@ def test_agy_models_not_logged_in_unavailable(
 def test_agy_models_lists_models(fake_agy: FakeAgy) -> None:
     result = agy_worker.agy_models()
 
-    assert result == "gemini-4-argon-low\ngemini-3.8-flash-medium"
+    assert result == "gemini-4-argon-low\ngemini-4-hydrogen-medium"
     assert fake_agy.invocation().argv == ["models"]
 
 
@@ -278,7 +278,7 @@ def test_quota_error_reports_quota(
     result = plan_review(allowlisted_repo)
 
     assert result.startswith("AGY-UNAVAILABLE: ")
-    assert "quota of model gemini-3.8-flash-low looks exhausted" in result
+    assert "quota of model gemini-4-hydrogen-low looks exhausted" in result
     assert fake_agy.ran()
 
 
@@ -500,7 +500,7 @@ def test_agy_receives_json_sandbox_arguments_inside_bwrap(
         "--output-format",
         "json",
         "--model",
-        FLASH_LOW_MODEL,
+        GEMINI_LOW_MODEL,
         "--sandbox",
         "--dangerously-skip-permissions",
         "--print-timeout",

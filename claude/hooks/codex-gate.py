@@ -19,7 +19,7 @@ PERSONAL_MODE = "personal"
 
 REASON = (
     "Codex reviews run through the `codex-runner` agent (code gate) or the "
-    "`plan-gate-runner` agent (plan gate: Gemini Flash first, Codex as "
+    "`plan-gate-runner` agent (plan gate: Gemini first, Codex as "
     "fallback). Never a direct tool call: a direct call blocks "
     "you for 120s before the MCP tool moves itself to the background, "
     "and that time is lost every round.\n"
